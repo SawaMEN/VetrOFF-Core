@@ -3,7 +3,7 @@
 - [x] Pin original Hiddify Core and both Git submodules at matching revisions.
 - [x] Implement fail-closed 3-module patch application.
 - [x] Apply initial separate patches to all three projects.
-- [x] Add GitHub Actions matrix, build artifacts, tagged releases, and weekly upstream comparison.
+- [x] Add GitHub Actions matrix, build artifacts, tagged releases, weekly upstream comparison, and VetroffProxy integration tests.
 - [ ] Confirm first successful complete GitHub Actions matrix; fix platform-specific upstream issues if any.
 - [x] Add native VetroffProxy SDK outbound, option schema, registration and test patches to sing-box; pending CI validation.
 - [x] Add VetroffProxy link conversion, redacted errors and regression tests to ray2sing; pending CI validation.
