@@ -1,0 +1,7 @@
+# Official upstream pin set from hiddify-core 4e5a9a357003d0a995360586702fd24c53042e3f
+CORE_URL=https://github.com/hiddify/hiddify-core.git
+CORE_SHA=4e5a9a357003d0a995360586702fd24c53042e3f
+SING_URL=https://github.com/hiddify/hiddify-sing-box.git
+SING_SHA=a26e58b376987a3305b201ec87fbc8918f620ad3
+RAY_URL=https://github.com/hiddify/ray2sing.git
+RAY_SHA=79ec56331af15a67bfaf7de1f4ed5fc64cbb4f5e

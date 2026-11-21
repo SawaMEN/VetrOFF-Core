@@ -1,0 +1,10 @@
+diff --git a/constant/vetroff_core.go b/constant/vetroff_core.go
+new file mode 100644
+--- /dev/null
++++ b/constant/vetroff_core.go
+@@ -0,0 +1,5 @@
++package constant
++
++// VetroffCoreFlavor marks an official sing-box source patched for VetrOFF Core.
++// The top-level CLI references it, proving this submodule was actually patched.
++const VetroffCoreFlavor = "sing-box/vetroff-patch-v1"
