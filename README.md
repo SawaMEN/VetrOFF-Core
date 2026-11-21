@@ -10,7 +10,7 @@ The three original projects appear at the root as Git submodules. Each submodule
 | [`hiddify-sing-box`](hiddify-sing-box) | [`patches/hiddify-sing-box`](patches/hiddify-sing-box/) | `45814844d5b80af5b43ac5c17d45c0ed3a42bcd0` |
 | [`ray2sing`](ray2sing) | [`patches/ray2sing`](patches/ray2sing/) | `7aac8dcf42b6284cf6993c992db8dcf259a4b98f` |
 
-The two dependency commits match the original Core gitlinks. The build reads all three pins from the VetrOFF-Core Git checkout, stages the upstream sources in `.build/`, and checks each patched Git tree against its `expected-tree` file. The audited trees preserve the forks' tracked runtime sources, tests, build definitions and dependency changes. The original workflows and contributor instructions are retained, and Core keeps the original submodule definitions and pointers. The fork's checked-in Core archive is omitted and the VetrOFF CLI version patch is applied.
+The stable sing-box commit matches the original Core gitlink. The stable ray2sing submodule uses the current original commit because its patch recreates the same audited source tree. The build reads all three pins from the VetrOFF-Core Git checkout, stages the upstream sources in `.build/`, and checks each patched Git tree against its `expected-tree` file. The audited trees preserve the forks' tracked runtime sources, tests, build definitions and dependency changes. The original workflows and contributor instructions are retained, and Core keeps the original submodule definitions and pointers. The fork's checked-in Core archive is omitted and the VetrOFF CLI version patch is applied.
 
 ## Builds
 

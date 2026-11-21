@@ -33,10 +33,14 @@ gitlink() {
 }
 
 sing=$(gitlink hiddify-sing-box)
-ray=$(gitlink ray2sing)
-if [[ "${VETROFF_SOURCE_MODE:-locked}" == locked && ( "$sing" != "$SING_SHA" || "$ray" != "$RAY_SHA" ) ]]; then
-  echo 'The sing-box and ray2sing submodules must match the original Core gitlinks' >&2
-  exit 1
+if [[ "${VETROFF_SOURCE_MODE:-locked}" == locked ]]; then
+  if [[ "$sing" != "$SING_SHA" ]]; then
+    echo 'The sing-box submodule must match the original Core gitlink' >&2
+    exit 1
+  fi
+  ray=$RAY_SHA
+else
+  ray=$(gitlink ray2sing)
 fi
 
 apply_series() {
