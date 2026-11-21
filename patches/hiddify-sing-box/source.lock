@@ -1,5 +1,0 @@
-# Original checkout and expected Git tree after applying the series.
-SING_URL=https://github.com/hiddify/hiddify-sing-box.git
-SING_SHA=004371d6be2395ee4379054a8cf113f339dbe231
-SING_TREE=434ec683a3823232d340577e57765b54bfcebf08
-# Fork revision used for the source audit: 45814844d5b80af5b43ac5c17d45c0ed3a42bcd0

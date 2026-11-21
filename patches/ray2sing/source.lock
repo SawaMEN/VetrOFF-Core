@@ -1,5 +1,0 @@
-# Original checkout and expected Git tree after applying the series.
-RAY_URL=https://github.com/hiddify/ray2sing.git
-RAY_SHA=cddb962a5a9d02f4136353e76347e7d909b12e65
-RAY_TREE=5f2d46d17989ede8766b88217499d33543e562cb
-# Fork revision used for the source audit: 7aac8dcf42b6284cf6993c992db8dcf259a4b98f

@@ -1,0 +1,9 @@
+[submodule "hiddify-core"]
+	path = hiddify-core
+	url = https://github.com/hiddify/hiddify-core.git
+[submodule "hiddify-sing-box"]
+	path = hiddify-sing-box
+	url = https://github.com/hiddify/hiddify-sing-box.git
+[submodule "ray2sing"]
+	path = ray2sing
+	url = https://github.com/hiddify/ray2sing.git
