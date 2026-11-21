@@ -1,7 +1,0 @@
-# Original Hiddify Core 5.4.0 and its matching gitlinks.
-CORE_URL=https://github.com/hiddify/hiddify-core.git
-CORE_SHA=b097daadd89d2b62e30c0f4353f55a973118514c
-SING_URL=https://github.com/hiddify/hiddify-sing-box.git
-SING_SHA=004371d6be2395ee4379054a8cf113f339dbe231
-RAY_URL=https://github.com/hiddify/ray2sing.git
-RAY_SHA=cddb962a5a9d02f4136353e76347e7d909b12e65

@@ -32,6 +32,7 @@ Version: $version
 Hiddify Core: $CORE_URL @ $CORE_SHA
 Hiddify sing-box: $SING_URL @ $SING_SHA
 ray2sing: $RAY_URL @ $RAY_SHA
+Patched trees: core=$CORE_TREE sing-box=$SING_TREE ray2sing=$RAY_TREE
 Build: $GOOS/$GOARCH CGO_ENABLED=$CGO_ENABLED
 Cronet/Naive: disabled for standalone CLI
 PROVENANCE
