@@ -3,8 +3,12 @@ set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$ROOT/.build/hiddify-core"
 DIST="$ROOT/dist"
-# shellcheck source=../sources.lock
-source "$ROOT/sources.lock"
+# shellcheck source=../patches/hiddify-core/source.lock
+source "$ROOT/patches/hiddify-core/source.lock"
+# shellcheck source=../patches/hiddify-sing-box/source.lock
+source "$ROOT/patches/hiddify-sing-box/source.lock"
+# shellcheck source=../patches/ray2sing/source.lock
+source "$ROOT/patches/ray2sing/source.lock"
 
 need() {
   command -v "$1" >/dev/null || { echo "Missing tool: $1" >&2; exit 1; }

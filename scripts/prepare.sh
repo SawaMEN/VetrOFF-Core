@@ -58,17 +58,33 @@ apply_series() {
   done < "$ROOT/patches/$name/series"
 }
 
+verify_patched_tree() {
+  local path=$1 source=$2 pinned_source=$3 expected_tree=$4 tree
+  tree=$(git -C "$path" write-tree)
+  if [[ "$source" == "$pinned_source" && "$tree" != "$expected_tree" ]]; then
+    echo "Patched tree mismatch at $path: actual=$tree expected=$expected_tree" >&2
+    return 1
+  fi
+  printf '%s\n' "$tree"
+}
+
 apply_series hiddify-core "$WORK" "$core" "$CORE_SHA"
+core_tree=$(verify_patched_tree "$WORK" "$core" "$CORE_SHA" "$CORE_TREE")
 checkout_source "$WORK/hiddify-sing-box" "$SING_URL" "$sing"
 apply_series hiddify-sing-box "$WORK/hiddify-sing-box" "$sing" "$SING_SHA"
+sing_tree=$(verify_patched_tree "$WORK/hiddify-sing-box" "$sing" "$SING_SHA" "$SING_TREE")
 git -C "$WORK/hiddify-sing-box" -c 'url.https://github.com/.insteadOf=git@github.com:' \
   submodule update --init --recursive --jobs 4
 checkout_source "$WORK/ray2sing" "$RAY_URL" "$ray"
 apply_series ray2sing "$WORK/ray2sing" "$ray" "$RAY_SHA"
+ray_tree=$(verify_patched_tree "$WORK/ray2sing" "$ray" "$RAY_SHA" "$RAY_TREE")
 
 cat > "$ROOT/.build/prepared-sources.lock" <<LOCK
 CORE_SHA=$core
 SING_SHA=$sing
 RAY_SHA=$ray
+CORE_TREE=$core_tree
+SING_TREE=$sing_tree
+RAY_TREE=$ray_tree
 LOCK
-echo 'Verified original revisions and applied all three patch series.'
+echo 'Applied all three patch series and verified the source trees for locked revisions.'
