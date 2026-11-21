@@ -1,5 +1,0 @@
-# Original checkout and expected Git tree after applying the series.
-CORE_URL=https://github.com/hiddify/hiddify-core.git
-CORE_SHA=b097daadd89d2b62e30c0f4353f55a973118514c
-CORE_TREE=9c664bd240cfdcf2750c711d17fa9a095d6ece16
-# Fork revision used for the source audit: a5662c60c181090d860f165bffe9734c896bae23

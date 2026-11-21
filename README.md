@@ -2,15 +2,15 @@
 
 VetrOFF-Core 0.0.1 is a standalone CLI built from [Hiddify Core](https://github.com/hiddify/hiddify-core), [Hiddify sing-box](https://github.com/hiddify/hiddify-sing-box), and [ray2sing](https://github.com/hiddify/ray2sing).
 
-Each component keeps its `source.lock`, ordered `series`, and patch files in the same directory.
+The three original projects appear at the root as Git submodules. Each submodule links to the exact original commit used for stable builds. The `.gitmodules` file records their clone URLs.
 
-| Component | Original commit | Local patch directory |
+| Submodule | Patches | Audited fork snapshot |
 | --- | --- | --- |
-| Hiddify Core | [`b097daa`](https://github.com/hiddify/hiddify-core/commit/b097daadd89d2b62e30c0f4353f55a973118514c) | [`patches/hiddify-core`](patches/hiddify-core/) |
-| Hiddify sing-box | [`004371d`](https://github.com/hiddify/hiddify-sing-box/commit/004371d6be2395ee4379054a8cf113f339dbe231) | [`patches/hiddify-sing-box`](patches/hiddify-sing-box/) |
-| ray2sing | [`cddb962`](https://github.com/hiddify/ray2sing/commit/cddb962a5a9d02f4136353e76347e7d909b12e65) | [`patches/ray2sing`](patches/ray2sing/) |
+| [`hiddify-core`](hiddify-core) | [`patches/hiddify-core`](patches/hiddify-core/) | `a5662c60c181090d860f165bffe9734c896bae23` |
+| [`hiddify-sing-box`](hiddify-sing-box) | [`patches/hiddify-sing-box`](patches/hiddify-sing-box/) | `45814844d5b80af5b43ac5c17d45c0ed3a42bcd0` |
+| [`ray2sing`](ray2sing) | [`patches/ray2sing`](patches/ray2sing/) | `7aac8dcf42b6284cf6993c992db8dcf259a4b98f` |
 
-The two dependency commits match the original Core gitlinks. Locked preparation checks the entire Git tree produced by each patch series against its `source.lock`. The audited tree reconstructs the recorded fork snapshot with the original GitHub workflow and contributor instructions. Core additionally keeps the original submodule definitions and pointers, omits the fork's checked-in binary archive, and takes the VetrOFF CLI version patch. The audit covers tracked runtime sources, tests, build definitions and dependency changes. The fork commits are recorded for reference.
+The two dependency commits match the original Core gitlinks. The build reads all three pins from the VetrOFF-Core Git checkout, stages the upstream sources in `.build/`, and checks each patched Git tree against its `expected-tree` file. The audited trees preserve the forks' tracked runtime sources, tests, build definitions and dependency changes. The original workflows and contributor instructions are retained, and Core keeps the original submodule definitions and pointers. The fork's checked-in Core archive is omitted and the VetrOFF CLI version patch is applied.
 
 ## Builds
 
@@ -22,12 +22,12 @@ bash scripts/build.sh
 bash scripts/test.sh --reuse-sources
 ```
 
-Local builds need Bash, Git, Make, Go and `sha256sum`. Standalone builds use the fork's CLI build tags with Cronet disabled. Mobile libraries, the browser extension and installer packages have separate build requirements.
+Local builds need a Git checkout, Bash, Make, Go and `sha256sum`. Run `git submodule update --init` if you also want to inspect the original sources in the project root. Standalone builds use the fork's CLI build tags with Cronet disabled. Mobile libraries, the browser extension and installer packages have separate build requirements.
 
 ## Upstream updates
 
-Every Monday GitHub Actions takes the latest original Core commit and uses the sing-box and ray2sing revisions selected by its gitlinks. It applies all three patch series, runs the tests, and attempts the five CLI targets. Successful candidate builds are downloadable from that Actions run. Conflicts stop the candidate and identify the patch and source revision in the log. Stable releases continue to use the reproducible revisions in the three `source.lock` files.
+Every Monday GitHub Actions takes the latest original Core commit and uses the sing-box and ray2sing revisions selected by its gitlinks. It applies all three patch series, runs the tests, and attempts the five CLI targets. Successful candidate builds are downloadable from that Actions run. Conflicts stop the candidate and identify the patch and source revision in the log. Stable releases continue to use the reproducible revisions in the three Git submodules.
 
-Patch files use Git binary diff format with full blob IDs for three-way application. After resolving a candidate conflict against the newer original sources, regenerate the affected patch and update the commit and patched tree IDs in the corresponding locks.
+Patch files use Git binary diff format with full blob IDs for three-way application. After resolving a candidate conflict against the newer original sources, regenerate the affected patch and update the submodule pointers and corresponding `expected-tree` files.
 
 Original project licenses and notices apply to the patched sources and resulting binaries.
