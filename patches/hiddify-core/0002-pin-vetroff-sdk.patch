@@ -1,0 +1,11 @@
+diff --git a/go.mod b/go.mod
+--- a/go.mod
++++ b/go.mod
+@@ -7,6 +7,7 @@
+ godebug multipathtcp=0
+ 
+ require (
++	github.com/SawaMEN/VetroffProxy v0.1.1-0.20261030200803-b81ec45c6865
+ 	filippo.io/age v1.2.1
+ 	github.com/bepass-org/warp-plus v1.2.6
+ 	github.com/coder/websocket v1.8.14
