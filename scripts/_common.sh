@@ -17,3 +17,21 @@ assert_sha() {
     exit 1
   fi
 }
+
+verify_prepared_sources() {
+  source "$ROOT/.build/prepared-sources.lock"
+  assert_sha "$WORK" "$CORE_SHA"
+  assert_sha "$WORK/hiddify-sing-box" "$SING_SHA"
+  assert_sha "$WORK/ray2sing" "$RAY_SHA"
+}
+
+cli_tags() {
+  local tags
+  tags="$(make -s print-CLI_TAGS NAIVE=0)"
+  if [[ "${GOOS:-linux}" == windows ]]; then
+    tags="${tags//tfogo_checklinkname0,/}"
+    tags="${tags//,tfogo_checklinkname0/}"
+  fi
+  [[ -n "$tags" ]] || { echo 'Upstream CLI tags were empty' >&2; return 1; }
+  printf '%s\n' "$tags"
+}

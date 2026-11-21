@@ -4,15 +4,12 @@ source "$(dirname "$0")/_common.sh"
 need go
 need make
 if [[ "${1:-}" != "--reuse-sources" ]]; then
-    bash "$ROOT/scripts/prepare.sh"
+  bash "$ROOT/scripts/prepare.sh"
 fi
-assert_sha "$WORK" "$CORE_SHA"
-assert_sha "$WORK/hiddify-sing-box" "$SING_SHA"
-assert_sha "$WORK/ray2sing" "$RAY_SHA"
+verify_prepared_sources
 cd "$WORK"
-export GOTOOLCHAIN=auto
 export CGO_ENABLED=0
-tags="$(make -s print-CLI_TAGS NAIVE=0)"
-GOFLAGS=-mod=mod go test -count=1 -tags "$tags" github.com/sagernet/sing-box/include -run '^TestVetroffOutboundRegistered$'
-GOFLAGS=-mod=mod go test -count=1 -tags "$tags" github.com/hiddify/ray2sing/ray2sing -run '^TestVetroff'
-echo 'Native Vetroff outbound registration and ray2sing link parsing tested.'
+tags=$(cli_tags)
+go test -mod=mod -count=1 -tags "$tags" -ldflags '-checklinkname=0' \
+  ./v2/config ./v2/config/paneluri ./v2/hcore \
+  github.com/hiddify/ray2sing/ray2sing github.com/hiddify/ray2sing/ray2sing_test

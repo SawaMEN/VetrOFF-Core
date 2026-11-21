@@ -1,63 +1,83 @@
-name: Build VetrOFF Core
+name: Build VetrOFF-Core
 on:
   workflow_dispatch:
   push:
     branches: [main]
     tags: ['v*']
   pull_request:
+  schedule:
+    - cron: '15 5 * * 1'
 
 permissions:
   contents: read
 
 jobs:
+  sources:
+    name: Select original source revisions
+    runs-on: ubuntu-24.04
+    outputs:
+      mode: ${{ steps.select.outputs.mode }}
+      core: ${{ steps.select.outputs.core }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: select
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT" == schedule ]]; then
+            echo 'mode=upstream' >> "$GITHUB_OUTPUT"
+            echo "core=$(bash scripts/check-upstream.sh)" >> "$GITHUB_OUTPUT"
+          else
+            echo 'mode=locked' >> "$GITHUB_OUTPUT"
+          fi
+
   test:
-    name: VetroffProxy integration tests
+    name: Fork compatibility tests
+    needs: sources
     runs-on: ubuntu-24.04
     timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
-      - name: Prepare official upstream sources and apply patches
-        run: bash scripts/prepare.sh
+      - run: bash scripts/prepare.sh
+        env:
+          VETROFF_SOURCE_MODE: ${{ needs.sources.outputs.mode }}
+          VETROFF_UPSTREAM_CORE_SHA: ${{ needs.sources.outputs.core }}
       - uses: actions/setup-go@v6
         with:
           go-version-file: .build/hiddify-core/go.mod
-          cache: true
           cache-dependency-path: .build/hiddify-core/go.sum
-      - name: Test native outbound and link conversion
-        run: bash scripts/test.sh --reuse-sources
+      - run: bash scripts/test.sh --reuse-sources
 
   build:
     name: ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: sources
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-24.04, goos: linux, goarch: amd64 }
-          - { runner: ubuntu-24.04, goos: linux, goarch: arm64 }
-          - { runner: ubuntu-24.04, goos: windows, goarch: amd64 }
-          - { runner: ubuntu-24.04, goos: darwin, goarch: arm64 }
-          - { runner: ubuntu-24.04, goos: darwin, goarch: amd64 }
-    runs-on: ${{ matrix.runner }}
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+    runs-on: ubuntu-24.04
     timeout-minutes: 100
     steps:
-      - name: Checkout patch project
-        uses: actions/checkout@v4
-      - name: Clone official sources and apply 3 patch stacks
-        run: bash scripts/prepare.sh
-      - name: Set up upstream Go toolchain
-        uses: actions/setup-go@v6
+      - uses: actions/checkout@v4
+      - run: bash scripts/prepare.sh
+        env:
+          VETROFF_SOURCE_MODE: ${{ needs.sources.outputs.mode }}
+          VETROFF_UPSTREAM_CORE_SHA: ${{ needs.sources.outputs.core }}
+      - uses: actions/setup-go@v6
         with:
           go-version-file: .build/hiddify-core/go.mod
-          cache: true
           cache-dependency-path: .build/hiddify-core/go.sum
-      - name: Build VetrOFF CLI
-        run: bash scripts/build.sh --reuse-sources
+      - run: bash scripts/build.sh --reuse-sources
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
-      - name: Upload executable, checksum and provenance
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: vetroff-core-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/vetroff-core-${{ matrix.goos }}-${{ matrix.goarch }}*
@@ -65,21 +85,33 @@ jobs:
           retention-days: 21
 
   release:
-    name: Publish tagged release
-    if: startsWith(github.ref, 'refs/tags/v')
+    name: Publish stable release
+    if: github.event_name != 'schedule' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     needs: [test, build]
     runs-on: ubuntu-24.04
+    concurrency: vetroff-stable-release
     permissions:
       contents: write
     steps:
-      - name: Download all binaries
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
           pattern: vetroff-core-*
           path: release
           merge-multiple: true
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release/*
-          generate_release_notes: true
+      - name: Publish version with binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(< VERSION)
+          tag="v$version"
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "$tag" ]]; then
+            echo "Tag $GITHUB_REF_NAME must match VERSION ($tag)" >&2
+            exit 1
+          fi
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "Release $tag already exists"
+            exit 0
+          fi
+          gh release create "$tag" release/* --target "$GITHUB_SHA" \
+            --title "VetrOFF-Core $version" --generate-notes

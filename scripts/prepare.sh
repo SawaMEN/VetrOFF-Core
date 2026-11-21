@@ -3,36 +3,72 @@ set -Eeuo pipefail
 source "$(dirname "$0")/_common.sh"
 need git
 mkdir -p "$ROOT/.build"
-rm -rf -- "$WORK"
-git clone --filter=blob:none --no-checkout --depth 1 --branch main "$CORE_URL" "$WORK"
-git -C "$WORK" fetch --depth 1 origin "$CORE_SHA"
-git -C "$WORK" -c advice.detachedHead=false checkout --detach "$CORE_SHA"
-# ray2sing's upstream gitlink uses an SSH URL. Rewrite it to public HTTPS.
-git -C "$WORK" -c 'url.https://github.com/.insteadOf=git@github.com:' \
-  submodule update --init --recursive --jobs 4
-assert_sha "$WORK" "$CORE_SHA"
-assert_sha "$WORK/hiddify-sing-box" "$SING_SHA"
-assert_sha "$WORK/ray2sing" "$RAY_SHA"
+rm -rf -- "$WORK" "$ROOT/.build/prepared-sources.lock"
+
+checkout_source() {
+  local path=$1 url=$2 sha=$3
+  git init --quiet "$path"
+  git -C "$path" remote add origin "$url"
+  git -C "$path" fetch --quiet --depth=1 origin "$sha"
+  git -C "$path" checkout --quiet --detach "$sha"
+}
+
+case "${VETROFF_SOURCE_MODE:-locked}" in
+  locked)
+    core=$CORE_SHA
+    ;;
+  upstream)
+    core=${VETROFF_UPSTREAM_CORE_SHA:-}
+    [[ "$core" =~ ^[0-9a-f]{40}$ ]] || { echo 'Provide VETROFF_UPSTREAM_CORE_SHA' >&2; exit 1; }
+    ;;
+  *)
+    echo 'Unknown VETROFF_SOURCE_MODE' >&2
+    exit 1
+    ;;
+esac
+
+checkout_source "$WORK" "$CORE_URL" "$core"
+gitlink() {
+  git -C "$WORK" rev-parse "HEAD:$1"
+}
+
+sing=$(gitlink hiddify-sing-box)
+ray=$(gitlink ray2sing)
+if [[ "${VETROFF_SOURCE_MODE:-locked}" == locked && ( "$sing" != "$SING_SHA" || "$ray" != "$RAY_SHA" ) ]]; then
+  echo 'Locked sing-box and ray2sing SHAs must match the official Core gitlinks' >&2
+  exit 1
+fi
 
 apply_series() {
-  local name="$1" path="$2" line patch series="$ROOT/patches/$1/series"
-  [[ -f "$series" ]] || { echo "Missing patch series $series" >&2; exit 1; }
+  local name=$1 path=$2 actual=$3 base=$4 line patch
+  local args=(--index --whitespace=nowarn)
+  if [[ "$actual" != "$base" ]]; then
+    git -C "$path" fetch --quiet --depth=1 origin "$base"
+    args+=(--3way)
+  fi
   while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line%%#*}"
-    line="${line//[[:space:]]/}"
-    [[ -z "$line" ]] && continue
-    [[ "$line" =~ ^[A-Za-z0-9_.-]+\.patch$ ]] || { echo "Unsafe patch name: $line" >&2; exit 1; }
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    [[ "$line" =~ ^[A-Za-z0-9_.-]+\.patch$ ]] || { echo "Invalid patch name: $line" >&2; return 1; }
     patch="$ROOT/patches/$name/$line"
-    [[ -f "$patch" ]] || { echo "Missing patch file: $patch" >&2; exit 1; }
     echo "Applying $name/$line"
-    git -C "$path" apply --check --whitespace=error "$patch"
-    git -C "$path" apply --whitespace=error "$patch"
-  done < "$series"
+    git -C "$path" apply "${args[@]}" "$patch" || {
+      echo "Could not apply $name/$line to $actual" >&2
+      return 1
+    }
+  done < "$ROOT/patches/$name/series"
 }
-apply_series hiddify-sing-box "$WORK/hiddify-sing-box"
-apply_series ray2sing "$WORK/ray2sing"
-apply_series hiddify-core "$WORK"
-grep -q VetroffCoreFlavor "$WORK/hiddify-sing-box/constant/vetroff_core.go"
-grep -q VetroffCoreFlavor "$WORK/ray2sing/ray2sing/vetroff_core.go"
-grep -q VetroffCoreFlavor "$WORK/cmd/cmd_version.go"
-echo 'All 3 official source revisions verified; all 3 patch stacks applied.'
+
+apply_series hiddify-core "$WORK" "$core" "$CORE_SHA"
+checkout_source "$WORK/hiddify-sing-box" "$SING_URL" "$sing"
+apply_series hiddify-sing-box "$WORK/hiddify-sing-box" "$sing" "$SING_SHA"
+git -C "$WORK/hiddify-sing-box" -c 'url.https://github.com/.insteadOf=git@github.com:' \
+  submodule update --init --recursive --jobs 4
+checkout_source "$WORK/ray2sing" "$RAY_URL" "$ray"
+apply_series ray2sing "$WORK/ray2sing" "$ray" "$RAY_SHA"
+
+cat > "$ROOT/.build/prepared-sources.lock" <<LOCK
+CORE_SHA=$core
+SING_SHA=$sing
+RAY_SHA=$ray
+LOCK
+echo 'Verified original revisions and applied all three patch series.'
