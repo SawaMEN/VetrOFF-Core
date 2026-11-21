@@ -17,7 +17,13 @@ Patch-first build of the **official** [Hiddify Core](https://github.com/hiddify/
 | Hiddify sing-box | `0001-vetroff-flavor.patch` | VetrOFF build marker exported from the native protocol engine |
 | ray2sing | `0001-vetroff-flavor.patch` | VetrOFF marker exported from the link/config converter |
 
-All three are **real, independently applied patches**. They currently establish the reproducible build baseline; they do **not yet** port VetroffProxy or all custom features of the SawaMEN fork.
+All three are **real, independently applied patches**. They currently establish the reproducible build baseline; the second patch series adds the native VetroffProxy SDK outbound plus a validated, redacted link converter. Other fork-specific features still require porting.
+
+## VetroffProxy integration
+
+The `0002-*` patches register `{"type":"vetroff","link":"vetroff://..."}` as a native SDK outbound, parse valid `vetroff://` links in ray2sing, and pin the VetroffProxy SDK version in all Go module graphs. Invalid share links produce redacted errors. VetroffProxy is **not** sourced from the old Hiddify fork at build time; its self-contained SDK is pinned separately.
+
+The `0003-go127-oom-profile.patch` avoids an unexported runtime symbol removed by newer Go toolchains; Windows builds disable the incompatible opt-in TCP Fast Open linkname tag.
 
 ## Commands
 
