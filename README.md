@@ -1,50 +1,25 @@
-# VetrOFF Core
+# VetrOFF-Core
 
-Patch-first build of the **official** [Hiddify Core](https://github.com/hiddify/hiddify-core), [Hiddify sing-box](https://github.com/hiddify/hiddify-sing-box) and [ray2sing](https://github.com/hiddify/ray2sing). Source code is cloned from original maintainers, not from `SawaMEN/hiddify-sing-box`.
+VetrOFF-Core 0.0.1 is a standalone CLI built from [Hiddify Core](https://github.com/hiddify/hiddify-core), [Hiddify sing-box](https://github.com/hiddify/hiddify-sing-box), and [ray2sing](https://github.com/hiddify/ray2sing).
 
-## How it works
+`sources.lock` records an original Core commit and its two original gitlinks. The patch series contain the runtime, tests, and dependency changes from the SawaMEN forks. Build jobs fetch the three original repositories and their dependencies. The old forks are unnecessary after the patches are committed. Original project workflows and the old checked-in core binary archive are excluded from the migration.
 
-1. `sources.lock` pins the exact Hiddify Core commit and the *matching* sing-box/ray2sing submodule commits.
-2. `scripts/prepare.sh` clones Hiddify Core with its submodules, verifies all three SHAs and applies strictly ordered `git apply --check` patch stacks.
-3. `scripts/build.sh` compiles the **integrated** Go CLI as `vetroff-core-OS-ARCH`; ray2sing and sing-box are linked into this executable, not packaged as separate binaries.
-4. GitHub Actions builds on pushes and pull requests, offers manual builds, and publishes artifacts to GitHub Releases for tags `v*`. A separate weekly job reports new upstream revisions (it does not change locked versions silently).
+## Builds
 
-## Current patch packs
+GitHub Actions builds the CLI for Linux and macOS on AMD64 and ARM64, and for Windows on AMD64. The first successful build and test run on `main` publishes the version in `VERSION` with its binaries, SHA-256 checksums and exact source revisions. Subsequent builds of a published version produce Actions artifacts.
 
-| Source | Patch | Function |
-| --- | --- | --- |
-| Hiddify Core | `0001-vetroff-core-version.patch` | CLI branding and compile-time verification of both submodules |
-| Hiddify sing-box | `0001-vetroff-flavor.patch` | VetrOFF build marker exported from the native protocol engine |
-| ray2sing | `0001-vetroff-flavor.patch` | VetrOFF marker exported from the link/config converter |
-
-All three are **real, independently applied patches**. They currently establish the reproducible build baseline; the second patch series adds the native VetroffProxy SDK outbound plus a validated, redacted link converter. Other fork-specific features still require porting.
-
-## VetroffProxy integration
-
-The `0002-*` patches register `{"type":"vetroff","link":"vetroff://..."}` as a native SDK outbound, parse valid `vetroff://` links in ray2sing, and pin the VetroffProxy SDK version in all Go module graphs. Invalid share links produce redacted errors. VetroffProxy is **not** sourced from the old Hiddify fork at build time; its self-contained SDK is pinned separately.
-
-The `0003-go127-oom-profile.patch` avoids an unexported runtime symbol removed by newer Go toolchains; Windows builds disable the incompatible opt-in TCP Fast Open linkname tag.
-
-## Commands
-
-Requirements: Git, Bash, Make, Go matching the upstream `go.mod`, sha256sum, internet access.
-
-```bash
-bash scripts/prepare.sh
-bash scripts/build.sh --reuse-sources
+```sh
+bash scripts/build.sh
 ./dist/vetroff-core-linux-amd64 version
+bash scripts/test.sh --reuse-sources
 ```
 
-Use `bash scripts/build.sh` to prepare and build in one command. For cross-compile set `GOOS`, `GOARCH` and `CGO_ENABLED`. All targets use the CLI feature tags defined by the **original** Hiddify Core Makefile, with `NAIVE=0` to avoid platform-specific Cronet native libraries.
+Local builds need Bash, Git, Make, Go and `sha256sum`. Standalone builds use the fork's CLI build tags with Cronet disabled. Mobile libraries, the browser extension and installer packages have separate build requirements.
 
-**Note:** standalone CLI is not the same as a full Android/iOS shared library. GUI apps and native Cronet libraries require separate build jobs; those are not provided here.
+## Upstream updates
 
-## Patch management
+Every Monday GitHub Actions takes the latest original Core commit and uses the sing-box and ray2sing revisions selected by its gitlinks. It applies all three patch series, runs the tests, and attempts the five CLI targets. Successful candidate builds are downloadable from that Actions run. Conflicts stop the candidate and identify the patch and source revision in the log. Stable releases continue to use the reproducible revisions in `sources.lock`.
 
-Place `git diff` format files in `patches/hiddify-core`, `patches/hiddify-sing-box` or `patches/ray2sing`. Add each filename to that module's `series`, in order. Patch failures stop the workflow; no `-X ours`, `-X theirs` or force-merges are used. Run `bash scripts/prepare.sh` after pin changes. Do **not** copy a new arbitrary sing-box commit without updating the Hiddify Core submodule pins.
+Patch files use Git binary diff format with full blob IDs for three-way application. After resolving a candidate conflict against the newer original sources, regenerate the affected patch and update the three pins together.
 
-For upstream update check: `bash scripts/check-upstream.sh`.
-
-## Licensing
-
-Retain Hiddify and dependency attribution and comply with the original projects' licenses. In particular, `hiddify-core/LICENSE.md` includes additional published terms; review before commercial redistribution.
+Original project licenses and notices apply to the patched sources and resulting binaries.
