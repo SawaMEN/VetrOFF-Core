@@ -28,6 +28,8 @@ dns/transport/h_group_sequential.go
 dns/transport/h_group_sequential_compat_test.go
 dns/transport/h_group_test.go
 dns/transport/multiplexer_test.go
+docs/hiddify/features/transports/xdrive.en.md
+docs/hiddify/features/transports/xdrive.fa.md
 experimental/clashapi/h_server_test.go
 experimental/clashapi/trafficontrol/h_trafficontrol_test.go
 go.mod
@@ -39,6 +41,7 @@ hiddify/finalmask/h_xdns_legacy.go
 hiddify/finalmask/h_xray_v26_10_test.go
 hiddify/finalmask/xray_conf.go
 hiddify/finalmask/xray_tls.go
+hiddify/mtusearch/mtusearch.go
 include/h_xdrive.go
 include/registry.go
 option/balancer.go
@@ -61,7 +64,10 @@ protocol/mieru/h_close_test.go
 protocol/mieru/h_resolver_test.go
 protocol/mieru/outbound.go
 protocol/shadowsocks/h_method_test.go
+protocol/vless/h_encryption_handshake.go
+protocol/vless/outbound.go
 route/h_ipv6_fallback.go
+route/h_ipv6_fallback_test.go
 schema/generator.go
 service/smart_dns_pool/h_service_test.go
 service/smart_dns_pool/service.go
@@ -70,6 +76,15 @@ test/go.mod
 test/go.sum
 transport/call/telemost/h_relay_test.go
 transport/masque/tunnel.go
+transport/v2raygrpc/client.go
 transport/v2rayxdrive/config.go
+transport/v2rayxdrive/h_local_roundtrip_test.go
 transport/v2rayxdrive/transport.go
+transport/v2rayxhttp/client.go
 transport/v2rayxhttp/conn.go
+transport/v2rayxhttp/dialer.go
+transport/v2rayxhttp/h_dialer_error_test.go
+transport/v2rayxhttp/h_post_bytes_test.go
+transport/v2rayxhttp/h_wait_read_closer.go
+transport/v2rayxhttp/writer.go
+transport/v2rayxhttp/xui_wait_read_closer_test.go

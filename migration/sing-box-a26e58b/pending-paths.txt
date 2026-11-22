@@ -25,12 +25,9 @@ docs/hiddify/features/protocols/warp.en.md
 docs/hiddify/features/protocols/warp.fa.md
 docs/hiddify/features/transports/finalmask.en.md
 docs/hiddify/features/transports/finalmask.fa.md
-docs/hiddify/features/transports/xdrive.en.md
-docs/hiddify/features/transports/xdrive.fa.md
 docs/schema.json
 h_warp_detour_live_test.go
 h_xray_interop_test.go
-hiddify/mtusearch/mtusearch.go
 hiddify/peerfallback/peerfallback.go
 hiddify/warpscan/scanner.go
 protocol/awg/endpoint.go
@@ -53,7 +50,6 @@ protocol/shadowsocks/outbound.go
 protocol/ssh/h_ssh_test.go
 protocol/ssh/outbound.go
 protocol/tunnel/server.go
-protocol/vless/outbound.go
 protocol/warp/endpoint_warp.go
 protocol/warp/endpoint_warp_masque_stub.go
 protocol/warp/h_endpoint_warp_test.go
@@ -63,7 +59,6 @@ protocol/warp/h_mode.go
 protocol/warp/h_status.go
 replace/tailscale
 route/conn.go
-route/h_ipv6_fallback_test.go
 route/network.go
 route/router.go
 transport/awg/bind.go
@@ -74,12 +69,5 @@ transport/call/telemost/connect.go
 transport/call/telemost/creator.go
 transport/device/stack.go
 transport/masque/device_stack.go
-transport/v2raygrpc/client.go
-transport/v2rayxhttp/client.go
-transport/v2rayxhttp/dialer.go
-transport/v2rayxhttp/h_dialer_error_test.go
-transport/v2rayxhttp/h_post_bytes_test.go
-transport/v2rayxhttp/h_wait_read_closer.go
-transport/v2rayxhttp/writer.go
 transport/wireguard/client_bind.go
 transport/wireguard/endpoint.go
