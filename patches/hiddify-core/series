@@ -2,3 +2,4 @@
 0002-vetroff-version.patch
 0003-persist-fake-dns-cache.patch
 0004-preserve-vpn-service-continuity.patch
+0005-buffer-grpc-logs.patch
