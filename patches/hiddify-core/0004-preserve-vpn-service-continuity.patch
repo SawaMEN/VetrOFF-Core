@@ -1,0 +1,225 @@
+diff --git a/v2/hcore/adminbgservice/admin_bg_service.go b/v2/hcore/adminbgservice/admin_bg_service.go
+index 58c7db0062704758d3d3f8c902abe248de2a184b..87ea7c35563c14ba1e4838cef839804383e6f649 100644
+--- a/v2/hcore/adminbgservice/admin_bg_service.go
++++ b/v2/hcore/adminbgservice/admin_bg_service.go
+@@ -14,6 +14,7 @@ import (
+ 	"strconv"
+ 	"strings"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	C "github.com/sagernet/sing-box/constant"
+@@ -34,6 +35,8 @@ type hiddifyAdminBG struct {
+ 	// closed when the box or full core stops, to end its watchdog
+ 	watching chan struct{}
+ 	fullCore bool
++	// running is updated under mutex so Status can answer during a reload.
++	running atomic.Bool
+ }
+ 
+ func (s *hiddifyAdminBG) Start(ctx context.Context, in *AdminBgStartRequest) (response *AdminBgResponse, err error) {
+@@ -73,6 +76,7 @@ func (s *hiddifyAdminBG) startBridge(in *AdminBgStartRequest) (*AdminBgResponse,
+ 	}
+ 	s.box = box
+ 	s.fullCore = false
++	s.running.Store(true)
+ 	s.watching = make(chan struct{})
+ 	go s.watchPort(in.ServerPort, s.watching)
+ 	return &AdminBgResponse{Message: "OK"}, nil
+@@ -114,6 +118,7 @@ func (s *hiddifyAdminBG) startFullCore(in *AdminBgStartRequest) error {
+ 		return err
+ 	}
+ 	s.fullCore = true
++	s.running.Store(true)
+ 	s.watching = make(chan struct{})
+ 	go s.watchOwner(in.GetOwnerPid(), s.watching)
+ 	return nil
+@@ -231,6 +236,7 @@ func (s *hiddifyAdminBG) closeRunning() error {
+ 		err := adminbg.StopEngine()
+ 		log.Printf("admin_bgservice: StopEngine took %s (err=%v)", time.Since(started), err)
+ 		s.fullCore = false
++		s.running.Store(false)
+ 		return err
+ 	}
+ 	if s.box == nil {
+@@ -239,6 +245,7 @@ func (s *hiddifyAdminBG) closeRunning() error {
+ 	err := s.box.CloseService()
+ 	s.box.Close()
+ 	s.box = nil
++	s.running.Store(false)
+ 	return err
+ }
+ 
+@@ -327,9 +334,7 @@ func (s *hiddifyAdminBG) Stop(ctx context.Context, _ *hcommon.Empty) (*AdminBgRe
+ }
+ 
+ func (s *hiddifyAdminBG) Status(ctx context.Context, _ *hcommon.Empty) (*AdminBgResponse, error) {
+-	s.mutex.Lock()
+-	defer s.mutex.Unlock()
+-	if s.fullCore || s.box != nil {
++	if s.running.Load() {
+ 		return &AdminBgResponse{Message: "started"}, nil
+ 	}
+ 	return &AdminBgResponse{Message: "stopped"}, nil
+diff --git a/v2/hcore/adminbgservice/status_test.go b/v2/hcore/adminbgservice/status_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..95485351395e9a3df701f8ac8949e99b29d73b90
+--- /dev/null
++++ b/v2/hcore/adminbgservice/status_test.go
+@@ -0,0 +1,38 @@
++package adminbgservice
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	hcommon "github.com/hiddify/hiddify-core/v2/hcommon"
++)
++
++func TestStatusAnswersDuringOperation(t *testing.T) {
++	s := &hiddifyAdminBG{}
++	stopped, err := s.Status(context.Background(), &hcommon.Empty{})
++	if err != nil || stopped == nil || stopped.Message != "stopped" {
++		t.Fatalf("initial status = %v, %v; want stopped", stopped, err)
++	}
++
++	s.running.Store(true)
++	s.mutex.Lock()
++	defer s.mutex.Unlock()
++	type result struct {
++		response *AdminBgResponse
++		err      error
++	}
++	answered := make(chan result, 1)
++	go func() {
++		response, err := s.Status(context.Background(), &hcommon.Empty{})
++		answered <- result{response: response, err: err}
++	}()
++	select {
++	case got := <-answered:
++		if got.err != nil || got.response == nil || got.response.Message != "started" {
++			t.Fatalf("status = %v, %v; want started", got.response, got.err)
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatal("status waited for the operation mutex")
++	}
++}
+diff --git a/v2/hcore/last_start_path_test.go b/v2/hcore/last_start_path_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..dbf69a7c6cd7cb94af5307325c817bdfe222c7f0
+--- /dev/null
++++ b/v2/hcore/last_start_path_test.go
+@@ -0,0 +1,35 @@
++package hcore
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++func TestLastStartRequestFollowsMovedWorkingDirectory(t *testing.T) {
++	root := t.TempDir()
++	work := filepath.Join(root, "Support", "Working")
++	relative := filepath.Join("configs", "a.json")
++	config := filepath.Join(work, relative)
++	require.NoError(t, os.MkdirAll(filepath.Dir(config), 0o700))
++	require.NoError(t, os.WriteFile(config, []byte("{}"), 0o600))
++	require.NoError(t, Setup(&SetupRequest{
++		BasePath: work, WorkingDir: work, TempDir: work, Mode: SetupMode_OLD,
++	}, nil))
++
++	require.NoError(t, saveLastStartRequest(&StartRequest{ConfigPath: config, ConfigName: "a"}))
++	request, err := loadLastStartRequestIfNeeded(&StartRequest{})
++	require.NoError(t, err)
++	require.Equal(t, config, request.ConfigPath)
++	require.Equal(t, relative, workingRelative(config))
++	legacy := filepath.Join(root, "Caches", "Working", relative)
++	require.Equal(t, config, inWorkingDir(legacy))
++
++	// An existing absolute path outside the working directory remains valid.
++	external := filepath.Join(root, "external.json")
++	require.NoError(t, os.WriteFile(external, []byte("{}"), 0o600))
++	require.Equal(t, external, workingRelative(external))
++	require.Equal(t, external, inWorkingDir(external))
++}
+diff --git a/v2/hcore/start.go b/v2/hcore/start.go
+index be98565baa293b1d0f155de27101b2ff111e4b52..a4a0d026d716c4c56197c5630da8ac05e9d687ee 100644
+--- a/v2/hcore/start.go
++++ b/v2/hcore/start.go
+@@ -4,7 +4,9 @@ import (
+ 	"context"
+ 	"errors"
+ 	"fmt"
++	"os"
+ 	"path/filepath"
++	"strings"
+ 	"sync/atomic"
+ 	"time"
+ 
+@@ -111,7 +113,7 @@ func saveLastStartRequest(in *StartRequest) error {
+ 	return settings.UpdateInsert(
+ 		&hcommon.AppSettings{
+ 			Id:    "lastStartRequestPath",
+-			Value: in.ConfigPath,
++			Value: workingRelative(in.ConfigPath),
+ 		},
+ 		&hcommon.AppSettings{
+ 			Id:    "lastStartRequestContent",
+@@ -124,6 +126,43 @@ func saveLastStartRequest(in *StartRequest) error {
+ 	)
+ }
+ 
++// workingRelative stores paths inside the working directory relative to it so they
++// survive moves of the application's data directory.
++func workingRelative(path string) string {
++	if sWorkingPath == "" || !filepath.IsAbs(path) {
++		return path
++	}
++	relative, err := filepath.Rel(sWorkingPath, path)
++	if err == nil && filepath.IsLocal(relative) {
++		return relative
++	}
++	return path
++}
++
++// inWorkingDir also recovers legacy absolute paths from a moved working directory.
++func inWorkingDir(path string) string {
++	if path == "" || sWorkingPath == "" {
++		return path
++	}
++	if !filepath.IsAbs(path) {
++		return filepath.Join(sWorkingPath, path)
++	}
++	if _, err := os.Stat(path); !os.IsNotExist(err) {
++		return path
++	}
++	marker := string(filepath.Separator) + filepath.Base(sWorkingPath) + string(filepath.Separator)
++	if index := strings.LastIndex(path, marker); index >= 0 {
++		relative := path[index+len(marker):]
++		if filepath.IsLocal(relative) {
++			moved := filepath.Join(sWorkingPath, relative)
++			if _, err := os.Stat(moved); err == nil {
++				return moved
++			}
++		}
++	}
++	return path
++}
++
+ func loadLastStartRequestIfNeeded(in *StartRequest) (*StartRequest, error) {
+ 	if in != nil && (in.ConfigContent != "" || in.ConfigPath != "") {
+ 		return in, nil
+@@ -143,7 +182,7 @@ func loadLastStartRequestIfNeeded(in *StartRequest) (*StartRequest, error) {
+ 		return nil, err
+ 	}
+ 	return &StartRequest{
+-		ConfigPath:    lastPath.Value.(string),
++		ConfigPath:    inWorkingDir(lastPath.Value.(string)),
+ 		ConfigContent: lastContent.Value.(string),
+ 		ConfigName:    lastName.Value.(string),
+ 	}, nil
