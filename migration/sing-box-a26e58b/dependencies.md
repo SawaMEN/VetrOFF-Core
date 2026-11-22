@@ -15,7 +15,7 @@ passed for the two packages with tests. The SOCKS package compiled and reported 
 The three gitlinks are resolved. Apply the original versions of the 11 paths in
 `identical-upstream-paths.txt`. In each, the two Go versions have the same lexemes,
 including string literals and implicit semicolons, and differ only in whitespace.
-The remaining 152 conflicted paths are listed in `pending-paths.txt`.
+The remaining 85 conflicted paths are listed in `pending-paths.txt`. The other source resolutions are recorded in `sing-box-resolutions.patch.gz`.
 `replace/tailscale` remains pending. Some old compatibility shims are superseded by APIs in its
 candidate revision (`NodeBackend.Self` and `Peers`, network monitor hooks, and the TUN return
 path). The sing-box callers need to be checked against that revision, especially Taildrop,
