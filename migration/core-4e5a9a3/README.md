@@ -1,20 +1,19 @@
 # Hiddify Core 4e5a9a3 rebase checkpoint
 
-The VetrOFF source baseline is commit `642146bcfff89a1dad764cab29118b68bb1d6561`.
-This checkpoint records the resolved Core paths for the merge with original
-Hiddify Core `4e5a9a357003d0a995360586702fd24c53042e3f`. It includes the new log-stream regression tests.
-The target Core still references sing-box `a26e58b376987a3305b201ec87fbc8918f620ad3`.
+The VetrOFF source baseline is commit `642146bcfff89a1dad764cab29118b68bb1d6561`,
+with the gRPC log-buffer changes from `9091778cc6ba89c8fd5728121c7c86c3a4dfa720`.
+The original Core target is `4e5a9a357003d0a995360586702fd24c53042e3f`.
+It pins sing-box `a26e58b376987a3305b201ec87fbc8918f620ad3`.
 
-- `core-resolutions.patch.gz` applies to the exact original Core target.
-- `restored-paths.txt` lists the resolved paths to take from that patched target.
-- `restored-index.txt` records their verified Git file modes and blob IDs.
-- `pending-paths.txt` lists the remaining unmerged Core paths.
+All 45 Core merge conflicts are resolved in the candidate tree. The full binary
+patch includes the clean merges as well and can reconstruct the entire staged
+Core tree directly from the original target.
 
-To resume, apply the VetrOFF patch series to its pinned Core in a Git checkout
-with the original Core history, commit the patched tree, and merge the target
-with `--no-commit --no-ff`. In a separate worktree at the exact target,
-decompress and apply the checkpoint patch. Copy only the paths listed in
-`restored-paths.txt` from that worktree into the merge worktree and stage them.
-Keep the remaining merge conflicts for review. The saved patch was verified
-against the staged blob IDs. The complete Core and sing-box stack still needs
-integration tests and the five-platform build before its pins can move.
+Apply `gzip -dc core-resolutions.patch.gz | git apply --index` in a clean checkout
+of the exact original Core target. The resulting tree must match
+`candidate-tree.txt`; the changed paths and their staged blob IDs are recorded
+in `restored-paths.txt` and `restored-index.txt`.
+
+The Core patch is for integration testing. The paired sing-box migration and
+the integrated build and tests still need to pass. Keep the published Core
+and sing-box pins together until those checks pass.
