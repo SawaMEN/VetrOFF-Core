@@ -46,8 +46,10 @@ fi
 apply_series() {
   local name=$1 path=$2 actual=$3 base=$4 line patch
   local args=(--index --whitespace=nowarn)
+  local series="$ROOT/patches/$name/series"
+  [[ -f "$series" ]] || { echo "Missing patch series: $series" >&2; return 1; }
   if [[ "$actual" != "$base" ]]; then
-    git -C "$path" fetch --quiet --depth=1 origin "$base"
+    git -C "$path" fetch --quiet --depth=1 origin "$base" || return 1
     args+=(--3way)
   fi
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -57,9 +59,10 @@ apply_series() {
     echo "Applying $name/$line"
     git -C "$path" apply "${args[@]}" "$patch" || {
       echo "Could not apply $name/$line to $actual" >&2
+      git -C "$path" diff --name-only --diff-filter=U >&2
       return 1
     }
-  done < "$ROOT/patches/$name/series"
+  done < "$series"
 }
 
 verify_patched_tree() {
@@ -72,16 +75,23 @@ verify_patched_tree() {
   printf '%s\n' "$tree"
 }
 
-apply_series hiddify-core "$WORK" "$core" "$CORE_SHA"
-core_tree=$(verify_patched_tree "$WORK" "$core" "$CORE_SHA" "$CORE_TREE")
+# A conflict in one component should not hide conflicts in the others.
+failed_components=()
+apply_series hiddify-core "$WORK" "$core" "$CORE_SHA" || failed_components+=(hiddify-core)
 checkout_source "$WORK/hiddify-sing-box" "$SING_URL" "$sing"
-apply_series hiddify-sing-box "$WORK/hiddify-sing-box" "$sing" "$SING_SHA"
+apply_series hiddify-sing-box "$WORK/hiddify-sing-box" "$sing" "$SING_SHA" || failed_components+=(hiddify-sing-box)
+checkout_source "$WORK/ray2sing" "$RAY_URL" "$ray"
+apply_series ray2sing "$WORK/ray2sing" "$ray" "$RAY_SHA" || failed_components+=(ray2sing)
+if (( ${#failed_components[@]} > 0 )); then
+  echo "Source preparation failed: ${failed_components[*]}" >&2
+  exit 1
+fi
+
+core_tree=$(verify_patched_tree "$WORK" "$core" "$CORE_SHA" "$CORE_TREE")
 sing_tree=$(verify_patched_tree "$WORK/hiddify-sing-box" "$sing" "$SING_SHA" "$SING_TREE")
+ray_tree=$(verify_patched_tree "$WORK/ray2sing" "$ray" "$RAY_SHA" "$RAY_TREE")
 git -C "$WORK/hiddify-sing-box" -c 'url.https://github.com/.insteadOf=git@github.com:' \
   submodule update --init --recursive --jobs 4
-checkout_source "$WORK/ray2sing" "$RAY_URL" "$ray"
-apply_series ray2sing "$WORK/ray2sing" "$ray" "$RAY_SHA"
-ray_tree=$(verify_patched_tree "$WORK/ray2sing" "$ray" "$RAY_SHA" "$RAY_TREE")
 
 cat > "$ROOT/.build/prepared-sources.lock" <<LOCK
 CORE_SHA=$core
