@@ -12,7 +12,10 @@ Stage these original-project gitlinks in the three-way merge.
 In the new `replace/sing`, `go test -race ./common/bufio ./common/canceler ./protocol/socks`
 passed for the two packages with tests. The SOCKS package compiled and reported no test files.
 
-With these three gitlinks staged, 163 sing-box paths remain conflicted.
+The three gitlinks are resolved. Apply the original versions of the 11 paths in
+`identical-upstream-paths.txt`. In each, the two Go versions have the same lexemes,
+including string literals and implicit semicolons, and differ only in whitespace.
+The remaining 152 conflicted paths are listed in `pending-paths.txt`.
 `replace/tailscale` remains pending. Some old compatibility shims are superseded by APIs in its
 candidate revision (`NodeBackend.Self` and `Peers`, network monitor hooks, and the TUN return
 path). The sing-box callers need to be checked against that revision, especially Taildrop,
