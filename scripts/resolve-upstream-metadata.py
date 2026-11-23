@@ -743,4 +743,46 @@ for path, hashes in (
         ("base", "patched_tree", "upstream"), hashes))
     assert new.replace(b"//H", b"// H") == own
     resolutions[path] = own
+# Review the complete balancer strategy family together. The official
+# version has the same selection semantics; retain the fork's consistent
+# receivers, legacy alias, and removal of unused state.
+def balancer_code(blob):
+    # These hash-guarded files have been reviewed for comment-only differences.
+    # Normalize line comments and spacing, not code identifiers or literals.
+    return b"\n".join(line for raw in blob.splitlines()
+                      if (line := raw.split(b"//", 1)[0].strip()))
+
+for file, hashes in (
+    ("consistent_hashing.go", ("6659e154be26daac2f8add98895e0277d0bf3e87", "7998e7c30edc57da784f91283b609be5741b3e7e", "1693296906c6f8047bde00f9474863b30f08be07")),
+    ("lowest_delay.go", ("bc586d1880b0f037287c557a4444e19d8726c718", "2cfc1643bda06593bf567dd34564da82b92bba65", "e4f4b8c4158c69c9597ecf9ff54703091277fb4b")),
+    ("roundrobin.go", ("bd03fe069a9dfbe39ad60173005b671acb5346ee", "99cfd50a8a76af60867349c18d9d87873b0bf3f2", "95cc3e50ba4c91a850211cfd007df4be35b12916")),
+    ("sticky_session.go", ("3c4af4f453a0c48a6996a0dfc951ae19fb72231d", "082540552670edeac0cd9d9cd04912db8698eefb", "1ec9bdc247cfd858131f9b8f317f35c82fe04228")),
+    ("h_pool.go", ("cede9f6e859af1e3c450c6f6034d2dd363522acb", "96674a3da9be3ee66f460226e3acdc7cba83fe68", "db340e545eb3b7b03760cc7995e11798306db7f6")),
+    ("h_stable.go", ("c57afd07e4110d46992da384548fb8d1f5fc4446", "71695b1de20068533f4609a6babe38b4a0726f5e", "b6fbba2a553d92dbfa7f0866571c005713ee9a64")),
+    ("balancer.go", ("d69741578c6d84def1536448aba1a3d5bcd23d4b", "a76f2a4909403c720fadf3a405cb78c0670f2735", "635a6d40faf549e6c0d7d74399bb0fe2808a7592")),
+):
+    path = "protocol/group/balancer/" + file
+    old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+        ("base", "patched_tree", "upstream"), hashes))
+    candidate = new
+    if file == "consistent_hashing.go":
+        signature = b"func (g *ConsistentHashing) Select("
+        body = function_blob(new, signature)
+        renamed = body.replace(b"(g *ConsistentHashing)", b"(s *ConsistentHashing)").replace(b"g.", b"s.")
+        candidate = replace_once(candidate, body, renamed)
+    elif file == "lowest_delay.go":
+        candidate = replace_once(candidate, b"\tudpOutbounds     []adapter.Outbound\n", b"")
+        assert b"udpOutbounds" not in candidate
+    elif file == "h_pool.go":
+        alias = b"\tif options.Tolerance == 0 {\n\t\toptions.Tolerance = options.PoolTolerance\n\t} // H: legacy alias\n"
+        assert alias in own and b"PoolTolerance" not in new
+        candidate = replace_once(candidate, b"\tsize := options.Pool\n", alias + b"\tsize := options.Pool\n")
+    elif file == "balancer.go":
+        for field in (b"\tlink                         string\n",
+                      b"\tinterval                     time.Duration\n",
+                      b"\tidleTimeout                  time.Duration\n"):
+            candidate = replace_once(candidate, field, b"")
+    assert balancer_code(candidate) == balancer_code(own), path
+    resolutions[path] = own
+
 apply_reviewed(data, resolutions)
