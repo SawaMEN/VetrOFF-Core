@@ -37,9 +37,49 @@ jobs:
             echo 'mode=locked' >> "$GITHUB_OUTPUT"
           fi
 
+  preflight:
+    name: Preflight all three patch series
+    needs: sources
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check patch application before the build matrix
+        env:
+          VETROFF_SOURCE_MODE: ${{ needs.sources.outputs.mode }}
+          VETROFF_UPSTREAM_CORE_SHA: ${{ needs.sources.outputs.core }}
+        run: |
+          if ! bash scripts/prepare.sh; then
+            if [[ -f .build/patch-report.md ]]; then
+              cat .build/patch-report.md >> "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 1
+          fi
+          echo "All three patch series applied successfully." >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload conflict diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-patch-diagnostics
+          path: |
+            .build/*.patch.log
+            .build/patch-report.md
+          if-no-files-found: warn
+          retention-days: 21
+
+  fork_audit:
+    name: Check whether personal forks advanced
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare audited snapshots to fork main branches
+        run: bash scripts/audit-forks.sh --strict
+
   test:
     name: Fork compatibility tests
-    needs: sources
+    needs: [sources, preflight]
     runs-on: ubuntu-24.04
     timeout-minutes: 100
     steps:
@@ -56,7 +96,7 @@ jobs:
 
   build:
     name: ${{ matrix.goos }}/${{ matrix.goarch }}
-    needs: sources
+    needs: [sources, preflight]
     strategy:
       fail-fast: false
       matrix:
