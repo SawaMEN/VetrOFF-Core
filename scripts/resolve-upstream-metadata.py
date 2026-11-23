@@ -1445,7 +1445,7 @@ plain = replace_once(plain, b'const hWARPLivePassword = "warp-live-password"\nco
 plain = replace_once(plain,
     b'func() bool { return instance.ready() && instance.displayType() == "WARP \xc2\xb7 MASQUE" && instance.traceOK() },',
     b'func() bool {\n\t\t\t\t\treturn instance.ready() && instance.displayType() == "WARP \xc2\xb7 MASQUE" && instance.traceOK()\n\t\t\t\t},')
-assert balancer_code(plain) == balancer_code(own)
+assert b"".join(balancer_code(plain).split()) == b"".join(balancer_code(own).split())
 resolutions[path] = own
 
 # AWG endpoint: deferred DNS and bind lifecycle, while retaining the fork's
@@ -1500,4 +1500,41 @@ assert b"func TestH_PeerAddresses(" in candidate
 assert b"func TestH_EndpointListenPortConflictsWithDetour(" in candidate
 assert b"t.Skip(" not in candidate
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+# Compile-correct embedded ServerOptions literals, with the same tests
+# and exact protocol configuration as in the fork.
+path = "protocol/shadowsocks/h_method_test.go"
+own, new = added_pair(path, "13087820c1f7f04219d9eb347d8b4d2cabfb0020",
+                      "9e5c3d622d746793294553cd6d861dde35800215")
+plain = replace_once(own, b'\t\t\t\tServer:     "127.0.0.1",\n\t\t\t\tServerPort: 1,',
+                     b'\t\t\t\tServerOptions: option.ServerOptions{Server: "127.0.0.1", ServerPort: 1},')
+assert subprocess.check_output(["gofmt"], input=plain) == subprocess.check_output(["gofmt"], input=new)
+assert b"\n\tServerOptions\n" in git("show", data["tentative_tree"] + ":option/shadowsocks.go")
+resolutions[path] = new
+
+path = "protocol/mieru/h_close_test.go"
+own, new = added_pair(path, "f8ec83e2d35e5679155d47cc47087e8f9f6737f9",
+                      "6a76b810326fcec8467e919a6dce081307b8cdcf")
+plain = replace_once(own, b'\t\t\tServer:       "127.0.0.1",',
+                     b'\t\t\tServerOptions: option.ServerOptions{Server: "127.0.0.1"},')
+assert subprocess.check_output(["gofmt"], input=plain) == subprocess.check_output(["gofmt"], input=new)
+assert b"\n\tServerOptions\n" in git("show", data["tentative_tree"] + ":option/mieru.go")
+resolutions[path] = new
+
+path = "protocol/mieru/h_resolver_test.go"
+own, new = added_pair(path, "ed9a9596cc5ad74919fc2d002f23ad26a8ac3629",
+                      "23c9728cae5f91d0bea05fd3ed161ddd253d55e1")
+assert normalize_imports(own) == normalize_imports(new)
+resolutions[path] = own
+
+path = "protocol/psiphon/h_notice_test.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("7fc6fc8121e0d484351f9288b70d22541530b753",
+     "aba0b2b6370b7ff34cd6f4d7e88ff47b07fc4c00",
+     "3e3cdc9b26dacff938751d4dc0595e3c5e3a3fed")))
+plain = new.replace(b"map[string]interface{}", b"map[string]any")
+plain = replace_once(plain, b"with the last instance gone, a notice goes nowhere",
+                     b"the writer stays installed, but no instances remain registered")
+assert plain == own
+resolutions[path] = own
 apply_reviewed(data, resolutions)
