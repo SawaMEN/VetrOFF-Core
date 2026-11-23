@@ -613,4 +613,66 @@ candidate = replace_once(candidate, b"\t\t\terrs <- exchangeErr\n\t\t}()\n",
                          b"\t\t\terrs <- exchangeErr\n\t\t})\n")
 assert normalize_imports(candidate) == normalize_imports(own)
 resolutions[path] = own
+# Keep the existing Smart DNS service and its tests as a coordinated unit.
+# Upstream deleted the service; VetrOFF retains existing profile compatibility.
+for path, hashes in (
+    ("service/smart_dns_pool/service.go", ("c87ece2aeec1355c6b4cb56462bfe0c7a419dd2c", "762781565cb6284b3ec01d89239ac7c541780797")),
+    ("service/smart_dns_pool/service_test.go", ("5357324d3eb0f83519d14db5b9dfc9962df00840", "61661738872f957dee893048b803eda6815521f5")),
+    ("service/smart_dns_pool/h_service_test.go", ("9ca249babc4c550284072d3359a0ea8f4261d674", "d03bad6cfcb3cfb91b9586976328b7996235cb4a")),
+):
+    checked_blob(data["base"], path, hashes[0])
+    own = checked_blob(data["patched_tree"], path, hashes[1])
+    assert subprocess.run(["git", "-C", str(repo), "cat-file", "-e",
+                           data["upstream"] + ":" + path], capture_output=True).returncode != 0
+    assert b"package smart_dns_pool" in own
+    resolutions[path] = own
+
+# Adopt the upstream generic query API while preserving the fork's existing
+# DNS option struct layout. Confirm that the complete original Probe body
+# is preserved aside from the new query parameter.
+path = "common/dnspool/probe.go"
+own, new = added_pair(path, "6f33954062ab25aa90571194fb9e07047572dfbf",
+                      "eaeb5d156f98084ff11ef6c6612794995ad94713")
+start = new.index(b"\t\t\tRemoteTLSDNSServerOptions: option.RemoteTLSDNSServerOptions{")
+end = new.index(b"\t\t\tPath: u.Path,", start)
+candidate = new[:start] + b"\t\t\tRawLocalDNSServerOptions: local,\n\t\t\tServer:                   u.Hostname(), ServerPort: port,\n" + new[end:]
+candidate = replace_once(candidate,
+    b"DNSServerAddressOptions:  option.DNSServerAddressOptions{Server: host, ServerPort: uint16(n)},",
+    b"Server:                   host, ServerPort: uint16(n),")
+signature = b"func Probe("
+body_start = candidate.index(b"\n\treturn Exchange(", candidate.index(signature))
+body_end = candidate.index(b"\n\tconfig, err := multidns.ParseResolverURL", body_start)
+plain = candidate[:body_start] + candidate[body_end:]
+plain = replace_once(plain, b"return trans.Exchange(queryCtx, query)",
+                     b"return trans.Exchange(queryCtx, BuildQuery(name, qtype))")
+assert normalize_imports(plain) == normalize_imports(own)
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# IPv6 fallback source and tests: same behavior, existing metadata API.
+path = "route/h_ipv6_fallback.go"
+own, new = added_pair(path, "83c5121f666c1784dba2703b1659ac470a69f34c",
+                      "ad31936802565a4c5ddfc417234208bee9ec007d")
+assert replace_once(new, b"var source net.Conn = remote", b"source := remote") == own
+resolutions[path] = own
+
+path = "route/h_ipv6_fallback_test.go"
+own, new = added_pair(path, "11dc081522f4ad2413ce2b5b95b896a0e7b91603",
+                      "5d18596c64d16950f6607029da3e76a481cffd42")
+candidate = new.replace(b"destination.IsFqdn()", b"destination.IsDomain()")
+candidate = candidate.replace(b"(string, error, []bool, <-chan error)", b"(string, []bool, <-chan error, error)")
+candidate = candidate.replace(b"return string(answer[:n]), err, observations.all(), closed",
+                              b"return string(answer[:n]), observations.all(), closed, err")
+candidate = re.sub(rb"answer, err, observed, (closed|_) (:=|=)", rb"answer, observed, \1, err \2", candidate)
+assert candidate == own
+resolutions[path] = own
+
+# ECH test fixtures use the fork's miekg/dns struct definitions.
+path = "common/tls/h_ech_resolver_test.go"
+own, new = added_pair(path, "81233c91d3ca976db5a24779a60da2e7db9d2105",
+                      "70e96c34b84ced841d9bc27690b7966108a7aea5")
+candidate = replace_once(new, b"record := &mDNS.HTTPS{SVCB: mDNS.SVCB{", b"record := &mDNS.HTTPS{")
+candidate = replace_once(candidate, b"\t}}\n\treturn &mDNS.Msg{MsgHdr: mDNS.MsgHdr{Response: true, Rcode: mDNS.RcodeSuccess},",
+                         b"\t}\n\treturn &mDNS.Msg{Response: true, Rcode: mDNS.RcodeSuccess,")
+assert candidate == own
+resolutions[path] = own
 apply_reviewed(data, resolutions)
