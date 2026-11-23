@@ -1157,4 +1157,56 @@ assert b"xmuxManager.CloseIdleConnections()" in candidate
 assert b"context.AfterFunc(quicConn.Context()" in candidate
 assert b"options.ResolveDownload()" in candidate
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+# MASQUE: merge timeout and idempotent shutdown with the fork's explicit
+# UDP/ICMP forwarder lifecycle.
+path = "transport/masque/device_stack.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("58e110383673dccc37327eb72b217e5ebe694c01",
+     "c7ebfe187c49ff239a4c77602214cf27eb9ed07e",
+     "7aba16841a495b8ebd53df2d39e015f09a890825")))
+candidate = own
+candidate = replace_once(candidate, b'\t"os"\n', b'\t"os"\n\t"sync"\n')
+candidate = replace_once(candidate, b'\t"github.com/sagernet/sing-box/log"\n',
+                         b'\tC "github.com/sagernet/sing-box/constant"\n\t"github.com/sagernet/sing-box/log"\n')
+candidate = replace_once(candidate, b"\tudpForwarder   *tun.UDPForwarder", b"\tcloseOnce sync.Once\n\tudpForwarder   *tun.UDPForwarder")
+for signature in (b"func (w *stackDevice) DialContext(", b"func (w *stackDevice) ListenPacket(", b"func (ep *wireEndpoint) WritePackets("):
+    candidate = replace_once(candidate, function_blob(own, signature), function_blob(new, signature))
+signature = b"func (w *stackDevice) Close() error"
+body = function_blob(own, signature)
+start = body.index(b"\n") + 1
+end = body.rindex(b"\treturn nil")
+cleanup = body[start:end]
+body2 = body[:start] + b"\tw.closeOnce.Do(func() {\n" + cleanup + b"\t})\n" + body[end:]
+candidate = replace_once(candidate, body, body2)
+assert b"w.udpForwarder.Start()" in candidate and b"w.udpForwarder.Close()" in candidate
+assert b"w.icmpForwarder.Close()" in candidate
+assert b"context.WithTimeout(ctx, C.TCPTimeout)" in candidate
+assert b"packetBuffer.DecRef() // the reference taken" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "transport/masque/tunnel.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("bf4f820fd856b69b2a08be3ceceb224226128e0f",
+     "518e8de65f11d1ccdfd5b525a22b07ba0520da8f",
+     "be6b01e9bc22fbcfff71c58ff797d18db4a9e27f")))
+plain = new
+for old_msg, own_msg in (
+    (b"Error writing to IP connection: %v, continuing...", b"write to IP connection: %v"),
+    (b"Error writing ICMP to TUN device: %v, continuing...", b"write ICMP to TUN device: %v"),
+    (b"Error reading from IP connection: %v, continuine...", b"read from IP connection: %v"),
+):
+    plain = replace_once(plain, old_msg, own_msg)
+assert balancer_code(plain) == balancer_code(own)
+resolutions[path] = own
+
+path = "protocol/masque/h_config_test.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("24e0b6dd4b17ed43ce64340c35dbdfe618b46341",
+     "e835d541777ec50f2764406b500b9984cf712b22",
+     "08050447bcd72ba924d7df08ca9eb525e3ebb0a4")))
+assert subprocess.check_output(["gofmt"], input=own) == subprocess.check_output(["gofmt"], input=new) or own.split() == new.split()
+resolutions[path] = own
 apply_reviewed(data, resolutions)
