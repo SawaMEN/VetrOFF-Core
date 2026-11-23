@@ -139,7 +139,7 @@ def merge(component):
     result = subprocess.check_output(["go", "mod", "edit", "-json", str(candidate_file)], env=env)
     go = json.loads(result)
     assert go["Go"] == directives["go"]
-    actual_require = {x["Path"]:(x["Version"],x["Indirect"]) for x in go["Require"]}
+    actual_require = {x["Path"]:(x["Version"],x.get("Indirect", False)) for x in go["Require"]}
     assert actual_require == merged
     summary = {"component":component,"requirements":len(merged),"replacements":len(replacements),
                "reviewed_version_choices":reviewed,
