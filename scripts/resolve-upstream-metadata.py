@@ -1535,6 +1535,51 @@ old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
 plain = new.replace(b"map[string]interface{}", b"map[string]any")
 plain = replace_once(plain, b"with the last instance gone, a notice goes nowhere",
                      b"the writer stays installed, but no instances remain registered")
-assert plain == own
+assert normalize_imports(plain) == normalize_imports(own)
 resolutions[path] = own
+# Preserve Mieru's optional MTU and validation. Both revisions otherwise
+# differ only in pointer construction, comments and error capitalization.
+path = "protocol/mieru/outbound.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("927a01ab0d7595cc297d52cb9513abc2a85ce127",
+     "e9f2e613be31e7c10632160ec2e76f2cbeec0cb9",
+     "fc630385258c0cb0d156e07f7857258e46abe3c0")))
+plain = replace_once(new, b'\t"google.golang.org/protobuf/proto"\n', b"")
+plain = plain.replace(b"proto.String(", b"new(")
+plain = replace_once(plain, b"Transport of Server Port is not defined!", b"transport of Server Port is not defined")
+fork_plain = replace_once(own, b"\tif options.MTU != 0 {\n\t\tconfig.Profile.Mtu = new(options.MTU)\n\t}\n", b"")
+fork_plain = replace_once(fork_plain, b'\tif options.MTU != 0 && (options.MTU < 1280 || options.MTU > 1500) {\n\t\treturn fmt.Errorf("mieru MTU must be between 1280 and 1500")\n\t}\n', b"")
+assert balancer_code(normalize_imports(plain)) == balancer_code(normalize_imports(fork_plain))
+assert re.search(rb"MTU\s+int32\s+", git("show", data["tentative_tree"] + ":option/mieru.go"))
+resolutions[path] = own
+
+# Preserve the public Close method, plus upstream scope lifecycle and
+# read-ahead/batching. The same cleanup can be called by either entrypoint.
+path = "protocol/shadowsocks/outbound.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("700206fe2fa5c7e8e9894557ec7d7e82df1fc79a",
+     "9e537810b1de5415c7e4ae9956ad4526a838f665",
+     "8476570865042ef685df46b9f9aab10f8ec82738")))
+candidate = new
+assert b"scope.Add(h.multiplexDialer.Close)" in candidate
+assert b"readahead.New(outConn)" in candidate
+assert b"hBatch(h.method," in candidate
+assert b"wholepacket.Wrap(h.method.DialPacketConn(outConn))" in candidate
+assert b"dialShadowsocks2022(ctx, h.method" in candidate
+# Upstream lifecycle owns cleanup. Keep explicit Close compatibility by
+# routing both calls through the same sync.Once-protected operation.
+candidate = replace_once(candidate, b'\t"context"\n', b'\t"context"\n\t"sync"\n')
+candidate = replace_once(candidate, b"type Outbound struct {\n", b"type Outbound struct {\n\tcloseOnce sync.Once\n\tcloseErr error\n")
+candidate = replace_once(candidate, b"scope.Add(h.multiplexDialer.Close)", b"scope.Add(h.Close)")
+candidate += b'''
+func (h *Outbound) Close() error {
+	h.closeOnce.Do(func() {
+		h.closeErr = common.Close(common.PtrOrNil(h.multiplexDialer))
+	})
+	return h.closeErr
+}
+'''
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 apply_reviewed(data, resolutions)
