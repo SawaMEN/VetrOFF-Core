@@ -45,7 +45,7 @@ for entry in "${entries[@]}"; do
   fi
   printf "%-18s audited=%s current=%s status=%s\n" "$name" "$expected" "$actual" "$result"
   if [[ -n "$summary" ]]; then
-    printf "| %s | `%s` | `%s` | %s |\n" "$name" "${expected:0:12}" "${actual:0:12}" "$result" >> "$summary"
+    printf '| %s | `%s` | `%s` | %s |\n' "$name" "${expected:0:12}" "${actual:0:12}" "$result" >> "$summary"
   fi
 done
 echo "Audited forks checked: 3; changed: $drift; lookup errors: $errors"
