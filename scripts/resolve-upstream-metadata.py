@@ -1103,4 +1103,58 @@ test = replace_once(test,
     b"\trequire.ErrorContains(t, err, \"400\")\n\trequire.Nil(t, reader)")
 # The status is now surfaced directly by Dial, rather than by the first read.
 resolutions[path] = subprocess.check_output(["gofmt"], input=own + b"\n" + test)
+# Preserve recursive download validation and the XDrive schema entry.
+path = "option/v2ray_transport.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("6a4ea98c85a954c74bfbfb1995e614226fd1b55a",
+     "3fd724c1d823f9a78d37bf0db272e590651121ce",
+     "905a6ecd63d3862f8aa95026d04a9a7a3c4d77bb")))
+assert b"func (c *V2RayXHTTPOptions) ResolveDownload()" in own
+assert b"download nesting exceeds 8 or contains a cycle" in own
+assert b"stream-one cannot use a separate download" in own
+assert b"mkcp,kcp,xdrive" in own
+resolutions[path] = own
+
+# Use the upstream XMUX lifecycle and the fork's validated download endpoint.
+path = "transport/v2rayxhttp/client.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("8a74ad0e1047fd8c42f5b347d6447649eba02e03",
+     "cc06e22b38a26900def736d57dd865c071e4a0dc",
+     "76b1e6cc4b0b56d818e41870dfb99968fea540b0")))
+checked_blob(data["tentative_tree"], "transport/v2rayxhttp/mux.go",
+             "96bcf78e0e11a897e4d5c24ba60082df4666e988")
+checked_blob(data["tentative_tree"], "transport/v2rayxhttp/h_alpn.go",
+             "f9b1497790fca3a4d24f146124d71f9f29b9faa3")
+candidate = new
+start = candidate.index(b"\tif options.Mode ==")
+end = candidate.index(b"\ttlsConfig = hDefaultALPN", start)
+own_start = own.index(b"\tif options.Mode ==")
+own_end = own.index(b"\tdest := serverAddr", own_start)
+candidate = candidate[:start] + own[own_start:own_end] + candidate[end:]
+candidate = replace_once(candidate, b"\tif options.Download != nil {\n\t\toptions2 := options.Download\n",
+                         b"\tif download != nil {\n\t\toptions2 := download\n")
+candidate = replace_once(candidate,
+    b"\t\t\tdialer2, ok = service.FromContext[adapter.OutboundManager](ctx).Outbound(options2.Detour)",
+    b"\t\t\tmanager := service.FromContext[adapter.OutboundManager](ctx)\n\t\t\tif manager == nil {\n\t\t\t\treturn nil, E.New(\"download detour requires outbound manager\")\n\t\t\t}\n\t\t\tdialer2, ok = manager.Outbound(options2.Detour)")
+# An upload-only stream owns a request cancellation handle too.
+candidate = replace_once(candidate,
+    b"\t\t_, _, _, err = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, true)",
+    b"\t\tvar uploadReader io.ReadCloser\n\t\tuploadReader, _, _, err = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, true)")
+needle = b"\t\treturn &conn, nil\n\t}\n\tscMaxEachPostBytes"
+candidate = replace_once(candidate, needle,
+    b"\t\tpreviousClose := conn.onClose\n\t\tconn.onClose = func() {\n\t\t\tif uploadReader != nil {\n\t\t\t\tuploadReader.Close()\n\t\t\t}\n\t\t\tpreviousClose()\n\t\t}\n" + needle)
+# Closing the connection must cancel its own upload loop, not the initial dial.
+candidate = replace_once(candidate,
+    b"\tctx = context.WithoutCancel(ctx) //H: the uploads belong to the conn, which outlives the dial context",
+    b"\tctx, cancelUploads := context.WithCancel(context.WithoutCancel(ctx))\n\tpreviousClose := conn.onClose\n\tconn.onClose = func() {\n\t\tcancelUploads()\n\t\tpreviousClose()\n\t}")
+candidate = replace_once(candidate, b"\tgo func() {\n\t\tvar seq int64",
+                         b"\tgo func() {\n\t\tdefer cancelUploads()\n\t\tvar seq int64")
+assert b"DoneRunning()" in candidate
+assert b"c.getHTTPClient2 != nil" in candidate
+assert b"xmuxManager.CloseIdleConnections()" in candidate
+assert b"context.AfterFunc(quicConn.Context()" in candidate
+assert b"options.ResolveDownload()" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 apply_reviewed(data, resolutions)
