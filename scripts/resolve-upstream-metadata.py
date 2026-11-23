@@ -1198,7 +1198,7 @@ for old_msg, own_msg in (
     (b"Error reading from IP connection: %v, continuine...", b"read from IP connection: %v"),
 ):
     plain = replace_once(plain, old_msg, own_msg)
-assert balancer_code(plain) == balancer_code(own)
+assert balancer_code(normalize_imports(plain)) == balancer_code(normalize_imports(own))
 resolutions[path] = own
 
 path = "protocol/masque/h_config_test.go"
@@ -1209,4 +1209,83 @@ old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
      "08050447bcd72ba924d7df08ca9eb525e3ebb0a4")))
 assert subprocess.check_output(["gofmt"], input=own) == subprocess.check_output(["gofmt"], input=new) or own.split() == new.split()
 resolutions[path] = own
+# WireGuard uses the official single-flight, cancelable dial path. Keep the
+# fork's pause-aware retry behavior and detach the socket before closing it.
+path = "transport/wireguard/client_bind.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("4d2deb69984c1176ac1431e6e10e2cbd2037beb5",
+     "bb0276dd75c24e611edbf19d380c97325b1756fb",
+     "8a56ff7c2f23c4962f3d8aece4086837fe6c0ceb")))
+helper = checked_blob(data["tentative_tree"], "transport/wireguard/h_client_bind_dial.go",
+                      "1662838facb37e1501e9cdf150aeac0c7bc11fff")
+assert b"time.AfterFunc(C.TCPTimeout, cancelDial)" in helper
+assert b"func (c *ClientBind) hAbort()" in helper
+candidate = new
+start = own.index(b"const (\n\tclientBindPausePollInterval")
+end = own.index(b"type ClientBind", start)
+candidate = replace_once(candidate, b"type ClientBind struct", own[start:end] + b"type ClientBind struct")
+for signature in (b"func (c *ClientBind) receive(", b"func (c *ClientBind) Close("):
+    candidate = replace_once(candidate, function_blob(new, signature), function_blob(own, signature))
+start = own.index(b"func (c *ClientBind) waitActive()")
+end = own.index(b"type wireConn struct", start)
+candidate = replace_once(candidate, b"type wireConn struct", own[start:end] + b"type wireConn struct")
+# Snapshot the opening channel under the mutex when polling pause state.
+candidate = replace_once(candidate, b"\treturn !isDone(c.done)\n",
+                         b"\tc.connAccess.Lock()\n\tdefer c.connAccess.Unlock()\n\treturn !isDone(c.done)\n")
+candidate = replace_once(candidate, b"\ttimer := time.NewTimer(delay)\n",
+                         b"\tc.connAccess.Lock()\n\topened := c.done\n\tc.connAccess.Unlock()\n\ttimer := time.NewTimer(delay)\n")
+candidate = replace_once(candidate, b"\tcase <-c.done:\n\t\treturn false\n",
+                         b"\tcase <-opened:\n\t\treturn false\n")
+# Cancel the connection context before invoking a potentially blocking Close.
+candidate = replace_once(candidate, b"\tw.PacketConn.Close()\n\tclose(w.done)\n",
+                         b"\tclose(w.done)\n")
+candidate = replace_once(candidate, b"\t\tw.cancel() //H\n\t} //H\n\treturn nil\n",
+                         b"\t\tw.cancel() //H\n\t} //H\n\treturn w.PacketConn.Close()\n")
+assert b"return c.hConnect()" in candidate
+assert b"if c.aborted" in candidate
+assert b"func (c *ClientBind) waitAfterFailure()" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# AWG's deferred socket opening, endpoint changes and device lifecycle are
+# tightly coupled. Adopt the reviewed upstream implementation as one unit.
+for file, hashes in (
+    ("bind.go", ("13be5bfa685895d19c314d4050642787b9083a36", "7af1e9548823029e00954f3d557c21e70ca3edd5", "4c3c6ea83e56a0e2a78a1b87a88aead1449e8030")),
+    ("h_bind_later.go", ("2b8bc88fa564b319cca3f263a6560f32c3605a4d", "ff9dfe6d9d8db58579dcb2bca9ca882a0be13cfb", "387ccee6666fcb487e52b61a3ec733bbd64587a9")),
+    ("h_path.go", ("621ae5eb5c0c52582d2a934b2b479af74cdc4dfb", "41bfea6f45a92a6d63082f9e02bc5a914d984351", "fcafcc6545713ac349255cd486518e7f48133ca6")),
+    ("device.go", ("734a6b7546aa0acb689ae19509a24ca519cdd160", "d163192613ca7b5def224bc4d83a34ad80fb9a7d", "9db4d7b5232a6fd3ceeba6fe9350286c80dec593")),
+):
+    path = "transport/awg/" + file
+    old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+        ("base", "patched_tree", "upstream"), hashes))
+    candidate = new
+    if file == "bind.go":
+        for signature in (b"func (b *bind_adapter) receive(", b"func (b *bind_adapter) ParseEndpoint(", b"func (b *bind_adapter) SetMark("):
+            assert function_blob(own, signature) == function_blob(new, signature)
+        # Retain compatibility with old internal callers that omit peer options.
+        signature = b"func newBind(ctx context.Context, dial N.Dialer, peer netip.AddrPort, reserved *Reserved) conn.Bind {"
+        candidate = replace_once(candidate, signature,
+            b"func newBind(ctx context.Context, dial N.Dialer, peerOptions ...any) conn.Bind {\n\tvar peer netip.AddrPort\n\tvar reserved *Reserved\n\tif len(peerOptions) > 0 {\n\t\tpeer, _ = peerOptions[0].(netip.AddrPort)\n\t}\n\tif len(peerOptions) > 1 {\n\t\treserved, _ = peerOptions[1].(*Reserved)\n\t}")
+        assert b"func (b *bind_adapter) abort()" in candidate
+    elif file == "h_bind_later.go":
+        assert b"context.WithCancel(b.ctx)" in candidate
+        assert b"func (b *bind_adapter) receiveLater(" in candidate
+        assert b"func (b *bind_adapter) closeLater()" in candidate
+    elif file == "h_path.go":
+        candidate = replace_once(candidate, b'for _, line := range strings.Split(ipcConfig, "\\n") {',
+                                 b'for line := range strings.SplitSeq(ipcConfig, "\\n") {')
+        assert b"func (p *devicePath) useTun(" in candidate
+        assert b"func (p *devicePath) setAddresses(" in candidate
+        assert b"func (p *devicePath) track(" in candidate
+    elif file == "device.go":
+        checked_blob(data["tentative_tree"], "transport/awg/h_listen.go",
+                     "31847aca274c7a9d0dec315a6b6090401ac54ff9")
+        # Keep the existing public closed error when the device is absent.
+        candidate = replace_once(candidate, b'return "", os.ErrInvalid', b'return "", net.ErrClosed')
+        # A failed initialization must also release a newly created tunnel.
+        candidate = replace_once(candidate, b"\tif d.awgDevice != nil {\n\t\td.awgDevice.Close()\n\t}\n\treturn nil\n",
+                                 b"\tif d.awgDevice != nil {\n\t\td.awgDevice.Close()\n\t} else if d.tun != nil {\n\t\treturn d.tun.Close()\n\t}\n\treturn nil\n")
+        assert b"bind.abort()" in candidate
+        assert b"d.path.useTun(tun)" in candidate
+    resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 apply_reviewed(data, resolutions)
