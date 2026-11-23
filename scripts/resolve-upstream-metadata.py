@@ -1416,4 +1416,65 @@ resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 masque = git("show", data["tentative_tree"] + ":protocol/warp/endpoint_warp_masque.go")
 assert b"connectMASQUE(session *warpSession" in masque
 assert b"func (*masqueLinkState) included() bool" in masque
+# WARP tests: preserve strict explicit detour and IPv6 regression coverage.
+# The newer incomplete-profile tests supersede the two older no-panic cases.
+path = "protocol/warp/h_endpoint_warp_test.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("f4ed3357db664b11e606a4b5b970b25c4df3b9dd",
+     "d3fdd5d39c154b86c20d645a69f81e8d213b37c6",
+     "08f31da11a8d1e420b3caf4681d8e5e584b9abd3")))
+candidate = replace_once(new,
+    function_blob(new, b"func TestH_GetWarpProfileFallsBackToAllOutbounds("),
+    function_blob(own, b"func TestH_GetWarpProfileHonorsExplicitDetour("))
+candidate += b"\n" + function_blob(own, b"func TestH_WARPIPv6PeerAddress(") + b"\n"
+assert b"func TestH_WARPIncompleteProfileIsNotUsed(" in candidate
+assert b"func TestH_WARPIncompleteRegisteredDeviceFails(" in candidate
+assert b"func TestH_WARPIncompleteSavedDeviceIsRetired(" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "h_warp_detour_live_test.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("0a360189a14613cb8bead9df805f38e8c149b06a",
+     "5680b7f5d843a74e88ea0e25a1342cef6c202052",
+     "600434fdb5f56e9585baf76dc4e5726cd408362d")))
+plain = replace_once(new, b"b.warp().Status()", b"adapter.OutboundStatus(b.warp())")
+plain = replace_once(plain, b'const hWARPLivePassword = "warp-live-password"\nconst hWARPLiveUUID = "b831381d-6324-4d53-ad4f-8cda48b30811"',
+    b'const (\n\thWARPLivePassword = "warp-live-password"\n\thWARPLiveUUID = "b831381d-6324-4d53-ad4f-8cda48b30811"\n)')
+assert balancer_code(plain) == balancer_code(own)
+resolutions[path] = own
+
+# AWG endpoint: deferred DNS and bind lifecycle, while retaining the fork's
+# boolean MTU setting, key handling, and secret-free logging.
+path = "protocol/awg/endpoint.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("7c447636d9def8220a0398d2cc4df107e6c30b91",
+     "ca0c51ff0dcd9c1872f94397f690f8b7a911a21e",
+     "097cbf18968f6dafc5a1dccabf1a383dd4ae78af")))
+opts = git("show", data["tentative_tree"] + ":option/awg.go")
+assert re.search(rb"MTUDiscovery\s+bool\s+", opts)
+candidate = replace_once(new, b'logger.Debug("AWG IPC config:\\n", ipc)', b'logger.Debug("AWG IPC configuration prepared")')
+candidate = replace_once(candidate, b"options.MTUDiscovery == nil || *options.MTUDiscovery", b"options.MTUDiscovery")
+# Preserve support for the existing base64 key format and also accept hex.
+needle = b'\t// AmneziaWG 3.x\n\tfor _, setting := range []struct{ key, value string }{\n\t\t{"header_protection_key", awg.HeaderProtectionKey},'
+replacement = b'''\t// AmneziaWG 3.x
+	if awg.HeaderProtectionKey != "" {
+		key, err := hex.DecodeString(awg.HeaderProtectionKey)
+		if err != nil || len(key) != 32 {
+			key, err = base64.StdEncoding.DecodeString(awg.HeaderProtectionKey)
+		}
+		if err != nil || len(key) != 32 {
+			return "", E.New("invalid AWG header protection key")
+		}
+		s += "\\nheader_protection_key=" + hex.EncodeToString(key)
+	}
+	for _, setting := range []struct{ key, value string }{'''
+candidate = replace_once(candidate, needle, replacement)
+assert b"deferDomainPeers(options)" in candidate
+assert b"o.startResolvingPeers()" in candidate
+assert b"peerUsers.Lookup(source.Addr)" in candidate
+assert b'logger.Debug("AWG IPC configuration prepared")' in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 apply_reviewed(data, resolutions)
