@@ -1,0 +1,2142 @@
+diff --git a/protocol/snell/inbound.go b/protocol/snell/inbound.go
+index 2d9300742d3e04e0faa32f4a4a37816be15df578..39e523433575e5c2ebbc159513ec757b81dd58b1 100644
+--- a/protocol/snell/inbound.go
++++ b/protocol/snell/inbound.go
+@@ -16,6 +16,7 @@ import (
+ 	"github.com/sagernet/sing-snell/snellv5"
+ 	"github.com/sagernet/sing-snell/snellv6"
+ 	"github.com/sagernet/sing/common/auth"
++	"github.com/sagernet/sing/common/buf"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	F "github.com/sagernet/sing/common/format"
+ 	"github.com/sagernet/sing/common/logger"
+@@ -31,11 +32,12 @@ var _ adapter.TCPInjectableInbound = (*Inbound)(nil)
+ 
+ type Inbound struct {
+ 	inbound.Adapter
+-	router   adapter.ConnectionRouterEx
+-	logger   logger.ContextLogger
+-	listener *listener.Listener
+-	service  snellprotocol.Service
+-	users    []option.SnellUser
++	router    adapter.ConnectionRouterEx
++	logger    logger.ContextLogger
++	listener  *listener.Listener
++	quicProxy *quicProxyServer
++	service   snellprotocol.Service
++	users     []option.SnellUser
+ }
+ 
+ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.SnellInboundOptions) (adapter.Inbound, error) {
+@@ -55,6 +57,15 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+ 			keyList[index] = []byte(user.UserKey)
+ 		}
+ 	}
++	if options.QuicProxy && options.Version != 5 {
++		return nil, E.New("snell: QUIC Proxy requires Snell v5")
++	}
++	if options.QuicProxy {
++		inbound.quicProxy = newQUICProxyServer(ctx, inbound.router, logger, tag, []byte(options.PSK), options.Users)
++	}
++	if options.QuicProxy && options.Version != 5 {
++		return nil, E.New("snell: QUIC Proxy requires version 5")
++	}
+ 	var err error
+ 	switch options.Version {
+ 	case 5:
+@@ -109,12 +120,18 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	listenNetworks := []string{N.NetworkTCP}
++	if inbound.quicProxy != nil {
++		listenNetworks = append(listenNetworks, N.NetworkUDP)
++	}
+ 	inbound.listener = listener.New(listener.Options{
+-		Context:           ctx,
+-		Logger:            logger,
+-		Network:           []string{N.NetworkTCP},
+-		Listen:            options.ListenOptions,
+-		ConnectionHandler: inbound,
++		Context:                  ctx,
++		Logger:                   logger,
++		Network:                  listenNetworks,
++		Listen:                   options.ListenOptions,
++		ConnectionHandler:        inbound,
++		PacketHandler:            inbound,
++		ThreadUnsafePacketWriter: true,
+ 	})
+ 	return inbound, nil
+ }
+@@ -123,14 +140,33 @@ func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 	if stage != adapter.StartStateStart {
+ 		return nil
+ 	}
+-	err := h.listener.Start()
+-	if err != nil {
++	if err := h.listener.Start(); err != nil {
++		_ = h.listener.Close()
+ 		return err
+ 	}
+-	scope.Add(h.listener.Close)
++	if h.quicProxy != nil {
++		h.quicProxy.start(h.listener.PacketWriter())
++	}
+ 	return nil
+ }
+ 
++func (h *Inbound) Close() error {
++	if h.quicProxy != nil {
++		h.quicProxy.close()
++	}
++	return h.listener.Close()
++}
++
++// NewPacket serves the optional v5 UDP/UDP QUIC Proxy path.
++// TCP and ordinary Snell UDP-over-TCP continue through sing-snell.
++func (h *Inbound) NewPacket(packet *buf.Buffer, source M.Socksaddr) {
++	if h.quicProxy == nil {
++		packet.Release()
++		return
++	}
++	h.quicProxy.handle(packet, source)
++}
++
+ func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+ 	err := h.service.NewConnection(adapter.WithContext(ctx, &metadata), conn, metadata.Source, onClose)
+ 	if err != nil {
+@@ -170,16 +206,15 @@ func (h *Inbound) newConnection(ctx context.Context, conn net.Conn, metadata ada
+ 	metadata.InboundType = h.Type()
+ 	if len(h.users) > 0 {
+ 		userIndex, loaded := auth.UserFromContext[int](ctx)
+-		if !loaded {
++		if !loaded || userIndex < 0 || userIndex >= len(h.users) {
+ 			N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
+ 			return
+ 		}
+ 		user := h.users[userIndex].Name
+ 		if user == "" {
+ 			user = F.ToString(userIndex)
+-		} else {
+-			metadata.User = user
+ 		}
++		metadata.User = user
+ 		h.logger.InfoContext(ctx, "[", user, "] inbound connection to ", metadata.Destination)
+ 	} else {
+ 		h.logger.InfoContext(ctx, "inbound connection to ", metadata.Destination)
+@@ -194,16 +229,15 @@ func (h *Inbound) newPacketConnection(ctx context.Context, conn N.PacketConn, me
+ 	metadata.UDPDisableDomainUnmapping = true
+ 	if len(h.users) > 0 {
+ 		userIndex, loaded := auth.UserFromContext[int](ctx)
+-		if !loaded {
++		if !loaded || userIndex < 0 || userIndex >= len(h.users) {
+ 			N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
+ 			return
+ 		}
+ 		user := h.users[userIndex].Name
+ 		if user == "" {
+ 			user = F.ToString(userIndex)
+-		} else {
+-			metadata.User = user
+ 		}
++		metadata.User = user
+ 		h.logger.InfoContext(ctx, "[", user, "] inbound packet connection from ", metadata.Source)
+ 	} else {
+ 		h.logger.InfoContext(ctx, "inbound packet connection from ", metadata.Source)
+diff --git a/protocol/snell/outbound.go b/protocol/snell/outbound.go
+index 3da966a3e4015e2756b60f292f3e33eca715256d..f24a9367eca3b7ff127905b328c1980926f9094a 100644
+--- a/protocol/snell/outbound.go
++++ b/protocol/snell/outbound.go
+@@ -26,11 +26,14 @@ func RegisterOutbound(registry *outbound.Registry) {
+ 
+ type Outbound struct {
+ 	outbound.Adapter
+-	logger     logger.ContextLogger
+-	dialer     N.Dialer
+-	client     snellClient
+-	serverAddr M.Socksaddr
+-	reuse      bool
++	logger      logger.ContextLogger
++	dialer      N.Dialer
++	client      snellClient
++	serverAddr  M.Socksaddr
++	reuse       bool
++	quicProxy   bool
++	quicPSK     []byte
++	quicUserKey []byte
+ }
+ 
+ var (
+@@ -56,7 +59,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
+ 	serverAddr := options.ServerOptions.Build()
+ 	var client snellClient
+ 	switch options.Version {
+-	case 4:
++	case 4, 5:
+ 		var obfsMode snellprotocol.ObfsMode
+ 		obfsMode, err = snellprotocol.ParseObfsMode(options.ObfsOptions.ObfsMode)
+ 		if err != nil {
+@@ -94,12 +97,15 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
+ 		return nil, err
+ 	}
+ 	outbound := &Outbound{
+-		Adapter:    outbound.NewAdapterWithDialerOptions(C.TypeSnell, tag, options.Network.Build(), options.DialerOptions),
+-		logger:     logger,
+-		dialer:     outboundDialer,
+-		client:     client,
+-		serverAddr: serverAddr,
+-		reuse:      options.Reuse,
++		Adapter:     outbound.NewAdapterWithDialerOptions(C.TypeSnell, tag, options.Network.Build(), options.DialerOptions),
++		logger:      logger,
++		dialer:      outboundDialer,
++		client:      client,
++		serverAddr:  serverAddr,
++		reuse:       options.Reuse,
++		quicProxy:   options.Version == 5,
++		quicPSK:     []byte(options.PSK),
++		quicUserKey: []byte(options.UserKey),
+ 	}
+ 	return outbound, nil
+ }
+@@ -117,6 +123,9 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination
+ 		}
+ 		return h.client.DialContext(ctx, destination)
+ 	case N.NetworkUDP:
++		if h.quicProxy {
++			return bufio.NewBindPacketConn(newQUICProxyLazyClient(ctx, h, destination), destination), nil
++		}
+ 		h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
+ 		conn, err := h.dialer.DialContext(ctx, N.NetworkTCP, h.serverAddr)
+ 		if err != nil {
+@@ -134,6 +143,9 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination
+ }
+ 
+ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++	if h.quicProxy {
++		return newQUICProxyLazyClient(ctx, h, destination), nil
++	}
+ 	ctx, metadata := adapter.ExtendContext(ctx)
+ 	metadata.Outbound = h.Tag()
+ 	metadata.Destination = destination
+@@ -166,10 +178,6 @@ func (h *Outbound) CloseIdleConnections() {
+ 	h.client.CloseIdleConnections()
+ }
+ 
+-func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+-	if stage != adapter.StartStateInitialize {
+-		return nil
+-	}
+-	scope.Add(h.client.Close)
+-	return nil
++func (h *Outbound) Close() error {
++	return h.client.Close()
+ }
+diff --git a/protocol/snell/quic_proxy_client.go b/protocol/snell/quic_proxy_client.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..10d885b6f907d9060eee9d03c62f7fecfc888b0c
+--- /dev/null
++++ b/protocol/snell/quic_proxy_client.go
+@@ -0,0 +1,254 @@
++package snell
++
++import (
++	"context"
++	"crypto/rand"
++	"encoding/binary"
++	"errors"
++	"net"
++	"os"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++)
++
++func encodeQUICProxyPacket(psk, userKey []byte, destination M.Socksaddr, inner []byte) ([]byte, error) {
++	host := destination.AddrString()
++	if len(host) == 0 || len(host) > 255 || len(userKey) > 255 || destination.Port == 0 || !isQUICInitial(inner) {
++		return nil, errors.New("snell QUIC: invalid initial, user key or destination")
++	}
++	plain := make([]byte, 0, 3+len(userKey)+1+len(host)+2+len(inner))
++	plain = append(plain, 1, 1, byte(len(userKey)))
++	plain = append(plain, userKey...)
++	plain = append(plain, byte(len(host)))
++	plain = append(plain, host...)
++	plain = binary.BigEndian.AppendUint16(plain, destination.Port)
++	plain = append(plain, inner...)
++	if 16+23+len(plain)+16 > 65507 {
++		return nil, errors.New("snell QUIC: payload too large")
++	}
++	salt := make([]byte, 16)
++	if _, err := rand.Read(salt); err != nil {
++		return nil, err
++	}
++	aead, err := quicProxyAEAD(psk, salt)
++	if err != nil {
++		return nil, err
++	}
++	hdr := make([]byte, 7)
++	hdr[0] = 4
++	binary.BigEndian.PutUint16(hdr[5:], uint16(len(plain)))
++	nonce := make([]byte, 12)
++	out := append([]byte{}, salt...)
++	out = append(out, aead.Seal(nil, nonce, hdr, nil)...)
++	binary.LittleEndian.PutUint64(nonce, 1)
++	return append(out, aead.Seal(nil, nonce, plain, nil)...), nil
++}
++
++// quicProxyLazyClient chooses UDP/UDP only for QUIC Initial datagrams.
++// Other UDP retains the authenticated UDP-over-TCP path.
++type quicProxyLazyClient struct {
++	ctx           context.Context
++	cancel        context.CancelFunc
++	outbound      *Outbound
++	destination   M.Socksaddr
++	mu            sync.Mutex
++	ready         chan struct{}
++	conn          net.PacketConn
++	startupErr    error
++	closed        atomic.Bool
++	readDeadline  quicProxyDeadline
++	writeDeadline quicProxyDeadline
++}
++
++func newQUICProxyLazyClient(ctx context.Context, h *Outbound, dest M.Socksaddr) *quicProxyLazyClient {
++	ctx, cancel := context.WithCancel(ctx)
++	return &quicProxyLazyClient{ctx: ctx, cancel: cancel, outbound: h, destination: dest, ready: make(chan struct{})}
++}
++
++// Called with mu held. Close cancels the dial before taking mu.
++func (c *quicProxyLazyClient) connect(initial []byte, addr net.Addr) error {
++	if c.conn != nil || c.startupErr != nil {
++		return c.startupErr
++	}
++	dest := c.destination
++	if addr != nil {
++		dest = M.SocksaddrFromNet(addr)
++	}
++	ctx := c.ctx
++	if at, _ := c.writeDeadline.snapshot(); !at.IsZero() {
++		var cancel context.CancelFunc
++		ctx, cancel = context.WithDeadline(ctx, at)
++		defer cancel()
++	}
++	if dest.IsValid() && isQUICInitial(initial) {
++		conn, err := c.outbound.dialer.DialContext(ctx, N.NetworkUDP, c.outbound.serverAddr)
++		if err != nil {
++			c.startupErr = err
++			close(c.ready)
++			return err
++		}
++		c.conn = &quicProxyDatagramConn{Conn: conn, destination: dest, psk: c.outbound.quicPSK, userKey: c.outbound.quicUserKey}
++	} else {
++		conn, err := c.outbound.dialer.DialContext(ctx, N.NetworkTCP, c.outbound.serverAddr)
++		if err != nil {
++			c.startupErr = err
++			close(c.ready)
++			return err
++		}
++		packet, err := c.outbound.client.DialPacketConn(conn)
++		if err != nil {
++			conn.Close()
++			c.startupErr = err
++			close(c.ready)
++			return err
++		}
++		c.conn = packet
++	}
++	at, _ := c.readDeadline.snapshot()
++	_ = c.conn.SetReadDeadline(at)
++	at, _ = c.writeDeadline.snapshot()
++	_ = c.conn.SetWriteDeadline(at)
++	close(c.ready)
++	return nil
++}
++
++func (c *quicProxyLazyClient) WriteTo(b []byte, addr net.Addr) (int, error) {
++	if c.closed.Load() {
++		return 0, net.ErrClosed
++	}
++	if c.writeDeadline.expired() {
++		return 0, os.ErrDeadlineExceeded
++	}
++	c.mu.Lock()
++	if c.closed.Load() {
++		c.mu.Unlock()
++		return 0, net.ErrClosed
++	}
++	if err := c.connect(b, addr); err != nil {
++		c.mu.Unlock()
++		return 0, err
++	}
++	conn := c.conn
++	c.mu.Unlock()
++	return conn.WriteTo(b, addr)
++}
++
++func (c *quicProxyLazyClient) ReadFrom(b []byte) (int, net.Addr, error) {
++	if err := c.readDeadline.wait(c.ctx, c.ready); err != nil {
++		if c.closed.Load() {
++			return 0, nil, net.ErrClosed
++		}
++		return 0, nil, err
++	}
++	c.mu.Lock()
++	conn, err := c.conn, c.startupErr
++	c.mu.Unlock()
++	if err != nil {
++		return 0, nil, err
++	}
++	if conn == nil {
++		return 0, nil, net.ErrClosed
++	}
++	return conn.ReadFrom(b)
++}
++
++func (c *quicProxyLazyClient) Close() error {
++	if c.closed.Swap(true) {
++		return nil
++	}
++	c.cancel()
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.conn == nil && c.startupErr == nil {
++		close(c.ready)
++	}
++	if c.conn != nil {
++		return c.conn.Close()
++	}
++	return nil
++}
++
++func (c *quicProxyLazyClient) LocalAddr() net.Addr {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.conn != nil {
++		return c.conn.LocalAddr()
++	}
++	return &net.UDPAddr{}
++}
++
++func (c *quicProxyLazyClient) SetDeadline(t time.Time) error {
++	c.readDeadline.set(t)
++	c.writeDeadline.set(t)
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.conn != nil {
++		return c.conn.SetDeadline(t)
++	}
++	return nil
++}
++
++func (c *quicProxyLazyClient) SetReadDeadline(t time.Time) error {
++	c.readDeadline.set(t)
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.conn != nil {
++		return c.conn.SetReadDeadline(t)
++	}
++	return nil
++}
++
++func (c *quicProxyLazyClient) SetWriteDeadline(t time.Time) error {
++	c.writeDeadline.set(t)
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.conn != nil {
++		return c.conn.SetWriteDeadline(t)
++	}
++	return nil
++}
++
++type quicProxyDatagramConn struct {
++	net.Conn
++	destination  M.Socksaddr
++	psk, userKey []byte
++	mu           sync.Mutex
++	responded    atomic.Bool
++}
++
++func (c *quicProxyDatagramConn) WriteTo(p []byte, addr net.Addr) (int, error) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if addr != nil && M.SocksaddrFromNet(addr) != c.destination {
++		return 0, errors.New("snell QUIC: cannot change destination within a flow")
++	}
++	// A lost first datagram must not strand the peer without its authenticated
++	// mapping. Every retransmitted Initial is enveloped until a reply arrives.
++	if !c.responded.Load() && isQUICInitial(p) {
++		wrapped, err := encodeQUICProxyPacket(c.psk, c.userKey, c.destination, p)
++		if err != nil {
++			return 0, err
++		}
++		n, err := c.Conn.Write(wrapped)
++		if err != nil {
++			return 0, err
++		}
++		if n != len(wrapped) {
++			return 0, errors.New("snell QUIC: short datagram write")
++		}
++		return len(p), nil
++	}
++	return c.Conn.Write(p)
++}
++
++func (c *quicProxyDatagramConn) ReadFrom(p []byte) (int, net.Addr, error) {
++	n, err := c.Conn.Read(p)
++	if n > 0 {
++		c.responded.Store(true)
++	}
++	return n, c.destination, err
++}
+diff --git a/protocol/snell/quic_proxy_deadline.go b/protocol/snell/quic_proxy_deadline.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..320837bce0e6853bcce9b78c1c95f25ef6f56b35
+--- /dev/null
++++ b/protocol/snell/quic_proxy_deadline.go
+@@ -0,0 +1,83 @@
++package snell
++
++import (
++	"context"
++	"os"
++	"sync"
++	"time"
++)
++
++// A zero-value deadline supports updates while a read is waiting for startup
++// or queued datagrams; a single snapshot timer alone would miss those updates.
++type quicProxyDeadline struct {
++	mu      sync.Mutex
++	at      time.Time
++	changed chan struct{}
++}
++
++func (d *quicProxyDeadline) set(at time.Time) {
++	d.mu.Lock()
++	defer d.mu.Unlock()
++	d.at = at
++	if d.changed != nil {
++		close(d.changed)
++	}
++	d.changed = make(chan struct{})
++}
++
++func (d *quicProxyDeadline) snapshot() (time.Time, <-chan struct{}) {
++	d.mu.Lock()
++	defer d.mu.Unlock()
++	if d.changed == nil {
++		d.changed = make(chan struct{})
++	}
++	return d.at, d.changed
++}
++
++func (d *quicProxyDeadline) expired() bool {
++	at, _ := d.snapshot()
++	return !at.IsZero() && !time.Now().Before(at)
++}
++
++func (d *quicProxyDeadline) wait(ctx context.Context, ready <-chan struct{}) error {
++	for {
++		select {
++		case <-ready:
++			return nil
++		default:
++		}
++		at, changed := d.snapshot()
++		if !at.IsZero() && !time.Now().Before(at) {
++			return os.ErrDeadlineExceeded
++		}
++		var timer *time.Timer
++		var timeout <-chan time.Time
++		if !at.IsZero() {
++			timer = time.NewTimer(time.Until(at))
++			timeout = timer.C
++		}
++		select {
++		case <-ctx.Done():
++			if timer != nil {
++				timer.Stop()
++			}
++			select {
++			case <-ready:
++				return nil
++			default:
++				return ctx.Err()
++			}
++		case <-ready:
++			if timer != nil {
++				timer.Stop()
++			}
++			return nil
++		case <-timeout:
++			return os.ErrDeadlineExceeded
++		case <-changed:
++			if timer != nil {
++				timer.Stop()
++			}
++		}
++	}
++}
+diff --git a/protocol/snell/quic_proxy_integration_test.go b/protocol/snell/quic_proxy_integration_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e257a4b7db48b233a73f374973675234266a7fd6
+--- /dev/null
++++ b/protocol/snell/quic_proxy_integration_test.go
+@@ -0,0 +1,612 @@
++package snell
++
++import (
++	"bytes"
++	"context"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/tls"
++	"crypto/x509"
++	"encoding/json"
++	"encoding/pem"
++	"errors"
++	"fmt"
++	"io"
++	"math/big"
++	"net"
++	"net/http"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/sagernet/quic-go"
++	"github.com/sagernet/quic-go/http3"
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/adapter/htest"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/buf"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++)
++
++type quicTestRouter struct {
++	adapter.Router
++	users    chan string
++	up, down atomic.Int64
++}
++
++func (r *quicTestRouter) RoutePacketConnectionEx(ctx context.Context, flow N.PacketConn, m adapter.InboundContext, onClose N.CloseHandlerFunc) {
++	r.users <- m.User
++	go func() {
++		conn, err := net.Dial("udp", m.Destination.String())
++		if err != nil {
++			flow.Close()
++			onClose(err)
++			return
++		}
++		defer conn.Close()
++		defer flow.Close()
++		reverse := make(chan struct{})
++		go func() {
++			defer close(reverse)
++			defer flow.Close()
++			data := make([]byte, 65535)
++			for {
++				n, err := conn.Read(data)
++				if err != nil {
++					return
++				}
++				r.down.Add(int64(n))
++				head := N.CalculateFrontHeadroom(flow)
++				packet := buf.NewSize(head + n + N.CalculateRearHeadroom(flow))
++				packet.Resize(head, 0)
++				_, _ = packet.Write(data[:n])
++				if err = flow.WritePacket(packet, m.Destination); err != nil {
++					return
++				}
++			}
++		}()
++		for {
++			packet := buf.NewPacket()
++			_, err = flow.ReadPacket(packet)
++			if err != nil {
++				packet.Release()
++				break
++			}
++			r.up.Add(int64(packet.Len()))
++			_, err = conn.Write(packet.Bytes())
++			packet.Release()
++			if err != nil {
++				break
++			}
++		}
++		conn.Close()
++		<-reverse
++		if onClose != nil {
++			onClose(err)
++		}
++	}()
++}
++
++func freeV5Port(t *testing.T) uint16 {
++	t.Helper()
++	// The inbound listens on TCP and UDP with the same port. A TCP-only free-port
++	// check can select a port already held by UDP (notably on macOS runners).
++	for range 32 {
++		listener, err := net.Listen("tcp", "127.0.0.1:0")
++		if err != nil {
++			t.Fatal(err)
++		}
++		port := M.SocksaddrFromNet(listener.Addr()).Port
++		packet, err := net.ListenPacket("udp", fmt.Sprintf("127.0.0.1:%d", port))
++		if err == nil {
++			packet.Close()
++			listener.Close()
++			return port
++		}
++		listener.Close()
++	}
++	t.Fatal("unable to find a port available for both TCP and UDP")
++	return 0
++}
++
++func startV5Inbound(t *testing.T) (M.Socksaddr, *quicTestRouter, *Inbound) {
++	t.Helper()
++	router := &quicTestRouter{users: make(chan string, 64)}
++	port := freeV5Port(t)
++	// JSON exercises the public version-specific options decoder as well.
++	var opts option.SnellInboundOptions
++	raw := fmt.Sprintf(`{"version":5,"psk":"snell-v5-integration-key","quic_proxy":true,"listen":"127.0.0.1","listen_port":%d,"users":[{"name":"alice","userkey":"alice-key"},{"name":"bob","userkey":"bob-key"}]}`, port)
++	if err := json.Unmarshal([]byte(raw), &opts); err != nil {
++		t.Fatal(err)
++	}
++	in, err := NewInbound(context.Background(), router, log.NewNOPFactory().Logger(), "v5", opts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err = htest.Start(in, adapter.StartStateStart); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = htest.Close(in) })
++	return M.ParseSocksaddrHostPort("127.0.0.1", port), router, in.(*Inbound)
++}
++
++func v5Outbound(t *testing.T, server M.Socksaddr, key string) *Outbound {
++	t.Helper()
++	var opts option.SnellOutboundOptions
++	raw := fmt.Sprintf(`{"version":5,"server":"%s","server_port":%d,"psk":"snell-v5-integration-key","userkey":%q}`, server.AddrString(), server.Port, key)
++	if err := json.Unmarshal([]byte(raw), &opts); err != nil {
++		t.Fatal(err)
++	}
++	out, err := NewOutbound(context.Background(), nil, log.NewNOPFactory().Logger(), "v5", opts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { out.(*Outbound).Close() })
++	return out.(*Outbound)
++}
++
++func serveV5HTTP3(t *testing.T) M.Socksaddr {
++	t.Helper()
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	template := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), DNSNames: []string{"localhost"}, KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
++	cert, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	priv, err := x509.MarshalECPrivateKey(key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	pair, err := tls.X509KeyPair(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert}), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: priv}))
++	if err != nil {
++		t.Fatal(err)
++	}
++	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	server := &http3.Server{TLSConfig: &tls.Config{Certificates: []tls.Certificate{pair}}, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		data, err := io.ReadAll(r.Body)
++		if err != nil {
++			http.Error(w, err.Error(), 500)
++			return
++		}
++		w.Write(data)
++	})}
++	done := make(chan struct{})
++	go func() { defer close(done); _ = server.Serve(pc) }()
++	t.Cleanup(func() { server.Close(); pc.Close(); <-done })
++	return M.SocksaddrFromNet(pc.LocalAddr())
++}
++
++func exchangeV5HTTP3(t *testing.T, out *Outbound, dest M.Socksaddr, version quic.Version, bound bool) {
++	t.Helper()
++	exchangeV5HTTP3For(t, out, dest, version, bound, 0)
++}
++
++func exchangeV5HTTP3For(t *testing.T, out *Outbound, dest M.Socksaddr, version quic.Version, bound bool, duration time.Duration) {
++	t.Helper()
++	var pc net.PacketConn
++	tr := &http3.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, QUICConfig: &quic.Config{Versions: []quic.Version{version}, HandshakeIdleTimeout: 5 * time.Second, MaxIdleTimeout: 10 * time.Second}, Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
++		var err error
++		if bound {
++			var c net.Conn
++			c, err = out.DialContext(ctx, "udp", dest)
++			if err == nil {
++				pc = c.(net.PacketConn)
++			}
++		} else {
++			pc, err = out.ListenPacket(ctx, dest)
++		}
++		if err != nil {
++			return nil, err
++		}
++		return quic.DialEarly(ctx, pc, dest, tlsCfg, cfg)
++	}}
++	defer tr.Close()
++	defer func() {
++		if pc != nil {
++			pc.Close()
++		}
++	}()
++	client := &http.Client{Transport: tr, Timeout: 15 * time.Second}
++	end := time.Now().Add(duration)
++	for i := 0; i < 10 || time.Now().Before(end); i++ {
++		if duration > 0 {
++			time.Sleep(50 * time.Millisecond)
++		}
++		payload := bytes.Repeat([]byte{byte(i)}, 65536+i)
++		resp, err := client.Post("https://localhost/echo", "application/octet-stream", bytes.NewReader(payload))
++		if err != nil {
++			t.Fatal(err)
++		}
++		got, err := io.ReadAll(resp.Body)
++		resp.Body.Close()
++		if err != nil {
++			t.Fatal(err)
++		}
++		if resp.ProtoMajor != 3 || resp.StatusCode != 200 || !bytes.Equal(got, payload) {
++			t.Fatal("HTTP/3 response corruption")
++		}
++	}
++}
++
++func TestSnellV5HTTP3(t *testing.T) {
++	dest := serveV5HTTP3(t)
++	server, router, _ := startV5Inbound(t)
++	for _, v := range []quic.Version{quic.Version1, quic.Version2} {
++		for _, bound := range []bool{false, true} {
++			t.Run(fmt.Sprintf("version=%v/bound=%v", v, bound), func(t *testing.T) { exchangeV5HTTP3(t, v5Outbound(t, server, "alice-key"), dest, v, bound) })
++		}
++	}
++	if router.up.Load() == 0 || router.down.Load() == 0 {
++		t.Fatal("traffic accounting is empty")
++	}
++	for range 4 {
++		select {
++		case user := <-router.users:
++			if user != "alice" {
++				t.Fatal("wrong accounting user", user)
++			}
++		case <-time.After(time.Second):
++			t.Fatal("missing routed QUIC flow")
++		}
++	}
++}
++
++func TestSnellV5OfficialServer(t *testing.T) {
++	binary := os.Getenv("SNELL_V5_SERVER")
++	if binary == "" {
++		t.Skip("set SNELL_V5_SERVER to official snell-server v5.0.1")
++	}
++	port := freeV5Port(t)
++	dir := t.TempDir()
++	cfg := filepath.Join(dir, "snell.conf")
++	if err := os.WriteFile(cfg, []byte(fmt.Sprintf("[snell-server]\nlisten = 127.0.0.1:%d\npsk = snell-v5-integration-key\n", port)), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	logfile, err := os.Create(filepath.Join(dir, "server.log"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer logfile.Close()
++	cmd := exec.Command(binary, "-c", cfg)
++	cmd.Stdout = logfile
++	cmd.Stderr = logfile
++	if err = cmd.Start(); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
++	address := M.ParseSocksaddrHostPort("127.0.0.1", port)
++	ready := false
++	for range 100 {
++		conn, err := net.DialTimeout("tcp", address.String(), 50*time.Millisecond)
++		if err == nil {
++			conn.Close()
++			ready = true
++			break
++		}
++		time.Sleep(10 * time.Millisecond)
++	}
++	if !ready {
++		data, _ := os.ReadFile(logfile.Name())
++		t.Fatalf("official server did not start: %s", data)
++	}
++	dest := serveV5HTTP3(t)
++	for _, v := range []quic.Version{quic.Version1, quic.Version2} {
++		t.Run(fmt.Sprint(v), func(t *testing.T) { exchangeV5HTTP3(t, v5Outbound(t, address, ""), dest, v, false) })
++	}
++}
++
++func TestSnellV5LazyReadDeadline(t *testing.T) {
++	c := newQUICProxyLazyClient(context.Background(), &Outbound{}, M.Socksaddr{})
++	defer c.Close()
++	done := make(chan error, 1)
++	go func() { _, _, err := c.ReadFrom(make([]byte, 10)); done <- err }()
++	c.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
++	select {
++	case err := <-done:
++		if !errors.Is(err, os.ErrDeadlineExceeded) {
++			t.Fatal(err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("read deadline ignored before first write")
++	}
++}
++
++func TestSnellV5QueueOverflowKeepsSession(t *testing.T) {
++	f := &quicProxySession{input: make(chan []byte, 1), done: make(chan struct{})}
++	f.enqueue([]byte{1})
++	f.enqueue([]byte{2})
++	select {
++	case <-f.done:
++		t.Fatal("UDP loss closed session")
++	default:
++	}
++}
++
++func TestSnellV5SessionDeadline(t *testing.T) {
++	f := &quicProxySession{input: make(chan []byte, 1), done: make(chan struct{})}
++	done := make(chan error, 1)
++	go func() { b := buf.NewPacket(); defer b.Release(); _, err := f.ReadPacket(b); done <- err }()
++	f.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
++	select {
++	case err := <-done:
++		if !errors.Is(err, os.ErrDeadlineExceeded) {
++			t.Fatal(err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("server deadline ignored")
++	}
++}
++
++// Drop both an outgoing authenticated Initial and the first server reply.
++// QUIC must recover without sending Snell framing to the destination server.
++type v5LossDialer struct {
++	v6TestDialer
++	remaining atomic.Int32
++}
++
++func (d *v5LossDialer) DialContext(ctx context.Context, network string, dest M.Socksaddr) (net.Conn, error) {
++	c, err := d.v6TestDialer.DialContext(ctx, network, dest)
++	if err != nil {
++		return nil, err
++	}
++	if network == "udp" {
++		return &v5LossConn{Conn: c, remaining: &d.remaining}, nil
++	}
++	return c, nil
++}
++
++type v5LossConn struct {
++	net.Conn
++	remaining *atomic.Int32
++}
++
++func (c *v5LossConn) Write(p []byte) (int, error) {
++	if c.remaining.Add(-1) >= 0 {
++		return len(p), nil
++	}
++	return c.Conn.Write(p)
++}
++
++type v5LossWriter struct {
++	N.PacketWriter
++	remaining atomic.Int32
++}
++
++func (w *v5LossWriter) WritePacket(b *buf.Buffer, dest M.Socksaddr) error {
++	if w.remaining.Add(-1) >= 0 {
++		b.Release()
++		return nil
++	}
++	return w.PacketWriter.WritePacket(b, dest)
++}
++
++func TestSnellV5HTTP3PacketLoss(t *testing.T) {
++	dest := serveV5HTTP3(t)
++	server, router, in := startV5Inbound(t)
++	dialer := &v5LossDialer{}
++	dialer.remaining.Store(1)
++	out := v5Outbound(t, server, "bob-key")
++	out.dialer = dialer
++	in.quicProxy.mu.Lock()
++	writer := &v5LossWriter{PacketWriter: in.quicProxy.writer}
++	writer.remaining.Store(1)
++	in.quicProxy.writer = writer
++	in.quicProxy.mu.Unlock()
++	exchangeV5HTTP3(t, out, dest, quic.Version1, false)
++	select {
++	case user := <-router.users:
++		if user != "bob" {
++			t.Fatal(user)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("missing routed flow")
++	}
++	select {
++	case <-router.users:
++		t.Fatal("retransmission created a second flow")
++	default:
++	}
++}
++
++func TestSnellV5HTTP3Soak(t *testing.T) {
++	text := os.Getenv("SNELL_V5_SOAK_TEST")
++	if text == "" {
++		t.Skip("set SNELL_V5_SOAK_TEST=3m for sustained HTTP/3 test")
++	}
++	duration, err := time.ParseDuration(text)
++	if err != nil || duration <= 0 {
++		t.Fatal("invalid soak duration")
++	}
++	dest := serveV5HTTP3(t)
++	server, _, _ := startV5Inbound(t)
++	for _, v := range []quic.Version{quic.Version1, quic.Version2} {
++		t.Run(fmt.Sprint(v), func(t *testing.T) {
++			t.Parallel()
++			exchangeV5HTTP3For(t, v5Outbound(t, server, "alice-key"), dest, v, false, duration)
++		})
++	}
++}
++
++func TestSnellV5UDPOverTCPFallback(t *testing.T) {
++	server, router, _ := startV5Inbound(t)
++	echo, err := net.ListenPacket("udp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer echo.Close()
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		data := make([]byte, 2048)
++		for {
++			n, addr, err := echo.ReadFrom(data)
++			if err != nil {
++				return
++			}
++			_, _ = echo.WriteTo(data[:n], addr)
++		}
++	}()
++	defer func() { echo.Close(); <-done }()
++	dest := M.SocksaddrFromNet(echo.LocalAddr())
++	packet, err := v5Outbound(t, server, "bob-key").ListenPacket(context.Background(), dest)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer packet.Close()
++	packet.SetDeadline(time.Now().Add(3 * time.Second))
++	payload := []byte("ordinary non-QUIC UDP")
++	for range 100 {
++		if _, err = packet.WriteTo(payload, dest); err != nil {
++			t.Fatal(err)
++		}
++		got := make([]byte, 2048)
++		n, addr, err := packet.ReadFrom(got)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !bytes.Equal(got[:n], payload) || addr.String() != dest.String() {
++			t.Fatal("UDP fallback corruption")
++		}
++	}
++	select {
++	case user := <-router.users:
++		if user != "bob" {
++			t.Fatal(user)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("missing UDP fallback user")
++	}
++}
++
++type v5BlockedDialer struct {
++	v6TestDialer
++	started chan struct{}
++}
++
++func (d *v5BlockedDialer) DialContext(ctx context.Context, _ string, _ M.Socksaddr) (net.Conn, error) {
++	close(d.started)
++	<-ctx.Done()
++	return nil, ctx.Err()
++}
++
++func TestSnellV5CloseCancelsStartup(t *testing.T) {
++	d := &v5BlockedDialer{started: make(chan struct{})}
++	out := &Outbound{dialer: d}
++	c := newQUICProxyLazyClient(context.Background(), out, M.ParseSocksaddr("127.0.0.1:443"))
++	written := make(chan error, 1)
++	go func() { _, err := c.WriteTo(testQUICInitial(), M.ParseSocksaddr("127.0.0.1:443")); written <- err }()
++	<-d.started
++	closed := make(chan struct{})
++	go func() { c.Close(); close(closed) }()
++	select {
++	case <-closed:
++	case <-time.After(time.Second):
++		t.Fatal("Close blocked behind dial")
++	}
++	if err := <-written; !errors.Is(err, context.Canceled) {
++		t.Fatal(err)
++	}
++}
++
++type v5CaptureRouter struct {
++	adapter.Router
++	flows chan N.PacketConn
++	users chan string
++}
++
++func (r *v5CaptureRouter) RoutePacketConnectionEx(_ context.Context, c N.PacketConn, m adapter.InboundContext, _ N.CloseHandlerFunc) {
++	r.users <- m.User
++	r.flows <- c
++}
++
++type v5DiscardWriter struct{}
++
++func (v5DiscardWriter) WritePacket(b *buf.Buffer, _ M.Socksaddr) error { b.Release(); return nil }
++func TestSnellV5RetransmissionAuthAndExpiry(t *testing.T) {
++	router := &v5CaptureRouter{flows: make(chan N.PacketConn, 4), users: make(chan string, 4)}
++	s := newQUICProxyServer(context.Background(), router, log.NewNOPFactory().Logger(), "v5", []byte("test-v5-psk"), []option.SnellUser{{Name: "alice", UserKey: "alice-key"}, {Name: "bob", UserKey: "bob-key"}})
++	s.writer = v5DiscardWriter{}
++	defer s.close()
++	source, dest := M.ParseSocksaddr("127.0.0.1:10001"), M.ParseSocksaddr("127.0.0.1:443")
++	initial := testQUICInitial()
++	send := func(key string, payload []byte) {
++		t.Helper()
++		packet, err := encodeQUICProxyPacket(s.psk, []byte(key), dest, payload)
++		if err != nil {
++			t.Fatal(err)
++		}
++		s.handle(buf.As(packet), source)
++	}
++	send("alice-key", initial)
++	var flow N.PacketConn
++	select {
++	case flow = <-router.flows:
++	case <-time.After(time.Second):
++		t.Fatal("no flow")
++	}
++	if user := <-router.users; user != "alice" {
++		t.Fatal(user)
++	}
++	read := func() {
++		t.Helper()
++		b := buf.NewPacket()
++		defer b.Release()
++		_, err := flow.ReadPacket(b)
++		if err != nil || !bytes.Equal(b.Bytes(), initial) {
++			t.Fatal("envelope forwarded as raw QUIC", err)
++		}
++	}
++	read()
++	send("alice-key", initial)
++	read()
++	send("bob-key", initial)
++	flow.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
++	b := buf.NewPacket()
++	_, err := flow.ReadPacket(b)
++	b.Release()
++	if !errors.Is(err, os.ErrDeadlineExceeded) {
++		t.Fatal("another user injected into flow", err)
++	}
++	select {
++	case <-router.flows:
++		t.Fatal("duplicate flow")
++	default:
++	}
++	f := flow.(*quicProxySession)
++	f.lastSeen.Store(time.Now().Add(-10 * time.Minute).UnixNano())
++	s.reapIdle(time.Now().Add(-quicProxyIdle).UnixNano())
++	select {
++	case <-f.done:
++	default:
++		t.Fatal("expired session retained")
++	}
++	s.mu.Lock()
++	remaining := len(s.flows)
++	s.mu.Unlock()
++	if remaining != 0 {
++		t.Fatal("expired session still mapped")
++	}
++	// An authenticated Initial from the same tuple can establish a fresh flow.
++	send("alice-key", initial)
++	select {
++	case next := <-router.flows:
++		if next == flow {
++			t.Fatal("closed flow reused")
++		}
++		next.Close()
++	case <-time.After(time.Second):
++		t.Fatal("reconnect after expiry failed")
++	}
++}
+diff --git a/protocol/snell/quic_proxy_server.go b/protocol/snell/quic_proxy_server.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d685d815a9d127f4ba06942828bb39a57e36d5c1
+--- /dev/null
++++ b/protocol/snell/quic_proxy_server.go
+@@ -0,0 +1,368 @@
++package snell
++
++// Snell v5 QUIC Proxy: the first datagram authenticates and encrypts the
++// destination and QUIC Initial. Later datagrams remain raw, preserving QUIC
++// congestion control. Per-user accounting goes through the native UDP router.
++import (
++	"context"
++	"crypto/aes"
++	"crypto/cipher"
++	"encoding/binary"
++	"errors"
++	"net"
++	"os"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/buf"
++	"github.com/sagernet/sing/common/logger"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++
++	"golang.org/x/crypto/argon2"
++)
++
++const (
++	quicProxyIdle        = 5 * time.Minute
++	quicProxyMaxSessions = 2048
++	quicProxyMaxDatagram = 65535
++)
++
++func quicProxyAEAD(psk, salt []byte) (cipher.AEAD, error) {
++	if len(salt) != 16 || len(psk) == 0 {
++		return nil, errors.New("snell QUIC: invalid key or salt")
++	}
++	key := argon2.IDKey(psk, salt, 3, 8, 1, 32)
++	block, err := aes.NewCipher(key[:16])
++	if err != nil {
++		return nil, err
++	}
++	return cipher.NewGCM(block)
++}
++
++// decodeQUICProxyPacket implements the v5 envelope using bounds-checked
++// lengths and authenticated AES-GCM. It never dials unauthenticated targets.
++func decodeQUICProxyPacket(psk, packet []byte) (M.Socksaddr, string, []byte, error) {
++	var empty M.Socksaddr
++	// A QUIC Initial is padded to at least 1200 bytes; reject smaller
++	// unauthenticated datagrams before the expensive Argon2id derivation.
++	if len(packet) < 1200 || len(packet) > quicProxyMaxDatagram {
++		return empty, "", nil, errors.New("snell QUIC: truncated envelope")
++	}
++	aead, err := quicProxyAEAD(psk, packet[:16])
++	if err != nil {
++		return empty, "", nil, err
++	}
++	header, err := aead.Open(nil, make([]byte, 12), packet[16:39], nil)
++	if err != nil {
++		return empty, "", nil, err
++	}
++	if len(header) != 7 || header[0] != 4 {
++		return empty, "", nil, errors.New("snell QUIC: invalid record header")
++	}
++	padding := int(binary.BigEndian.Uint16(header[3:5]))
++	payloadLen := int(binary.BigEndian.Uint16(header[5:7]))
++	start := 39 + padding
++	if payloadLen < 7 || start > len(packet) || payloadLen+aead.Overhead() > len(packet)-start {
++		return empty, "", nil, errors.New("snell QUIC: invalid payload length")
++	}
++	nonce := make([]byte, 12)
++	binary.LittleEndian.PutUint64(nonce, 1)
++	plain, err := aead.Open(nil, nonce, packet[start:start+payloadLen+aead.Overhead()], nil)
++	if err != nil {
++		return empty, "", nil, err
++	}
++	if len(plain) < 7 || plain[0] != 1 || plain[1] != 1 {
++		return empty, "", nil, errors.New("snell QUIC: invalid request")
++	}
++	keyEnd := 3 + int(plain[2])
++	if keyEnd+1 > len(plain) {
++		return empty, "", nil, errors.New("snell QUIC: invalid user key")
++	}
++	hostEnd := keyEnd + 1 + int(plain[keyEnd])
++	if hostEnd+2 > len(plain) {
++		return empty, "", nil, errors.New("snell QUIC: invalid destination")
++	}
++	host := string(plain[keyEnd+1 : hostEnd])
++	port := binary.BigEndian.Uint16(plain[hostEnd : hostEnd+2])
++	inner := plain[hostEnd+2:]
++	if host == "" || port == 0 || !isQUICInitial(inner) {
++		return empty, "", nil, errors.New("snell QUIC: expected QUIC Initial")
++	}
++	return M.ParseSocksaddrHostPort(host, port), string(plain[3:keyEnd]), inner, nil
++}
++
++func isQUICInitial(packet []byte) bool {
++	if len(packet) < 1200 {
++		return false
++	}
++	version := binary.BigEndian.Uint32(packet[1:5])
++	if version == 0x6b3343cf { // QUIC v2
++		return packet[0]&0xf0 == 0xd0
++	}
++	return version == 1 && packet[0]&0xf0 == 0xc0
++}
++
++type quicProxyServer struct {
++	ctx    context.Context
++	router adapter.ConnectionRouterEx
++	logger logger.ContextLogger
++	tag    string
++	psk    []byte
++	users  map[string]string
++	mu     sync.Mutex
++	flows  map[string]*quicProxySession
++	writer N.PacketWriter
++	stop   chan struct{}
++	closed bool
++}
++
++func newQUICProxyServer(ctx context.Context, router adapter.ConnectionRouterEx, logger logger.ContextLogger, tag string, psk []byte, users []option.SnellUser) *quicProxyServer {
++	s := &quicProxyServer{ctx: ctx, router: router, logger: logger, tag: tag, psk: psk, users: make(map[string]string), flows: make(map[string]*quicProxySession), stop: make(chan struct{})}
++	for _, user := range users {
++		s.users[user.UserKey] = user.Name
++	}
++	return s
++}
++
++func (s *quicProxyServer) start(writer N.PacketWriter) {
++	s.mu.Lock()
++	s.writer = writer
++	s.mu.Unlock()
++	go s.reap()
++}
++
++func (s *quicProxyServer) handle(packet *buf.Buffer, source M.Socksaddr) {
++	data := append([]byte(nil), packet.Bytes()...)
++	packet.Release()
++	key := source.String()
++	s.mu.Lock()
++	if s.closed || s.writer == nil {
++		s.mu.Unlock()
++		return
++	}
++	if flow := s.flows[key]; flow != nil {
++		s.mu.Unlock()
++		s.forwardExisting(flow, data)
++		return
++	}
++	s.mu.Unlock()
++	dest, userKey, initial, err := decodeQUICProxyPacket(s.psk, data)
++	if err != nil {
++		return
++	}
++	name, allowed := s.matchQUICUser(userKey)
++	if !allowed {
++		return
++	}
++	flow := &quicProxySession{server: s, key: key, source: source, destination: dest, user: name, input: make(chan []byte, 64), done: make(chan struct{})}
++	flow.lastSeen.Store(time.Now().UnixNano())
++	s.mu.Lock()
++	if s.closed || len(s.flows) >= quicProxyMaxSessions {
++		s.mu.Unlock()
++		return
++	}
++	if existing := s.flows[key]; existing != nil {
++		s.mu.Unlock()
++		s.forwardExisting(existing, data)
++		return
++	}
++	s.flows[key] = flow
++	s.mu.Unlock()
++	flow.enqueue(initial)
++	metadata := adapter.InboundContext{Inbound: s.tag, InboundType: "snell", Source: source, Destination: dest, User: name}
++	ctx := log.ContextWithNewID(s.ctx)
++	go s.router.RoutePacketConnectionEx(ctx, flow, metadata, func(error) { _ = flow.Close() })
++}
++
++// A PSK-only Surge v5 client can be attributed to the sole enabled user.
++// With multiple users the userkey is mandatory to avoid bypassing quotas.
++func (s *quicProxyServer) matchQUICUser(userKey string) (string, bool) {
++	if len(s.users) == 0 {
++		return "", true
++	}
++	name, exists := s.users[userKey]
++	if exists {
++		return name, true
++	}
++	if userKey == "" && len(s.users) == 1 {
++		for _, only := range s.users {
++			return only, true
++		}
++	}
++	return "", false
++}
++
++func (s *quicProxyServer) reap() {
++	defer s.close()
++	ticker := time.NewTicker(30 * time.Second)
++	defer ticker.Stop()
++	for {
++		select {
++		case <-s.stop:
++			return
++		case <-s.ctx.Done():
++			return
++		case <-ticker.C:
++		}
++		s.reapIdle(time.Now().Add(-quicProxyIdle).UnixNano())
++	}
++}
++
++func (s *quicProxyServer) close() {
++	s.mu.Lock()
++	if s.closed {
++		s.mu.Unlock()
++		return
++	}
++	s.closed = true
++	close(s.stop)
++	flows := make([]*quicProxySession, 0, len(s.flows))
++	for _, f := range s.flows {
++		flows = append(flows, f)
++	}
++	s.mu.Unlock()
++	for _, f := range flows {
++		_ = f.Close()
++	}
++}
++
++type quicProxySession struct {
++	server        *quicProxyServer
++	key           string
++	source        M.Socksaddr
++	destination   M.Socksaddr
++	user          string
++	input         chan []byte
++	done          chan struct{}
++	once          sync.Once
++	lastSeen      atomic.Int64
++	readDeadline  quicProxyDeadline
++	writeDeadline quicProxyDeadline
++}
++
++func (f *quicProxySession) enqueue(data []byte) {
++	f.lastSeen.Store(time.Now().UnixNano())
++	select {
++	case <-f.done:
++		return
++	case f.input <- data:
++		f.lastSeen.Store(time.Now().UnixNano())
++	default:
++		// Drop under congestion; QUIC handles loss and retransmission.
++	}
++}
++
++func (f *quicProxySession) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
++	for {
++		at, changed := f.readDeadline.snapshot()
++		if !at.IsZero() && !time.Now().Before(at) {
++			return M.Socksaddr{}, os.ErrDeadlineExceeded
++		}
++		var timer *time.Timer
++		var timeout <-chan time.Time
++		if !at.IsZero() {
++			timer = time.NewTimer(time.Until(at))
++			timeout = timer.C
++		}
++		select {
++		case <-f.done:
++			if timer != nil {
++				timer.Stop()
++			}
++			return M.Socksaddr{}, net.ErrClosed
++		case <-changed:
++			if timer != nil {
++				timer.Stop()
++			}
++			continue
++		case <-timeout:
++			return M.Socksaddr{}, os.ErrDeadlineExceeded
++		case packet := <-f.input:
++			if timer != nil {
++				timer.Stop()
++			}
++			if len(packet) > buffer.FreeLen() {
++				return M.Socksaddr{}, os.ErrInvalid
++			}
++			_, err := buffer.Write(packet)
++			return f.destination, err
++		}
++	}
++}
++
++func (f *quicProxySession) WritePacket(buffer *buf.Buffer, _ M.Socksaddr) error {
++	if f.writeDeadline.expired() {
++		buffer.Release()
++		return os.ErrDeadlineExceeded
++	}
++	select {
++	case <-f.done:
++		buffer.Release()
++		return net.ErrClosed
++	default:
++	}
++	f.lastSeen.Store(time.Now().UnixNano())
++	f.server.mu.Lock()
++	writer := f.server.writer
++	f.server.mu.Unlock()
++	if writer == nil {
++		buffer.Release()
++		return net.ErrClosed
++	}
++	return writer.WritePacket(buffer, f.source)
++}
++
++func (f *quicProxySession) Close() error {
++	f.once.Do(func() {
++		close(f.done)
++		f.server.mu.Lock()
++		if f.server.flows[f.key] == f {
++			delete(f.server.flows, f.key)
++		}
++		f.server.mu.Unlock()
++	})
++	return nil
++}
++func (f *quicProxySession) LocalAddr() net.Addr { return f.source.UDPAddr() }
++func (f *quicProxySession) SetDeadline(t time.Time) error {
++	f.readDeadline.set(t)
++	f.writeDeadline.set(t)
++	return nil
++}
++func (f *quicProxySession) SetReadDeadline(t time.Time) error  { f.readDeadline.set(t); return nil }
++func (f *quicProxySession) SetWriteDeadline(t time.Time) error { f.writeDeadline.set(t); return nil }
++
++// Repeated authenticated Initials may arrive before the first response.
++// Never forward the encrypted Snell envelope as if it were QUIC payload.
++func (s *quicProxyServer) forwardExisting(flow *quicProxySession, data []byte) {
++	if dest, key, inner, err := decodeQUICProxyPacket(s.psk, data); err == nil {
++		name, ok := s.matchQUICUser(key)
++		if !ok || dest != flow.destination || name != flow.user {
++			return
++		}
++		flow.enqueue(inner)
++		return
++	}
++	flow.enqueue(data)
++}
++
++func (s *quicProxyServer) reapIdle(cutoff int64) {
++	var expired []*quicProxySession
++	s.mu.Lock()
++	for _, flow := range s.flows {
++		if flow.lastSeen.Load() < cutoff {
++			expired = append(expired, flow)
++		}
++	}
++	s.mu.Unlock()
++	for _, flow := range expired {
++		if flow.lastSeen.Load() < cutoff {
++			_ = flow.Close()
++		}
++	}
++}
+diff --git a/protocol/snell/quic_proxy_test.go b/protocol/snell/quic_proxy_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d93b516670c3bbc1dd5d44178076b3bed3e6ff47
+--- /dev/null
++++ b/protocol/snell/quic_proxy_test.go
+@@ -0,0 +1,104 @@
++package snell
++
++import (
++	"bytes"
++	"crypto/rand"
++	"encoding/binary"
++	"os"
++	"testing"
++
++	M "github.com/sagernet/sing/common/metadata"
++)
++
++func testQUICInitial() []byte {
++	initial := make([]byte, 1280)
++	_, _ = rand.Read(initial)
++	initial[0] = 0xc3
++	binary.BigEndian.PutUint32(initial[1:5], 1)
++	return initial
++}
++
++func TestSnellV5QUICProxyRoundTrip(t *testing.T) {
++	psk := []byte("snell-v5-test-psk")
++	userKey := []byte("client-key")
++	initial := testQUICInitial()
++	dest := M.ParseSocksaddrHostPort("example.org", 443)
++	wrapped, err := encodeQUICProxyPacket(psk, userKey, dest, initial)
++	if err != nil {
++		t.Fatal(err)
++	}
++	gotDest, gotKey, gotInitial, err := decodeQUICProxyPacket(psk, wrapped)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if gotDest != dest || gotKey != string(userKey) || !bytes.Equal(initial, gotInitial) {
++		t.Fatalf("QUIC proxy envelope mismatch: %s/%q", gotDest, gotKey)
++	}
++}
++
++func TestSnellV5QUICProxyRejectsCorruption(t *testing.T) {
++	psk := []byte("snell-v5-test-psk")
++	dest := M.ParseSocksaddrHostPort("example.org", 443)
++	wrapped, err := encodeQUICProxyPacket(psk, nil, dest, testQUICInitial())
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, tc := range []struct {
++		name   string
++		packet []byte
++		key    []byte
++	}{
++		{"too-short", []byte{1, 2, 3}, psk},
++		{"wrong-key", wrapped, []byte("other-secret")},
++		{"tamper", func() []byte { cloned := bytes.Clone(wrapped); cloned[len(cloned)-1] ^= 0xff; return cloned }(), psk},
++		{"truncated", wrapped[:len(wrapped)-30], psk},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			_, _, _, err := decodeQUICProxyPacket(tc.key, tc.packet)
++			if err == nil {
++				t.Fatal("unauthenticated QUIC packet accepted")
++			}
++		})
++	}
++}
++
++func TestSnellV5QUICProxyRejectsNonQUIC(t *testing.T) {
++	if isQUICInitial([]byte{0x40, 0, 0, 0, 1}) {
++		t.Fatal("short-header QUIC is not a new Initial")
++	}
++	dest := M.ParseSocksaddrHostPort("example.org", 443)
++	if _, err := encodeQUICProxyPacket([]byte("snell-v5-test-psk"), nil, dest, []byte{1, 2, 3}); err == nil {
++		t.Fatal("non-QUIC initial accepted")
++	}
++}
++
++func TestSnellQUICProxyUserIdentity(t *testing.T) {
++	single := &quicProxyServer{users: map[string]string{"key-a": "alice"}}
++	if name, ok := single.matchQUICUser(""); !ok || name != "alice" {
++		t.Fatalf("single-user Surge fallback should be accounted as alice: %q, %v", name, ok)
++	}
++	multi := &quicProxyServer{users: map[string]string{"key-a": "alice", "key-b": "bob"}}
++	if _, ok := multi.matchQUICUser(""); ok {
++		t.Fatal("PSK-only QUIC bypassed multi-user authentication")
++	}
++	if name, ok := multi.matchQUICUser("key-b"); !ok || name != "bob" {
++		t.Fatalf("authenticated QUIC user mismatch: %q, %v", name, ok)
++	}
++	if _, ok := multi.matchQUICUser("unknown"); ok {
++		t.Fatal("unrecognized QUIC user was accepted")
++	}
++}
++
++func TestSnellV5SurgeCapture(t *testing.T) {
++	packet, err := os.ReadFile("testdata/surge-v5-initial.bin")
++	if err != nil {
++		t.Fatal(err)
++	}
++	dest, key, inner, err := decodeQUICProxyPacket([]byte("JFdZLmZLtYtUP308QrqdoA=="), packet)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if dest.String() != "www.cloudflare.com:443" || key != "" || len(inner) != 1280 || !isQUICInitial(inner) {
++		t.Fatalf("incompatible capture: %s %q %d", dest, key, len(inner))
++	}
++}
+diff --git a/protocol/snell/testdata/README.md b/protocol/snell/testdata/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..ac8233ccd79695806cd9997d79d9c660e3a96180
+--- /dev/null
++++ b/protocol/snell/testdata/README.md
+@@ -0,0 +1,10 @@
++# Snell v5 interoperability fixture
++
++`surge-v5-initial.bin` is the publicly documented Surge v5 HTTP/3 packet
++fixture from missuo/opensnell, commit
++`3100984fd7c3a2bd7b41e292ad41f10d928bfb2d`,
++`components/snell/quic_test_fixture.go`.
++Source: https://github.com/missuo/opensnell
++License: GPL-3.0-or-later (compatible with this repository).
++The associated public test PSK is `JFdZLmZLtYtUP308QrqdoA==`; it is test data,
++not a deployment credential. The decoded target is www.cloudflare.com:443.
+diff --git a/protocol/snell/testdata/surge-v5-initial.bin b/protocol/snell/testdata/surge-v5-initial.bin
+new file mode 100644
+index 0000000000000000000000000000000000000000..c677e6271f71bb3698d1ec05977959b13d7a2abe
+GIT binary patch
+literal 1359
+zcmV-V1+e-ofLeZr8$2yB+?&;JK4BTNYmb)Voy*qLOixRF!Ye~b1**rn`2&Hq?4&z?
+zD!*~pcmg{Js(Mr}3FbogHPjlspJXcO1Q4y#NMIQMT;w=;(KfH%0q1?~iwfuB7yN*~
+zTTE3}o}5Ew*3;x&_Wx#%ugIS?%7akFPC3g%|K+H-QVWe5*@B$DTC1{prmD+6xX2Ya
+zGySylFL17pYXZSYM3Dn4dJ+m54!-YriEzJ^P1^M>AuR7UFoSP4Rf0SH*qH*#yj`M~
+zj~Vj63F?veuC;dTnPsg4E2Wmbs<qh)hlpn`!JkR*q`9%QW6PkUyZR#frLZ050cOq+
+zVq*G$_26)&PnK<-lOAJC$gFuTjs|H8IgegPuek3e>dzHUXOKc@FYYG$OJw$()FB<B
+zwY%w_|I8$)S1K7IhWLa%RzCbXqq_nIi^p^eK3;#m_nRselx>@6c!dZbVqO1zk*rRQ
+z-Gyw1F$u8+zBINFK6{;Jg$nqJeJWsqln!|n$hbUBrW#2vjsSf;hVVa&vp<stpMOs)
+zBVB^Jv6HC-+nInXg(T!!whtv-`eXDi&Sq~YKs?e8)oiD!lLRr(k~6=#FXN6S2qm$e
+z>5`o^j!Oe~f#fbb3QhE#ia|(+k~xquZDhvueRLQ(*b&FnT{Fh!s#viLt7SG=3OVp>
+zYli~M4}I$Ojr<!qZ4yUe<!zgPS^|UGdGSTzte!qjW_iy$-{Yzy&_DozC9>Q0@@JlN
+zi$dA~E&j1x)GGG8@{Mx7^-vcv3IA1WU+b6HuH2G$49mFuVx|1*V<<nWqNpkPY)G3c
+z6iw23%Zn%>O1Irm{LC&!9Nj1y9Yk_M2(Yo|h2qNKU?e!EsJ88bA2#*yRu%Ejuc`>)
+zriX5vBELjwonqEwsSJw@?&33Ft)@M^7hAKVG-S~{(6&C*S^RNi;75KTTB6ZSl|R|&
+z>a3s7@+ScWtEoR%Q9@t~MOMQfo4weKeVJcaWv6BY1$`r_S>%?I!!w(8Tm1U{2<gPa
+zvD@46Nw8lX4p(+@!rW06fXs;YE~t*kVS$n6_SvN=I`DLf`z4@$vp*Rvn7Hht7@kS3
+zDFPP`sXz&|mV>C%^u;FWycwL?&U^?}GJH;w%+?1B4!XZyEWY#_rsbALV+t^lb>Y2H
+z5~5YGy`9JKUq?*-vO+<3bbDulm-FBUM#r}Fpbk-&tu}IIRPg2V{?UbFPrupNVCZD>
+zMnlp)!02L0k?NoRGAu-`O7zbysRjyRrpT8kT_ks$T=!|OJ)+cg^up72HO@Wdiw%eR
+z#~~4ARfR=>+OgHjg2cw;ALn5@MH2Xn$PW1(hW6=EFdMLz#i#e`*H)I1$f0RZ7I{ja
+z(=yh{mU%#%Zp9Qg+LtB4(X@NCDFljEg<tXxGFb+hyLW+BQg+LXw>sH<J}!qs(S_;b
+z=*ySub~ro*LWUxGBB{j0F=sli8Dnm|>ketB+&pmaqo^nSX^4|;<@7DWJ<mb9&Qgb^
+z_O+_O#ZA0EpDcHAEk?AZ4`eh_0n^l$rL)}7P9*R<|08y0o)p+rfvs^965W`nNM?<8
+zt#ryo>8iL4O+1q`hx|7rVNSVh`1@wc(#s`U(j|AlHhat5jhCemKVV&u6c&E?GXmnK
+zubE4mB)F(|jJA^Ej4b#cMd@<mUsxo(^t)v)Kg?g8z-Gq9gy$J4zDg*P-QwA)UoT>p
+zUm)pcNyWmy^!(u|sHvws!EUxo#(>J7=03aa<CsOS74YV*TMt-;CMhCipdc^{n!N4o
+RiP<C6vA=Urcvv_^eTu1qvG4!@
+
+literal 0
+HcmV?d00001
+
+diff --git a/protocol/snell/v6_integration_test.go b/protocol/snell/v6_integration_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d08b4bc4ee30837b0b58ae6b02492288e7d73efc
+--- /dev/null
++++ b/protocol/snell/v6_integration_test.go
+@@ -0,0 +1,400 @@
++package snell
++
++import (
++	"bytes"
++	"context"
++	"fmt"
++	"io"
++	"net"
++	"os"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/adapter/htest"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing-snell/snellv6"
++	"github.com/sagernet/sing/common/buf"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++)
++
++const v6TestPSK = "snell-v6-integration-psk"
++
++type v6EchoRouter struct {
++	adapter.Router
++	mu    sync.Mutex
++	users []string
++}
++
++func (r *v6EchoRouter) record(user string) {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	r.users = append(r.users, user)
++}
++
++func (r *v6EchoRouter) RouteConnectionEx(ctx context.Context, conn net.Conn, m adapter.InboundContext, onClose N.CloseHandlerFunc) {
++	r.record(m.User)
++	go func() {
++		_, err := io.Copy(conn, conn)
++		conn.Close()
++		if onClose != nil {
++			onClose(err)
++		}
++	}()
++}
++
++func (r *v6EchoRouter) RoutePacketConnectionEx(ctx context.Context, conn N.PacketConn, m adapter.InboundContext, onClose N.CloseHandlerFunc) {
++	r.record(m.User)
++	go func() {
++		defer conn.Close()
++		var err error
++		defer func() {
++			if onClose != nil {
++				onClose(err)
++			}
++		}()
++		for {
++			packet := buf.NewPacket()
++			packet.Resize(N.CalculateFrontHeadroom(conn), 0)
++			var dest M.Socksaddr
++			dest, err = conn.ReadPacket(packet)
++			if err != nil {
++				packet.Release()
++				return
++			}
++			err = conn.WritePacket(packet, dest)
++			if err != nil {
++				return
++			}
++		}
++	}()
++}
++
++type v6TestDialer struct{}
++
++func (v6TestDialer) DialContext(ctx context.Context, network string, dest M.Socksaddr) (net.Conn, error) {
++	return (&net.Dialer{}).DialContext(ctx, network, dest.String())
++}
++
++func (v6TestDialer) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
++	return net.ListenPacket("udp", "127.0.0.1:0")
++}
++
++func startV6TestInbound(t *testing.T, mode string) (M.Socksaddr, *v6EchoRouter) {
++	t.Helper()
++	router := &v6EchoRouter{}
++	inbound, err := NewInbound(context.Background(), router, log.NewNOPFactory().Logger(), "snell-test", option.SnellInboundOptions{Version: 6, PSK: v6TestPSK, Users: []option.SnellUser{{Name: "alice", UserKey: "alice-key"}, {Name: "bob", UserKey: "bob-key"}}, V6Options: option.SnellV6Options{Mode: mode}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	var active sync.Map
++	var wg sync.WaitGroup
++	acceptDone := make(chan struct{})
++	go func() {
++		defer close(acceptDone)
++		for {
++			conn, err := listener.Accept()
++			if err != nil {
++				return
++			}
++			active.Store(conn, struct{}{})
++			wg.Go(func() {
++				inbound.(*Inbound).NewConnection(context.Background(), conn, adapter.InboundContext{Source: M.SocksaddrFromNet(conn.RemoteAddr())}, func(error) { active.Delete(conn) })
++			})
++		}
++	}()
++	t.Cleanup(func() {
++		listener.Close()
++		<-acceptDone
++		active.Range(func(k, v any) bool { k.(net.Conn).Close(); return true })
++		wg.Wait()
++		_ = htest.Close(inbound)
++	})
++	return M.SocksaddrFromNet(listener.Addr()), router
++}
++
++func v6TestClient(t *testing.T, server M.Socksaddr, mode, key string, reuse bool) *snellv6.Client {
++	t.Helper()
++	parsed, _ := snellv6.ParseMode(mode)
++	client, err := snellv6.NewClient(snellv6.ClientOptions{PSK: []byte(v6TestPSK), UserKey: []byte(key), Mode: parsed, Reuse: reuse, Dialer: v6TestDialer{}, Server: server})
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { client.Close() })
++	return client
++}
++
++func TestSnellV6TCPReconnect(t *testing.T) {
++	for _, mode := range []string{"default", "unshaped"} {
++		for _, reuse := range []bool{false, true} {
++			t.Run(fmt.Sprintf("%s/reuse=%v", mode, reuse), func(t *testing.T) {
++				server, router := startV6TestInbound(t, mode)
++				client := v6TestClient(t, server, mode, "alice-key", reuse)
++				for i := range 120 {
++					if i == 60 {
++						client.Reset()
++					}
++					conn, err := client.DialContext(context.Background(), M.ParseSocksaddrHostPort("127.0.0.1", 443))
++					if err != nil {
++						t.Fatal(err)
++					}
++					conn.SetDeadline(time.Now().Add(5 * time.Second))
++					payload := bytes.Repeat([]byte{byte(i)}, 32768+i)
++					done := make(chan error, 1)
++					go func() { _, err := conn.Write(payload); done <- err }()
++					got := make([]byte, len(payload))
++					if _, err = io.ReadFull(conn, got); err != nil {
++						conn.Close()
++						t.Fatalf("session %d: %v", i, err)
++					}
++					if err = <-done; err != nil {
++						t.Fatal(err)
++					}
++					if !bytes.Equal(got, payload) {
++						t.Fatal("TCP corruption")
++					}
++					if reuse {
++						if err = N.CloseWrite(conn); err != nil {
++							t.Fatal(err)
++						}
++						var tail [1]byte
++						if _, err = conn.Read(tail[:]); err != io.EOF {
++							t.Fatalf("logical EOF: %v", err)
++						}
++					}
++					conn.Close()
++				}
++				router.mu.Lock()
++				defer router.mu.Unlock()
++				if len(router.users) != 120 {
++					t.Fatalf("routed %d sessions", len(router.users))
++				}
++				for _, user := range router.users {
++					if user != "alice" {
++						t.Fatalf("wrong user %q", user)
++					}
++				}
++			})
++		}
++	}
++}
++
++func TestSnellV6UDPAndAuthentication(t *testing.T) {
++	for _, mode := range []string{"default", "unshaped"} {
++		t.Run(mode, func(t *testing.T) {
++			server, router := startV6TestInbound(t, mode)
++			for _, key := range []string{"bob-key", "invalid-key", ""} {
++				client := v6TestClient(t, server, mode, key, false)
++				raw, err := net.Dial("tcp", server.String())
++				if err != nil {
++					t.Fatal(err)
++				}
++				raw.SetDeadline(time.Now().Add(5 * time.Second))
++				packet, err := client.DialPacketConn(raw)
++				if err != nil {
++					raw.Close()
++					t.Fatal(err)
++				}
++				dest := M.ParseSocksaddrHostPort("127.0.0.1", 53)
++				for i := range 100 {
++					payload := bytes.Repeat([]byte{byte(i)}, 1400+i)
++					_, err = packet.WriteTo(payload, dest)
++					if err != nil {
++						if key != "bob-key" {
++							break
++						}
++						t.Fatal(err)
++					}
++					got := make([]byte, 2048)
++					n, addr, err := packet.ReadFrom(got)
++					if key != "bob-key" {
++						if err == nil {
++							t.Fatal("unauthenticated UDP accepted")
++						}
++						break
++					}
++					if err != nil {
++						t.Fatal(err)
++					}
++					if !bytes.Equal(got[:n], payload) || addr.String() != dest.String() {
++						t.Fatal("UDP corruption")
++					}
++				}
++				packet.Close()
++				client.Close()
++			}
++			router.mu.Lock()
++			defer router.mu.Unlock()
++			if len(router.users) != 1 || router.users[0] != "bob" {
++				t.Fatalf("unexpected users: %v", router.users)
++			}
++		})
++	}
++}
++
++func TestSnellV6RejectsInvalidTCPKeys(t *testing.T) {
++	for _, mode := range []string{"default", "unshaped"} {
++		t.Run(mode, func(t *testing.T) {
++			server, router := startV6TestInbound(t, mode)
++			parsed, _ := snellv6.ParseMode(mode)
++			for _, tc := range []struct{ psk, key string }{{v6TestPSK, "invalid-key"}, {v6TestPSK, ""}, {"wrong-server-psk", "alice-key"}} {
++				client, err := snellv6.NewClient(snellv6.ClientOptions{PSK: []byte(tc.psk), UserKey: []byte(tc.key), Mode: parsed, Dialer: v6TestDialer{}, Server: server})
++				if err != nil {
++					t.Fatal(err)
++				}
++				conn, err := client.DialContext(context.Background(), M.ParseSocksaddrHostPort("127.0.0.1", 443))
++				if err != nil {
++					client.Close()
++					t.Fatal(err)
++				}
++				conn.SetDeadline(time.Now().Add(5 * time.Second))
++				if _, err = conn.Write([]byte("unauthenticated")); err == nil {
++					var got [1]byte
++					if _, err = conn.Read(got[:]); err == nil {
++						t.Fatal("invalid credentials reached routing")
++					}
++				}
++				conn.Close()
++				client.Close()
++			}
++			router.mu.Lock()
++			defer router.mu.Unlock()
++			if len(router.users) != 0 {
++				t.Fatal("unauthenticated sessions routed")
++			}
++		})
++	}
++}
++
++func TestSnellV6OutboundTCPAndUDP(t *testing.T) {
++	for _, mode := range []string{"default", "unshaped"} {
++		t.Run(mode, func(t *testing.T) {
++			server, _ := startV6TestInbound(t, mode)
++			out, err := NewOutbound(context.Background(), nil, log.NewNOPFactory().Logger(), "snell-out", option.SnellOutboundOptions{Version: 6, Server: server.AddrString(), ServerPort: server.Port, PSK: v6TestPSK, UserKey: "alice-key", V6Options: option.SnellV6Options{Mode: mode}})
++			if err != nil {
++				t.Fatal(err)
++			}
++			client := out.(*Outbound)
++			defer client.Close()
++			dest := M.ParseSocksaddrHostPort("127.0.0.1", 53)
++			for _, network := range []string{"tcp", "udp"} {
++				conn, err := client.DialContext(context.Background(), network, dest)
++				if err != nil {
++					t.Fatal(err)
++				}
++				conn.SetDeadline(time.Now().Add(5 * time.Second))
++				payload := []byte("native outbound " + network)
++				if _, err = conn.Write(payload); err != nil {
++					conn.Close()
++					t.Fatal(err)
++				}
++				got := make([]byte, len(payload))
++				if _, err = io.ReadFull(conn, got); err != nil {
++					conn.Close()
++					t.Fatal(err)
++				}
++				conn.Close()
++				if !bytes.Equal(got, payload) {
++					t.Fatal("payload corruption")
++				}
++			}
++			packet, err := client.ListenPacket(context.Background(), dest)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer packet.Close()
++			packet.SetDeadline(time.Now().Add(5 * time.Second))
++			payload := []byte("native packet outbound")
++			if _, err = packet.WriteTo(payload, dest); err != nil {
++				t.Fatal(err)
++			}
++			got := make([]byte, 1024)
++			n, _, err := packet.ReadFrom(got)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if !bytes.Equal(got[:n], payload) {
++				t.Fatal("UDP corruption")
++			}
++		})
++	}
++}
++
++func TestSnellV6IdleRecovery(t *testing.T) {
++	durationText := os.Getenv("SNELL_V6_IDLE_TEST")
++	if durationText == "" {
++		t.Skip("set SNELL_V6_IDLE_TEST=130s for idle recovery test")
++	}
++	idle, err := time.ParseDuration(durationText)
++	if err != nil || idle < 0 {
++		t.Fatal("invalid idle duration")
++	}
++	for _, mode := range []string{"default", "unshaped"} {
++		for _, reuse := range []bool{false, true} {
++			t.Run(fmt.Sprintf("%s/reuse=%v", mode, reuse), func(t *testing.T) {
++				t.Parallel()
++				server, _ := startV6TestInbound(t, mode)
++				client := v6TestClient(t, server, mode, "alice-key", reuse)
++				conn, err := client.DialContext(context.Background(), M.ParseSocksaddrHostPort("127.0.0.1", 443))
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer conn.Close()
++				raw, err := net.Dial("tcp", server.String())
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer raw.Close()
++				udp, err := client.DialPacketConn(raw)
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer udp.Close()
++				exchange := func() {
++					t.Helper()
++					conn.SetDeadline(time.Now().Add(5 * time.Second))
++					udp.SetDeadline(time.Now().Add(5 * time.Second))
++					payload := []byte("snell-v6-idle-recovery")
++					if _, err = conn.Write(payload); err != nil {
++						t.Fatal(err)
++					}
++					got := make([]byte, len(payload))
++					if _, err = io.ReadFull(conn, got); err != nil {
++						t.Fatal(err)
++					}
++					if !bytes.Equal(got, payload) {
++						t.Fatal("TCP corruption")
++					}
++					dest := M.ParseSocksaddrHostPort("127.0.0.1", 53)
++					if _, err = udp.WriteTo(payload, dest); err != nil {
++						t.Fatal(err)
++					}
++					got = make([]byte, 1024)
++					n, _, err := udp.ReadFrom(got)
++					if err != nil {
++						t.Fatal(err)
++					}
++					if !bytes.Equal(got[:n], payload) {
++						t.Fatal("UDP corruption")
++					}
++				}
++				exchange()
++				conn.SetDeadline(time.Time{})
++				udp.SetDeadline(time.Time{})
++				timer := time.NewTimer(idle)
++				defer timer.Stop()
++				<-timer.C
++				for range 20 {
++					exchange()
++				}
++			})
++		}
++	}
++}

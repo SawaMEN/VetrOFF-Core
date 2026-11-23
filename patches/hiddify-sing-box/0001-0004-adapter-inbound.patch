@@ -1,0 +1,147 @@
+diff --git a/adapter/inbound/manager.go b/adapter/inbound/manager.go
+index 4477bd2283881cb854bb68b9579d34a4eee74943..b29f2001483324f8d33a64a8396fd566dd3caf10 100644
+--- a/adapter/inbound/manager.go
++++ b/adapter/inbound/manager.go
+@@ -95,34 +95,31 @@ func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.
+ 		return err
+ 	}
+ 	m.access.Lock()
+-	started := m.started
++	started, scope := m.started, m.scope
+ 	m.access.Unlock()
+-	if started { // H: hot reload
+-		err = adapter.StartLate(m.scope, "inbound/"+inbound.Type()+"["+inbound.Tag()+"]", inbound)
+-		if err != nil {
++	if started {
++		if err = adapter.StartLate(scope, "inbound/"+inbound.Type()+"["+inbound.Tag()+"]", inbound); err != nil {
+ 			return err
+ 		}
+ 	}
+ 	m.access.Lock()
+-	existsInbound, replaced := m.inboundByTag[tag]
+-	if replaced && !started {
+-		m.access.Unlock()
+-		return E.New("duplicate inbound tag: ", tag)
+-	}
++	old, replaced := m.inboundByTag[tag]
+ 	if replaced {
+-		existsIndex := slices.Index(m.inbounds, existsInbound)
+-		if existsIndex == -1 {
+-			panic("invalid inbound index")
++		index := slices.Index(m.inbounds, old)
++		if index < 0 {
++			m.access.Unlock()
++			return E.New("invalid inbound index: ", tag)
+ 		}
+-		m.inbounds = slices.Delete(slices.Clone(m.inbounds), existsIndex, existsIndex+1) // H: never change a slice already handed out
++		m.inbounds = slices.Clone(m.inbounds)
++		m.inbounds[index] = inbound
++	} else {
++		m.inbounds = append(slices.Clone(m.inbounds), inbound)
+ 	}
+-	m.inbounds = append(m.inbounds, inbound)
+ 	m.inboundByTag[tag] = inbound
+ 	m.access.Unlock()
+ 	if replaced {
+-		err = adapter.CloseLate(m.scope, existsInbound)
+-		if err != nil {
+-			return E.Cause(err, "close inbound/", existsInbound.Type(), "[", existsInbound.Tag(), "]")
++		if err = adapter.CloseLate(scope, old); err != nil {
++			return E.Cause(err, "close inbound/", old.Type(), "[", old.Tag(), "]")
+ 		}
+ 	}
+ 	return nil
+diff --git a/adapter/inbound/registry.go b/adapter/inbound/registry.go
+index 6b04a8cb977640a5df565ce322f086273286a29d..10bb56e184d9397ea4ed47f865da5758588cf08e 100644
+--- a/adapter/inbound/registry.go
++++ b/adapter/inbound/registry.go
+@@ -63,12 +63,15 @@ func (m *Registry) CreateOptions(outboundType string) (any, bool) {
+ }
+ 
+ func (m *Registry) Create(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, outboundType string, options any) (adapter.Inbound, error) {
+-	m.access.Lock() //H: not held while the constructor runs, so a constructor can create nested inbounds or outbounds (bond)
++	m.access.Lock() // H: not held while the constructor runs, so a constructor can create nested inbounds or outbounds (bond)
+ 	constructor, loaded := m.constructor[outboundType]
+-	m.access.Unlock() //H
++	m.access.Unlock() // H
+ 	if !loaded {
+ 		return nil, E.New("outbound type not found: " + outboundType)
+ 	}
++	if err := validateTCPFinalMask(options); err != nil {
++		return nil, err
++	}
+ 	return constructor(ctx, router, logger, tag, options)
+ }
+ 
+diff --git a/adapter/inbound/xui_finalmask.go b/adapter/inbound/xui_finalmask.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..03470fb5045a475522306aa18c466b8ac598bca7
+--- /dev/null
++++ b/adapter/inbound/xui_finalmask.go
+@@ -0,0 +1,66 @@
++package inbound
++
++import (
++	"slices"
++
++	"github.com/sagernet/sing-box/hiddify/finalmask"
++	"github.com/sagernet/sing-box/option"
++	E "github.com/sagernet/sing/common/exceptions"
++)
++
++// Validate at construction so `check` fails before any socket is opened.
++func validateTCPFinalMask(options any) error {
++	wrapper, ok := options.(option.ListenOptionsWrapper)
++	if !ok {
++		return nil
++	}
++	mask := wrapper.TakeListenOptions().FinalMask
++	if mask == nil {
++		return nil
++	}
++	if len(mask.UDP) > 0 || len(mask.QuicParams) > 0 {
++		return E.New("inbound final_mask only supports TCP masks; use protocol-native UDP/QUIC options")
++	}
++	if mask.IsEmpty() {
++		return nil
++	}
++	var transport *option.V2RayTransportOptions
++	switch o := options.(type) {
++	case *option.VLESSInboundOptions:
++		transport = o.Transport
++	case *option.VMessInboundOptions:
++		transport = o.Transport
++	case *option.TrojanInboundOptions:
++		transport = o.Transport
++	case *option.ShadowsocksInboundOptions:
++		if !slices.Contains(o.Network.Build(), "tcp") {
++			return E.New("TCP final_mask requires a TCP listener")
++		}
++	case *option.NaiveInboundOptions:
++		if !slices.Contains(o.Network.Build(), "tcp") {
++			return E.New("TCP final_mask requires a TCP listener")
++		}
++	case *option.HTTPInboundOptions:
++		if !slices.Contains(o.Versions(), 1) && !slices.Contains(o.Versions(), 2) {
++			return E.New("TCP final_mask cannot wrap an HTTP/3-only listener")
++		}
++	case *option.HTTPMixedInboundOptions, *option.SocksInboundOptions, *option.AnyTLSInboundOptions, *option.ShadowTLSInboundOptions, *option.SnellInboundOptions:
++
++	default:
++		return E.New("inbound final_mask requires a supported TCP listener")
++	}
++	if transport != nil {
++		switch transport.Type {
++		case "http", "ws", "grpc", "httpupgrade", "xhttp":
++		default:
++			return E.New("inbound TCP final_mask cannot wrap transport ", transport.Type)
++		}
++	}
++	if tls, ok := options.(option.InboundTLSOptionsWrapper); ok {
++		if o := tls.TakeInboundTLSOptions(); o != nil && o.Enabled && o.Reality != nil && o.Reality.Enabled {
++			return E.New("inbound TCP final_mask is incompatible with REALITY")
++		}
++	}
++	_, err := finalmask.Build(mask)
++	return err
++}

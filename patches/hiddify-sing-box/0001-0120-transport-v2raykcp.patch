@@ -1,0 +1,689 @@
+diff --git a/transport/v2raykcp/config.go b/transport/v2raykcp/config.go
+index f9a28ad9863b31e9ebdc4dcb3aced19085e9f796..b971f1b4e342e1d0f6514853f49a822fbc2bfa3a 100644
+--- a/transport/v2raykcp/config.go
++++ b/transport/v2raykcp/config.go
+@@ -7,6 +7,7 @@ import (
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 
+ 	"github.com/sagernet/sing-box/transport/v2raykcp/kcp"
++	Xbuf "github.com/xtls/xray-core/common/buf"
+ )
+ 
+ // newConfig builds Xray's mKCP config with Xray's defaults and checks.
+@@ -43,7 +44,19 @@ func newConfig(options option.V2RayKCPOptions) (*kcp.Config, error) {
+ 	if config.Tti < 10 || config.Tti > 1000 {
+ 		return nil, E.New("mKCP tti must be between 10 and 1000")
+ 	}
+-	if config.GetSendingBufferSize() == 0 {
++	// Keep the native mKCP transport's guardrails identical to the panel's
++	// former transport-balancer.patch. Invalid capacities and windows must
++	// fail at startup, not overflow allocation or silently weaken limits.
++	if config.Mtu > uint32(Xbuf.Size) {
++		return nil, E.New("mKCP mtu exceeds Xray packet buffer")
++	}
++	if config.CwndMultiplier < 1 {
++		return nil, E.New("mKCP cwnd_multiplier must be positive")
++	}
++	if config.UplinkCapacity > 4095 || config.DownlinkCapacity > 4095 {
++		return nil, E.New("mKCP uplink_capacity and downlink_capacity must not exceed 4095")
++	}
++	if config.MaxSendingWindow < config.Mtu || config.GetSendingBufferSize() == 0 {
+ 		return nil, E.New("mKCP max_sending_window must be at least the mtu")
+ 	}
+ 	return config, nil
+diff --git a/transport/v2raykcp/h_kcp_test.go b/transport/v2raykcp/h_kcp_test.go
+index dff3922653145eab2a1443177b33a2645744e4be..6b306a3d4e1e532b49df9820451ce767a07e3b71 100644
+--- a/transport/v2raykcp/h_kcp_test.go
++++ b/transport/v2raykcp/h_kcp_test.go
+@@ -82,7 +82,24 @@ func TestH_KCPOptions(t *testing.T) {
+ 	require.Error(t, err)
+ 	_, err = newConfig(option.V2RayKCPOptions{TTI: 5})
+ 	require.Error(t, err)
++	for _, tc := range []struct {
++		name string
++		opts option.V2RayKCPOptions
++	}{
++		{"mtu-overflow", option.V2RayKCPOptions{MTU: 65535}},
++		{"uplink-overflow", option.V2RayKCPOptions{UplinkCapacity: 4096}},
++		{"downlink-overflow", option.V2RayKCPOptions{DownlinkCapacity: 4096}},
++		{"window-smaller-than-mtu", option.V2RayKCPOptions{MTU: 1400, MaxSendingWindow: 1399}},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			_, err := newConfig(tc.opts)
++			require.Error(t, err)
++		})
++	}
+ 	config, err := newConfig(option.V2RayKCPOptions{})
+ 	require.NoError(t, err)
+ 	require.EqualValues(t, 1350, config.Mtu)
++	config, err = newConfig(option.V2RayKCPOptions{MTU: 1400, MaxSendingWindow: 1400, UplinkCapacity: 4095, DownlinkCapacity: 4095})
++	require.NoError(t, err)
++	require.EqualValues(t, 1400, config.Mtu)
+ }
+diff --git a/transport/v2raykcp/kcp/config.go b/transport/v2raykcp/kcp/config.go
+index 4a6724c1b2d948fff84718c67d9293eea1312e0f..5d6ce5fa5c826101f33c7e2b5018fcf874469d08 100644
+--- a/transport/v2raykcp/kcp/config.go
++++ b/transport/v2raykcp/kcp/config.go
+@@ -14,10 +14,7 @@ type Config struct {
+ }
+ 
+ func (c *Config) GetSendingInFlightSize() uint32 {
+-	size := c.UplinkCapacity * 1024 * 1024 / c.Mtu / (1000 / c.Tti)
+-	if size < 8 {
+-		size = 8
+-	}
++	size := max(c.UplinkCapacity*1024*1024/c.Mtu/(1000/c.Tti), 8)
+ 	return size
+ }
+ 
+@@ -26,9 +23,6 @@ func (c *Config) GetSendingBufferSize() uint32 {
+ }
+ 
+ func (c *Config) GetReceivingInFlightSize() uint32 {
+-	size := c.DownlinkCapacity * 1024 * 1024 / c.Mtu / (1000 / c.Tti)
+-	if size < 8 {
+-		size = 8
+-	}
++	size := max(c.DownlinkCapacity*1024*1024/c.Mtu/(1000/c.Tti), 8)
+ 	return size
+ }
+diff --git a/transport/v2raykcp/kcp/connection.go b/transport/v2raykcp/kcp/connection.go
+index 72e3229ab33e267acef9dd6c4e66f4cc8fdd0ae0..ef58dc8c5ec161002bfe9fd5abebd253abe8aa1f 100644
+--- a/transport/v2raykcp/kcp/connection.go
++++ b/transport/v2raykcp/kcp/connection.go
+@@ -6,6 +6,7 @@ import (
+ 	"io"
+ 	"net"
+ 	"runtime"
++	"slices"
+ 	"sync"
+ 	"sync/atomic"
+ 	"time"
+@@ -27,12 +28,7 @@ type State int32
+ 
+ // Is returns true if current State is one of the candidates.
+ func (s State) Is(states ...State) bool {
+-	for _, state := range states {
+-		if s == state {
+-			return true
+-		}
+-	}
+-	return false
++	return slices.Contains(states, s)
+ }
+ 
+ const (
+@@ -87,10 +83,7 @@ func (info *RoundTripInfo) Update(rtt uint32, current uint32) {
+ 			delta = info.srtt - rtt
+ 		}
+ 		info.variation = (3*info.variation + delta) / 4
+-		info.srtt = (7*info.srtt + rtt) / 8
+-		if info.srtt < info.minRtt {
+-			info.srtt = info.minRtt
+-		}
++		info.srtt = max((7*info.srtt+rtt)/8, info.minRtt)
+ 	}
+ 	var rto uint32
+ 	if info.minRtt < 4*info.variation {
+@@ -177,19 +170,21 @@ type ConnMetadata struct {
+ 
+ // Connection is a KCP connection over UDP.
+ type Connection struct {
+-	meta       ConnMetadata
+-	closer     io.Closer
+-	rd         time.Time
+-	wd         time.Time // write deadline
+-	since      int64
+-	dataInput  *signal.Notifier
+-	dataOutput *signal.Notifier
+-	Config     *Config
++	deadlineAccess sync.RWMutex
++	terminateOnce  sync.Once
++	meta           ConnMetadata
++	closer         io.Closer
++	rd             time.Time
++	wd             time.Time // write deadline
++	since          int64
++	dataInput      *signal.Notifier
++	dataOutput     *signal.Notifier
++	Config         *Config
+ 
+ 	state            State
+-	stateBeginTime   uint32
+-	lastIncomingTime uint32
+-	lastPingTime     uint32
++	stateBeginTime   atomic.Uint32
++	lastIncomingTime atomic.Uint32
++	lastPingTime     atomic.Uint32
+ 
+ 	mss       uint32
+ 	roundTrip *RoundTripInfo
+@@ -281,7 +276,7 @@ func (c *Connection) ReadMultiBuffer() (buf.MultiBuffer, error) {
+ }
+ 
+ func (c *Connection) waitForDataInput() error {
+-	for i := 0; i < 16; i++ {
++	for range 16 {
+ 		select {
+ 		case <-c.dataInput.Wait():
+ 			return nil
+@@ -291,8 +286,8 @@ func (c *Connection) waitForDataInput() error {
+ 	}
+ 
+ 	duration := time.Second * 16
+-	if !c.rd.IsZero() {
+-		duration = time.Until(c.rd)
++	if deadline := c.readDeadline(); !deadline.IsZero() {
++		duration = time.Until(deadline)
+ 		if duration < 0 {
+ 			return ErrIOTimeout
+ 		}
+@@ -304,7 +299,7 @@ func (c *Connection) waitForDataInput() error {
+ 	select {
+ 	case <-c.dataInput.Wait():
+ 	case <-timeout.C:
+-		if !c.rd.IsZero() && c.rd.Before(time.Now()) {
++		if deadline := c.readDeadline(); !deadline.IsZero() && !time.Now().Before(deadline) {
+ 			return ErrIOTimeout
+ 		}
+ 	}
+@@ -335,7 +330,7 @@ func (c *Connection) Read(b []byte) (int, error) {
+ }
+ 
+ func (c *Connection) waitForDataOutput() error {
+-	for i := 0; i < 16; i++ {
++	for range 16 {
+ 		select {
+ 		case <-c.dataOutput.Wait():
+ 			return nil
+@@ -345,8 +340,8 @@ func (c *Connection) waitForDataOutput() error {
+ 	}
+ 
+ 	duration := time.Second * 16
+-	if !c.wd.IsZero() {
+-		duration = time.Until(c.wd)
++	if deadline := c.writeDeadline(); !deadline.IsZero() {
++		duration = time.Until(deadline)
+ 		if duration < 0 {
+ 			return ErrIOTimeout
+ 		}
+@@ -358,7 +353,7 @@ func (c *Connection) waitForDataOutput() error {
+ 	select {
+ 	case <-c.dataOutput.Wait():
+ 	case <-timeout.C:
+-		if !c.wd.IsZero() && c.wd.Before(time.Now()) {
++		if deadline := c.writeDeadline(); !deadline.IsZero() && !time.Now().Before(deadline) {
+ 			return ErrIOTimeout
+ 		}
+ 	}
+@@ -430,8 +425,16 @@ func (c *Connection) writeMultiBufferInternal(reader io.Reader) error {
+ 
+ func (c *Connection) SetState(state State) {
+ 	current := c.Elapsed()
+-	atomic.StoreInt32((*int32)(&c.state), int32(state))
+-	atomic.StoreUint32(&c.stateBeginTime, current)
++	for {
++		old := atomic.LoadInt32((*int32)(&c.state))
++		if State(old) == StateTerminated || State(old) == state {
++			return
++		}
++		if atomic.CompareAndSwapInt32((*int32)(&c.state), old, int32(state)) {
++			break
++		}
++	}
++	c.stateBeginTime.Store(current)
+ 	errors.LogDebug(context.Background(), "#", c.meta.Conversation, " entering state ", state, " at ", current)
+ 
+ 	switch state {
+@@ -510,7 +513,10 @@ func (c *Connection) SetReadDeadline(t time.Time) error {
+ 	if c == nil || c.State() != StateActive {
+ 		return ErrClosedConnection
+ 	}
++	c.deadlineAccess.Lock()
+ 	c.rd = t
++	c.deadlineAccess.Unlock()
++	c.dataInput.Signal()
+ 	return nil
+ }
+ 
+@@ -519,7 +525,10 @@ func (c *Connection) SetWriteDeadline(t time.Time) error {
+ 	if c == nil || c.State() != StateActive {
+ 		return ErrClosedConnection
+ 	}
++	c.deadlineAccess.Lock()
+ 	c.wd = t
++	c.deadlineAccess.Unlock()
++	c.dataOutput.Signal()
+ 	return nil
+ }
+ 
+@@ -532,15 +541,17 @@ func (c *Connection) Terminate() {
+ 	if c == nil {
+ 		return
+ 	}
+-	errors.LogInfo(context.Background(), "#", c.meta.Conversation, " terminating connection to ", c.RemoteAddr())
+-
+-	// v.SetState(StateTerminated)
+-	c.dataInput.Signal()
+-	c.dataOutput.Signal()
+-
+-	c.closer.Close()
+-	c.sendingWorker.Release()
+-	c.receivingWorker.Release()
++	c.terminateOnce.Do(func() {
++		errors.LogInfo(context.Background(), "#", c.meta.Conversation, " terminating connection to ", c.RemoteAddr())
++		atomic.StoreInt32((*int32)(&c.state), int32(StateTerminated))
++		c.dataInput.Signal()
++		c.dataOutput.Signal()
++		c.dataUpdater.WakeUp()
++		c.pingUpdater.WakeUp()
++		_ = c.closer.Close()
++		c.sendingWorker.Release()
++		c.receivingWorker.Release()
++	})
+ }
+ 
+ func (c *Connection) HandleOption(opt SegmentOption) {
+@@ -561,7 +572,7 @@ func (c *Connection) OnPeerClosed() {
+ // Input when you received a low level packet (eg. UDP packet), call it
+ func (c *Connection) Input(segments []Segment) {
+ 	current := c.Elapsed()
+-	atomic.StoreUint32(&c.lastIncomingTime, current)
++	c.lastIncomingTime.Store(current)
+ 
+ 	for _, seg := range segments {
+ 		if seg.Conversation() != c.meta.Conversation {
+@@ -612,7 +623,7 @@ func (c *Connection) flush() {
+ 	if c.State() == StateTerminated {
+ 		return
+ 	}
+-	if c.State() == StateActive && current-atomic.LoadUint32(&c.lastIncomingTime) >= 30000 {
++	if c.State() == StateActive && current-c.lastIncomingTime.Load() >= 30000 {
+ 		c.Close()
+ 	}
+ 	if c.State() == StateReadyToClose && c.sendingWorker.IsEmpty() {
+@@ -623,16 +634,16 @@ func (c *Connection) flush() {
+ 		errors.LogDebug(context.Background(), "#", c.meta.Conversation, " sending terminating cmd.")
+ 		c.Ping(current, CommandTerminate)
+ 
+-		if current-atomic.LoadUint32(&c.stateBeginTime) > 8000 {
++		if current-c.stateBeginTime.Load() > 8000 {
+ 			c.SetState(StateTerminated)
+ 		}
+ 		return
+ 	}
+-	if c.State() == StatePeerTerminating && current-atomic.LoadUint32(&c.stateBeginTime) > 4000 {
++	if c.State() == StatePeerTerminating && current-c.stateBeginTime.Load() > 4000 {
+ 		c.SetState(StateTerminating)
+ 	}
+ 
+-	if c.State() == StateReadyToClose && current-atomic.LoadUint32(&c.stateBeginTime) > 15000 {
++	if c.State() == StateReadyToClose && current-c.stateBeginTime.Load() > 15000 {
+ 		c.SetState(StateTerminating)
+ 	}
+ 
+@@ -640,7 +651,7 @@ func (c *Connection) flush() {
+ 	c.receivingWorker.Flush(current)
+ 	c.sendingWorker.Flush(current)
+ 
+-	if current-atomic.LoadUint32(&c.lastPingTime) >= 3000 {
++	if current-c.lastPingTime.Load() >= 3000 {
+ 		c.Ping(current, CommandPing)
+ 	}
+ }
+@@ -660,6 +671,18 @@ func (c *Connection) Ping(current uint32, cmd Command) {
+ 		seg.Option = SegmentOptionClose
+ 	}
+ 	c.output.Write(seg)
+-	atomic.StoreUint32(&c.lastPingTime, current)
++	c.lastPingTime.Store(current)
+ 	seg.Release()
+ }
++
++func (c *Connection) readDeadline() time.Time {
++	c.deadlineAccess.RLock()
++	defer c.deadlineAccess.RUnlock()
++	return c.rd
++}
++
++func (c *Connection) writeDeadline() time.Time {
++	c.deadlineAccess.RLock()
++	defer c.deadlineAccess.RUnlock()
++	return c.wd
++}
+diff --git a/transport/v2raykcp/kcp/connection_test.go b/transport/v2raykcp/kcp/connection_test.go
+index 2b69b5b0d0c7c9deca6f0d36ecebea9ded3721fe..56e8292488c4a72a5689c268525c8c7e9d45a717 100644
+--- a/transport/v2raykcp/kcp/connection_test.go
++++ b/transport/v2raykcp/kcp/connection_test.go
+@@ -5,8 +5,9 @@ import (
+ 	"testing"
+ 	"time"
+ 
+-	"github.com/xtls/xray-core/common/buf"
+ 	. "github.com/sagernet/sing-box/transport/v2raykcp/kcp"
++
++	"github.com/xtls/xray-core/common/buf"
+ )
+ 
+ type NoOpCloser int
+diff --git a/transport/v2raykcp/kcp/h_receiving_test.go b/transport/v2raykcp/kcp/h_receiving_test.go
+index 553a8976ddecce349ad96988e36fdff11cfe52b2..3ba21e33e4dc3adb5896d06f66379f5e2696472a 100644
+--- a/transport/v2raykcp/kcp/h_receiving_test.go
++++ b/transport/v2raykcp/kcp/h_receiving_test.go
+@@ -10,9 +10,9 @@ import (
+ // Read keeps what does not fit in leftOver; Release, from Terminate, frees it from another
+ // goroutine. Run with -race.
+ func TestH_ReceivingWorkerReadRelease(t *testing.T) {
+-	worker := &ReceivingWorker{window: NewReceivingWindow()}
+ 	var group sync.WaitGroup
+ 	for range 100 {
++		worker := &ReceivingWorker{window: NewReceivingWindow()}
+ 		chunk := buf.New()
+ 		chunk.Extend(64)
+ 		worker.Lock()
+@@ -30,3 +30,44 @@ func TestH_ReceivingWorkerReadRelease(t *testing.T) {
+ 		group.Wait()
+ 	}
+ }
++
++func TestXUIPanelKCPReleaseCleansWindowAndRejectsLateSegments(t *testing.T) {
++	worker := &ReceivingWorker{
++		window:     NewReceivingWindow(),
++		windowSize: 8,
++		acklist:    &AckList{},
++	}
++	pending := NewDataSegment()
++	pending.Number = 1
++	pending.Data().Write([]byte("buffered"))
++	worker.ProcessSegment(pending)
++	if len(worker.window.cache) != 1 {
++		t.Fatal("out-of-order segment was not buffered")
++	}
++	worker.Release()
++	worker.Release() // Termination is idempotent.
++	if len(worker.window.cache) != 0 || pending.payload != nil {
++		t.Fatal("KCP release retained an out-of-order segment")
++	}
++	late := NewDataSegment()
++	late.Data().Write([]byte("late"))
++	worker.ProcessSegment(late)
++	if late.payload != nil || len(worker.window.cache) != 0 {
++		t.Fatal("a terminated receiver retained a late segment")
++	}
++	if worker.Read(make([]byte, 32)) != 0 || !worker.ReadMultiBuffer().IsEmpty() || worker.IsDataAvailable() || worker.UpdateNecessary() {
++		t.Fatal("terminated receiver exposed buffered data")
++	}
++}
++
++func TestXUIPanelKCPOutOfWindowSegmentIsReleased(t *testing.T) {
++	worker := &ReceivingWorker{window: NewReceivingWindow(), windowSize: 1, acklist: &AckList{}}
++	segment := NewDataSegment()
++	segment.Number = 5
++	segment.Data().Write([]byte("too far ahead"))
++	worker.ProcessSegment(segment)
++	if segment.payload != nil || len(worker.window.cache) != 0 {
++		t.Fatal("out-of-window segment was not released")
++	}
++	worker.Release()
++}
+diff --git a/transport/v2raykcp/kcp/receiving.go b/transport/v2raykcp/kcp/receiving.go
+index fccf19984aa3df4661df9ae80a6faf9b6b8b8bef..d137342d472ae8c2d9684d9ff463a09c062335d0 100644
+--- a/transport/v2raykcp/kcp/receiving.go
++++ b/transport/v2raykcp/kcp/receiving.go
+@@ -103,10 +103,7 @@ func (l *AckList) Flush(current uint32, rto uint32) {
+ 		}
+ 		seg.PutNumber(l.numbers[i])
+ 		seg.PutTimestamp(l.timestamps[i])
+-		timeout := rto / 2
+-		if timeout < 20 {
+-			timeout = 20
+-		}
++		timeout := max(rto/2, 20)
+ 		l.nextFlush[i] = current + timeout
+ 
+ 		if seg.IsFull() {
+@@ -154,26 +151,40 @@ func NewReceivingWorker(kcp *Connection) *ReceivingWorker {
+ 
+ func (w *ReceivingWorker) Release() {
+ 	w.Lock()
++	defer w.Unlock()
++	if w.released {
++		return
++	}
++	w.released = true
+ 	buf.ReleaseMulti(w.leftOver)
+ 	w.leftOver = nil
+-	w.released = true // Hiddify: a Read still running must not keep data after this
+-	w.Unlock()
++	// Release out-of-order segments as well as the partially read packet.
++	for number, segment := range w.window.cache {
++		segment.Release()
++		delete(w.window.cache, number)
++	}
+ }
+ 
+ func (w *ReceivingWorker) ProcessSendingNext(number uint32) {
+ 	w.Lock()
+ 	defer w.Unlock()
+-
++	if w.released {
++		return
++	}
+ 	w.acklist.Clear(number)
+ }
+ 
+ func (w *ReceivingWorker) ProcessSegment(seg *DataSegment) {
+ 	w.Lock()
+ 	defer w.Unlock()
+-
++	if w.released {
++		seg.Release()
++		return
++	}
+ 	number := seg.Number
+ 	idx := number - w.nextNumber
+ 	if idx >= w.windowSize {
++		seg.Release()
+ 		return
+ 	}
+ 	w.acklist.Clear(seg.SendingNext)
+@@ -185,9 +196,15 @@ func (w *ReceivingWorker) ProcessSegment(seg *DataSegment) {
+ }
+ 
+ func (w *ReceivingWorker) ReadMultiBuffer() buf.MultiBuffer {
+-	// Hiddify: leftOver is read under the lock, as Release frees it from another goroutine
+ 	w.Lock()
+ 	defer w.Unlock()
++	return w.readMultiBufferLocked()
++}
++
++func (w *ReceivingWorker) readMultiBufferLocked() buf.MultiBuffer {
++	if w.released {
++		return nil
++	}
+ 	if w.leftOver != nil {
+ 		mb := w.leftOver
+ 		w.leftOver = nil
+@@ -209,20 +226,17 @@ func (w *ReceivingWorker) ReadMultiBuffer() buf.MultiBuffer {
+ }
+ 
+ func (w *ReceivingWorker) Read(b []byte) int {
+-	mb := w.ReadMultiBuffer()
++	w.Lock()
++	defer w.Unlock()
++	// Hold ownership of the packet throughout the read. Release may run
++	// concurrently from the terminating connection.
++	mb := w.readMultiBufferLocked()
+ 	if mb.IsEmpty() {
+ 		return 0
+ 	}
+ 	mb, nBytes := buf.SplitBytes(mb, b)
+ 	if !mb.IsEmpty() {
+-		// Hiddify: under the lock, and dropped if the worker was released meanwhile
+-		w.Lock()
+-		if w.released {
+-			buf.ReleaseMulti(mb)
+-		} else {
+-			w.leftOver = mb
+-		}
+-		w.Unlock()
++		w.leftOver = mb
+ 	}
+ 	return nBytes
+ }
+@@ -230,7 +244,7 @@ func (w *ReceivingWorker) Read(b []byte) int {
+ func (w *ReceivingWorker) IsDataAvailable() bool {
+ 	w.RLock()
+ 	defer w.RUnlock()
+-	return w.window.Has(w.nextNumber)
++	return !w.released && w.window.Has(w.nextNumber)
+ }
+ 
+ func (w *ReceivingWorker) NextNumber() uint32 {
+@@ -243,7 +257,9 @@ func (w *ReceivingWorker) NextNumber() uint32 {
+ func (w *ReceivingWorker) Flush(current uint32) {
+ 	w.Lock()
+ 	defer w.Unlock()
+-
++	if w.released {
++		return
++	}
+ 	w.acklist.Flush(current, w.conn.roundTrip.Timeout())
+ }
+ 
+@@ -265,6 +281,5 @@ func (*ReceivingWorker) CloseRead() {
+ func (w *ReceivingWorker) UpdateNecessary() bool {
+ 	w.RLock()
+ 	defer w.RUnlock()
+-
+-	return len(w.acklist.numbers) > 0
++	return !w.released && len(w.acklist.numbers) > 0
+ }
+diff --git a/transport/v2raykcp/kcp/segment.go b/transport/v2raykcp/kcp/segment.go
+index 2beaa0b67275a68a723b4738e3a26b18343a7741..6b1fa32b9395fee10c212bb4bb16cb67d526fe62 100644
+--- a/transport/v2raykcp/kcp/segment.go
++++ b/transport/v2raykcp/kcp/segment.go
+@@ -171,7 +171,7 @@ func (s *AckSegment) parse(conv uint16, cmd Command, opt SegmentOption, buf []by
+ 	if len(buf) < count*4 {
+ 		return false, nil
+ 	}
+-	for i := 0; i < count; i++ {
++	for range count {
+ 		s.PutNumber(binary.BigEndian.Uint32(buf))
+ 		buf = buf[4:]
+ 	}
+diff --git a/transport/v2raykcp/kcp/segment_test.go b/transport/v2raykcp/kcp/segment_test.go
+index 006531dd6f7e9b6e1e0b1fde966fda5c1f42703a..436875ed608a7ecee8bb86ca51999e4625533483 100644
+--- a/transport/v2raykcp/kcp/segment_test.go
++++ b/transport/v2raykcp/kcp/segment_test.go
+@@ -3,9 +3,10 @@ package kcp_test
+ import (
+ 	"testing"
+ 
++	. "github.com/sagernet/sing-box/transport/v2raykcp/kcp"
++
+ 	"github.com/google/go-cmp/cmp"
+ 	"github.com/google/go-cmp/cmp/cmpopts"
+-	. "github.com/sagernet/sing-box/transport/v2raykcp/kcp"
+ )
+ 
+ func TestBadSegment(t *testing.T) {
+diff --git a/transport/v2raykcp/kcp/sending.go b/transport/v2raykcp/kcp/sending.go
+index 9dc1a76de29edeb6671e1ac0f388765ea787c6b2..ad307e36e37836784731d69cce618f0901fe9b82 100644
+--- a/transport/v2raykcp/kcp/sending.go
++++ b/transport/v2raykcp/kcp/sending.go
+@@ -315,13 +315,7 @@ func (w *SendingWorker) Flush(current uint32) {
+ 		return
+ 	}
+ 
+-	cwnd := w.conn.Config.GetSendingInFlightSize()
+-	if cwnd > w.remoteNextNumber-w.firstUnacknowledged {
+-		cwnd = w.remoteNextNumber - w.firstUnacknowledged
+-	}
+-	if cwnd > w.controlWindow {
+-		cwnd = w.controlWindow
+-	}
++	cwnd := min(min(w.conn.Config.GetSendingInFlightSize(), w.remoteNextNumber-w.firstUnacknowledged), w.controlWindow)
+ 
+ 	cwnd *= w.conn.Config.CwndMultiplier
+ 
+diff --git a/transport/v2raykcp/kcp/xui_lifetime_test.go b/transport/v2raykcp/kcp/xui_lifetime_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7a5b71b7b44b6d27d3c90c4aa2f5ab0a0edd9893
+--- /dev/null
++++ b/transport/v2raykcp/kcp/xui_lifetime_test.go
+@@ -0,0 +1,74 @@
++package kcp_test
++
++import (
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	. "github.com/sagernet/sing-box/transport/v2raykcp/kcp"
++
++	"github.com/xtls/xray-core/common/buf"
++)
++
++type countedKCPCloser struct {
++	count atomic.Int32
++}
++
++func (c *countedKCPCloser) Close() error {
++	c.count.Add(1)
++	return nil
++}
++
++func newPanelKCPConnection(closer *countedKCPCloser) *Connection {
++	return NewConnection(ConnMetadata{Conversation: 88}, buf.DiscardBytes, closer, &Config{
++		Mtu:              1350,
++		Tti:              50,
++		UplinkCapacity:   5,
++		DownlinkCapacity: 20,
++		CwndMultiplier:   1,
++		MaxSendingWindow: 2 * 1024 * 1024,
++	})
++}
++
++func TestXUIPanelKCPTerminateOnlyOnce(t *testing.T) {
++	closer := &countedKCPCloser{}
++	conn := newPanelKCPConnection(closer)
++	var group sync.WaitGroup
++	for range 24 {
++		group.Go(conn.Terminate)
++	}
++	group.Wait()
++	if got := closer.count.Load(); got != 1 {
++		t.Fatalf("underlying socket closed %d times, want once", got)
++	}
++	if conn.State() != StateTerminated {
++		t.Fatal("terminated KCP connection revived")
++	}
++	conn.SetState(StateActive)
++	if conn.State() != StateTerminated {
++		t.Fatal("terminated KCP connection accepted a state transition")
++	}
++}
++
++func TestXUIPanelKCPReadDeadlineInterruptsBlockedRead(t *testing.T) {
++	closer := &countedKCPCloser{}
++	conn := newPanelKCPConnection(closer)
++	defer conn.Terminate()
++	result := make(chan error, 1)
++	go func() {
++		_, err := conn.Read(make([]byte, 64))
++		result <- err
++	}()
++	if err := conn.SetReadDeadline(time.Now().Add(-time.Millisecond)); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case err := <-result:
++		if err != ErrIOTimeout {
++			t.Fatalf("expected deadline error, got %v", err)
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatal("read did not wake after a deadline update")
++	}
++}

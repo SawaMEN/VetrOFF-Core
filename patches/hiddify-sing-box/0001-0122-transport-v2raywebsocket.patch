@@ -1,0 +1,27 @@
+diff --git a/transport/v2raywebsocket/client.go b/transport/v2raywebsocket/client.go
+index f63d9c54e1ff5dc44d2dd71656c2c2b11566af5e..b3255cbb46e625a768b29c5a6b9203ce84363922 100644
+--- a/transport/v2raywebsocket/client.go
++++ b/transport/v2raywebsocket/client.go
+@@ -61,7 +61,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
+ 		requestURL.Host = host
+ 	}
+ 	if headers.Get("User-Agent") == "" {
+-		headers.Set("User-Agent", C.DefaultBrowserAgent) //H
++		headers.Set("User-Agent", C.DefaultBrowserAgent) // H
+ 	}
+ 	return &Client{
+ 		dialer,
+diff --git a/transport/v2raywebsocket/conn.go b/transport/v2raywebsocket/conn.go
+index ecea3c55bdfe489ce0a43c6fdc4652d8282af530..cd2d16448a6a6a9cbf5d6bd78ca86e058bd7a54b 100644
+--- a/transport/v2raywebsocket/conn.go
++++ b/transport/v2raywebsocket/conn.go
+@@ -290,8 +290,7 @@ func wrapWsError(err error) error {
+ 	if err == nil {
+ 		return nil
+ 	}
+-	var closedErr wsutil.ClosedError
+-	if errors.As(err, &closedErr) {
++	if closedErr, ok := errors.AsType[wsutil.ClosedError](err); ok {
+ 		if closedErr.Code == ws.StatusNormalClosure || closedErr.Code == ws.StatusNoStatusRcvd {
+ 			err = io.EOF
+ 		}

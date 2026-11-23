@@ -1,0 +1,85 @@
+diff --git a/adapter/inbound_test.go b/adapter/inbound_test.go
+index ec8c31289ca2919658adb5ff2026715387d5d05d..88ccad8fb4240c3c1cfb0f1b1c594ea53f541267 100644
+--- a/adapter/inbound_test.go
++++ b/adapter/inbound_test.go
+@@ -16,24 +16,20 @@ func TestDNSResponseAddressesUnmapsHTTPSIPv4Hints(t *testing.T) {
+ 	require.NotNil(t, ipv4Hint)
+ 
+ 	response := &dns.Msg{
+-		MsgHdr: dns.MsgHdr{
+-			Response: true,
+-			Rcode:    dns.RcodeSuccess,
+-		},
++		Response: true,
++		Rcode:    dns.RcodeSuccess,
+ 		Answer: []dns.RR{
+ 			&dns.HTTPS{
+-				SVCB: dns.SVCB{
+-					Hdr: dns.RR_Header{
+-						Name:   dns.Fqdn("example.com"),
+-						Rrtype: dns.TypeHTTPS,
+-						Class:  dns.ClassINET,
+-						Ttl:    60,
+-					},
+-					Priority: 1,
+-					Target:   ".",
+-					Value: []dns.SVCBKeyValue{
+-						&dns.SVCBIPv4Hint{Hint: []net.IP{ipv4Hint}},
+-					},
++				Hdr: dns.RR_Header{
++					Name:   dns.Fqdn("example.com"),
++					Rrtype: dns.TypeHTTPS,
++					Class:  dns.ClassINET,
++					Ttl:    60,
++				},
++				Priority: 1,
++				Target:   ".",
++				Value: []dns.SVCBKeyValue{
++					&dns.SVCBIPv4Hint{Hint: []net.IP{ipv4Hint}},
+ 				},
+ 			},
+ 		},
+diff --git a/adapter/network.go b/adapter/network.go
+index b1460b4a3b3c156008df59754cbcac180826fdf1..b629c742205ebe0b4a460fac98e9e036c84fbc32 100644
+--- a/adapter/network.go
++++ b/adapter/network.go
+@@ -9,7 +9,7 @@ import (
+ 	"time"
+ 
+ 	C "github.com/sagernet/sing-box/constant"
+-	"github.com/sagernet/sing-tun"
++	tun "github.com/sagernet/sing-tun"
+ 	"github.com/sagernet/sing/common/control"
+ )
+ 
+@@ -37,7 +37,7 @@ type NetworkManager interface {
+ 	WIFIState() WIFIState
+ 	UpdateWIFIState(ctx context.Context)
+ 	ResetNetwork(ctx context.Context)
+-	FlushSystemDNSCache()
++	FlushSystemDNSCache() // H
+ 	ReleaseMemory(ctx context.Context)
+ }
+ 
+diff --git a/adapter/outbound.go b/adapter/outbound.go
+index db86511fd0f3d77cd3dd683d8b0c5061393b20b9..6e6c3987e8575fd84c062bcf17ccc472221b8d5b 100644
+--- a/adapter/outbound.go
++++ b/adapter/outbound.go
+@@ -6,7 +6,7 @@ import (
+ 
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+-	"github.com/sagernet/sing-tun"
++	tun "github.com/sagernet/sing-tun"
+ 	N "github.com/sagernet/sing/common/network"
+ )
+ 
+@@ -17,7 +17,7 @@ type Outbound interface {
+ 	Tag() string
+ 	Network() []string
+ 	Dependencies() []string
+-	Status() Status //H: the connection state, see h_status.go
++	IsReady() bool // H
+ 	N.Dialer
+ }
+ 

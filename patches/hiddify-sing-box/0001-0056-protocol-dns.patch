@@ -1,0 +1,17 @@
+diff --git a/protocol/dns/outbound.go b/protocol/dns/outbound.go
+index a88272a96ae4822814d903e901f9a8cca091bf21..d017758d55158fc5309aa615e0ff8b0a0f7457ba 100644
+--- a/protocol/dns/outbound.go
++++ b/protocol/dns/outbound.go
+@@ -59,8 +59,8 @@ func (d *Outbound) NewConnection(ctx context.Context, conn net.Conn, metadata ad
+ }
+ 
+ func (d *Outbound) NewPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+-	err := NewDNSPacketConnection(ctx, d.router, conn, nil, metadata) //H
+-	if onClose != nil {                                               //H: the router tracks the connection by it
+-		onClose(err) //H
+-	} //H
++	err := NewDNSPacketConnection(ctx, d.router, conn, nil, metadata) // H
++	if onClose != nil {                                               // H: the router tracks the connection by it
++		onClose(err) // H
++	} // H
+ }

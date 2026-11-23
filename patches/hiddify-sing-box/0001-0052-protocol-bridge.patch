@@ -1,0 +1,84 @@
+diff --git a/protocol/bridge/backend_darwin.go b/protocol/bridge/backend_darwin.go
+index 7c902c8fc2f4c40ff8a7129c2aa29166e6a635f7..8a22a911210e47d62ae78223fd2d4d43e3042a9e 100644
+--- a/protocol/bridge/backend_darwin.go
++++ b/protocol/bridge/backend_darwin.go
+@@ -11,6 +11,7 @@ import (
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/option"
+ 	"github.com/sagernet/sing-tun"
++	"github.com/sagernet/sing-tun/gtcpip/header"
+ 	"github.com/sagernet/sing/common/buf"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	"github.com/sagernet/sing/common/logger"
+@@ -221,8 +222,18 @@ func (b *backendDarwin) WritePackets(packets [][]byte) error {
+ 		packets = packets[len(chunk):]
+ 		batch := b.writeBatch[:0]
+ 		for _, packet := range chunk {
++			if len(packet) == 0 || len(packet) > maxPacketLength {
++				continue
++			}
++			ipVersion := header.IPVersion(packet)
++			if ipVersion != header.IPv4Version && ipVersion != header.IPv6Version {
++				continue
++			}
+ 			batch = append(batch, buf.As(packet))
+ 		}
++		if len(batch) == 0 {
++			continue
++		}
+ 		err := b.batchTUN.BatchWrite(batch)
+ 		if err != nil {
+ 			return err
+diff --git a/protocol/bridge/service_darwin.go b/protocol/bridge/service_darwin.go
+index b280d54bc670f044194a59f03282a13e310b26f7..e7008f2a5e4b0747a302390a420d3115647c7073 100644
+--- a/protocol/bridge/service_darwin.go
++++ b/protocol/bridge/service_darwin.go
+@@ -40,14 +40,12 @@ func NewService(options ServiceOptions) (*Service, error) {
+ 		serviceLogger = logger.NOP()
+ 	}
+ 	instance := &Service{
+-		serviceBase: serviceBase{
+-			logger:            serviceLogger,
+-			mtu:               options.MTU,
+-			inet4Port:         options.Inet4Port,
+-			inet6Port:         options.Inet6Port,
+-			tunFileDescriptor: -1,
+-		},
+-		boundInterface: options.Interface,
++		logger:            serviceLogger,
++		mtu:               options.MTU,
++		inet4Port:         options.Inet4Port,
++		inet6Port:         options.Inet6Port,
++		tunFileDescriptor: -1,
++		boundInterface:    options.Interface,
+ 	}
+ 	instance.applyEgress = instance.syncEgressLocked
+ 	index, err := bridgeIndexOf(options.Inet4Port)
+diff --git a/protocol/bridge/service_linux.go b/protocol/bridge/service_linux.go
+index 9c15d1c40b8cc2d44fb1de126669fc06e0f32a0c..09ce20720549764a3ec893dcd7ae150a86a83382 100644
+--- a/protocol/bridge/service_linux.go
++++ b/protocol/bridge/service_linux.go
+@@ -44,16 +44,16 @@ func NewService(options ServiceOptions) (*Service, error) {
+ 		serviceLogger = logger.NOP()
+ 	}
+ 	instance := &Service{
+-		serviceBase: serviceBase{
+-			logger:            serviceLogger,
+-			mtu:               options.MTU,
+-			inet4Port:         options.Inet4Port,
+-			inet6Port:         options.Inet6Port,
+-			tunFileDescriptor: -1,
+-		},
+ 		ruleIndex:  options.RuleIndex,
+ 		routeTable: options.RouteTable,
+ 	}
++	instance.serviceBase = serviceBase{
++		logger:            serviceLogger,
++		mtu:               options.MTU,
++		inet4Port:         options.Inet4Port,
++		inet6Port:         options.Inet6Port,
++		tunFileDescriptor: -1,
++	}
+ 	instance.applyEgress = instance.syncEgressLocked
+ 	err := instance.start(options.BridgeName)
+ 	if err != nil {

@@ -1,0 +1,210 @@
+diff --git a/service/resolved/resolve1.go b/service/resolved/resolve1.go
+index c60ec723c62cb299ea30b8ed4e291a6f5ad6c34e..c1e1b9ce8501eab858e7fe573c4323f10951d446 100644
+--- a/service/resolved/resolve1.go
++++ b/service/resolved/resolve1.go
+@@ -252,9 +252,7 @@ func (t *resolve1Manager) ResolveAddress(sender dbus.Sender, ifIndex int32, fami
+ 		return
+ 	}
+ 	request := &mDNS.Msg{
+-		MsgHdr: mDNS.MsgHdr{
+-			RecursionDesired: true,
+-		},
++		RecursionDesired: true,
+ 		Question: []mDNS.Question{
+ 			{
+ 				Name:   common.Must1(mDNS.ReverseAddr(addr.String())),
+@@ -287,9 +285,7 @@ func (t *resolve1Manager) ResolveAddress(sender dbus.Sender, ifIndex int32, fami
+ 
+ func (t *resolve1Manager) ResolveRecord(sender dbus.Sender, ifIndex int32, hostname string, qClass uint16, qType uint16, flags uint64) (records []ResourceRecord, outflags uint64, err *dbus.Error) {
+ 	request := &mDNS.Msg{
+-		MsgHdr: mDNS.MsgHdr{
+-			RecursionDesired: true,
+-		},
++		RecursionDesired: true,
+ 		Question: []mDNS.Question{
+ 			{
+ 				Name:   mDNS.Fqdn(hostname),
+@@ -341,9 +337,7 @@ func (t *resolve1Manager) ResolveService(sender dbus.Sender, ifIndex int32, host
+ 	ctx := t.logRequest(sender, "ResolveService", t.interfaceName(ifIndex), hostname, sType, domain, familyToString(family), flags)
+ 
+ 	srvRequest := &mDNS.Msg{
+-		MsgHdr: mDNS.MsgHdr{
+-			RecursionDesired: true,
+-		},
++		RecursionDesired: true,
+ 		Question: []mDNS.Question{
+ 			{
+ 				Name:   serviceName,
+@@ -363,9 +357,7 @@ func (t *resolve1Manager) ResolveService(sender dbus.Sender, ifIndex int32, host
+ 	}
+ 
+ 	txtRequest := &mDNS.Msg{
+-		MsgHdr: mDNS.MsgHdr{
+-			RecursionDesired: true,
+-		},
++		RecursionDesired: true,
+ 		Question: []mDNS.Question{
+ 			{
+ 				Name:   serviceName,
+@@ -615,8 +607,7 @@ func wrapError(err error) *dbus.Error {
+ 	if err == nil {
+ 		return nil
+ 	}
+-	var rcode dns.RcodeError
+-	if errors.As(err, &rcode) {
++	if rcode, ok := errors.AsType[dns.RcodeError](err); ok {
+ 		return rcodeError(int(rcode))
+ 	}
+ 	return dbus.MakeFailedError(err)
+diff --git a/service/resolved/service.go b/service/resolved/service.go
+index 8a6208e1b93fc607875dbff62cc2f933dd488073..386293c8d8fc0f6aa631b225c9d49b0c760d97c4 100644
+--- a/service/resolved/service.go
++++ b/service/resolved/service.go
+@@ -6,6 +6,7 @@ import (
+ 	"context"
+ 	"net"
+ 	"net/netip"
++	"strings" // H
+ 	"sync"
+ 	"time"
+ 
+@@ -226,3 +227,55 @@ func (i *Service) onNetworkUpdate() {
+ 		}
+ 	}
+ }
++
++func (conf *TransportLink) nameList(ndots int, name string) []string {
++	search := common.Filter(common.Map(common.Filter(conf.domain, func(it LinkDomain) bool {
++		return !it.RoutingOnly
++	}), func(it LinkDomain) string {
++		return mDNS.Fqdn(it.Domain)
++	}), func(it string) bool {
++		return it != "."
++	})
++
++	l := len(name)
++	rooted := l > 0 && name[l-1] == '.'
++	if l > 254 || l == 254 && !rooted {
++		return nil
++	}
++
++	if rooted {
++		if avoidDNS(name) {
++			return nil
++		}
++		return []string{name}
++	}
++
++	hasNdots := strings.Count(name, ".") >= ndots
++	name += "."
++	// l++
++
++	names := make([]string, 0, 1+len(search))
++	if hasNdots && !avoidDNS(name) {
++		names = append(names, name)
++	}
++	for _, suffix := range search {
++		fqdn := name + suffix
++		if !avoidDNS(fqdn) && len(fqdn) <= 254 {
++			names = append(names, fqdn)
++		}
++	}
++	if !hasNdots && !avoidDNS(name) {
++		names = append(names, name)
++	}
++	return names
++}
++
++func avoidDNS(name string) bool {
++	if name == "" {
++		return true
++	}
++	if name[len(name)-1] == '.' {
++		name = name[:len(name)-1]
++	}
++	return strings.HasSuffix(name, ".onion")
++}
+diff --git a/service/resolved/transport.go b/service/resolved/transport.go
+index e09e19b4ef965b0f05d14fc589ba4d3a44254cc5..91f1976bfa319c6c303344fd02c8134924bb20ea 100644
+--- a/service/resolved/transport.go
++++ b/service/resolved/transport.go
+@@ -49,6 +49,7 @@ type Transport struct {
+ 	timeout                time.Duration
+ 	attempts               int
+ 	rotate                 bool
++	ndots                  int // H
+ 	service                *Service
+ 	linkAccess             sync.RWMutex
+ 	linkServers            map[*TransportLink]*LinkServers
+@@ -80,6 +81,7 @@ func NewTransport(ctx context.Context, logger log.ContextLogger, tag string, opt
+ 		// rotate:                 options.Rotate,
+ 		timeout:     5 * time.Second,
+ 		attempts:    2,
++		ndots:       1, // H
+ 		linkServers: make(map[*TransportLink]*LinkServers),
+ 	}, nil
+ }
+@@ -210,12 +212,11 @@ func (t *Transport) updateTransports(link *TransportLink) error {
+ 	if servers, loaded := t.linkServers[link]; loaded {
+ 		servers.serverScope.Close()
+ 	}
+-	serverDialer := common.Must1(dialer.NewDefault(t.ctx, option.DialerOptions{
+-		AbstractDialerOptions: option.AbstractDialerOptions{
+-			BindInterface:      link.iif.Name,
+-			UDPFragmentDefault: true,
+-		},
+-	}))
++	dialOptions := option.DialerOptions{}
++	dialOptions.AbstractDialerOptions.BindInterface = link.iif.Name
++	dialOptions.AbstractDialerOptions.UDPFragmentDefault = true
++	serverDialer := common.Must1(dialer.NewDefault(t.ctx, dialOptions))
++	serverScope := adapter.NewScope(t.ctx, t.logger) // H
+ 	var transports []adapter.DNSTransport
+ 	for _, address := range link.address {
+ 		serverAddr, ok := netip.AddrFromSlice(address.Address)
+@@ -262,11 +263,10 @@ func (t *Transport) updateTransports(link *TransportLink) error {
+ 			transports = append(transports, transport.NewUDPRaw(t.logger, t.TransportAdapter, serverDialer, M.SocksaddrFrom(serverAddr, serverPort)))
+ 		}
+ 	}
+-	serverScope := adapter.NewScope(t.ctx, t.logger)
+-	for _, serverTransport := range transports {
+-		err := serverTransport.Start(adapter.StartStateStart, serverScope)
+-		if err != nil {
+-			return E.Errors(err, serverScope.Close())
++	for _, child := range transports {
++		if err := serverScope.Start("resolved/"+child.Tag(), child, adapter.StartStateStart); err != nil {
++			_ = serverScope.Close()
++			return err
+ 		}
+ 	}
+ 	t.linkServers[link] = &LinkServers{
+@@ -324,6 +324,7 @@ func (t *Transport) ExchangeAsync(ctx context.Context, message *mDNS.Msg, callba
+ 	var (
+ 		selectedLink   *TransportLink
+ 		selectedLabels int
++		names          []string
+ 	)
+ 	t.service.linkAccess.RLock()
+ 	for _, link := range t.service.links {
+@@ -350,6 +351,9 @@ func (t *Transport) ExchangeAsync(ctx context.Context, message *mDNS.Msg, callba
+ 			}
+ 		}
+ 	}
++	if selectedLink != nil {
++		names = selectedLink.nameList(t.ndots, question.Name)
++	}
+ 	t.service.linkAccess.RUnlock()
+ 	if selectedLink == nil {
+ 		callback(dns.FixedResponseStatus(message, mDNS.RcodeNameError), nil)
+@@ -362,9 +366,8 @@ func (t *Transport) ExchangeAsync(ctx context.Context, message *mDNS.Msg, callba
+ 		callback(dns.FixedResponseStatus(message, mDNS.RcodeNameError), nil)
+ 		return
+ 	}
+-	err := transport.ValidateQuestionName(question.Name)
+-	if err != nil {
+-		callback(nil, err)
++	if len(names) == 0 {
++		callback(nil, E.New("invalid domain: ", question.Name))
+ 		return
+ 	}
+ 	serverOffset := servers.ServerOffset(t.rotate)

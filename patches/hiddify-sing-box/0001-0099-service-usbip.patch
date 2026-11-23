@@ -1,0 +1,15 @@
+diff --git a/service/usbip/client.go b/service/usbip/client.go
+index 9e0ddcadea8689f7ea1010cb2448feb7f61cfdb9..776e5d1baea71c68b7353192c4e9d011a10ffc5d 100644
+--- a/service/usbip/client.go
++++ b/service/usbip/client.go
+@@ -64,9 +64,4 @@ func (s *ClientService) Start(stage adapter.StartStage, scope *adapter.Scope) er
+ 	return nil
+ }
+ 
+-func (s *ClientService) References() []string {
+-	if s.detour == "" {
+-		return nil
+-	}
+-	return []string{s.detour}
+-}
++

@@ -1,0 +1,728 @@
+diff --git a/hiddify/ipinfo/cloudflaretrace.go b/hiddify/ipinfo/cloudflaretrace.go
+index 71d215e8d3760a6297bb46c59d49eccd2636c762..5f1b7b366010195b391f1389423a61730d30e7c4 100644
+--- a/hiddify/ipinfo/cloudflaretrace.go
++++ b/hiddify/ipinfo/cloudflaretrace.go
+@@ -23,7 +23,7 @@ type CloudflareTraceProvider struct {
+ 
+ func NewCloudflareTraceProvider() *CloudflareTraceProvider {
+ 	return &CloudflareTraceProvider{
+-		BaseProvider: BaseProvider{URL: "https://cloudflare.com/cdn-cgi/trace"},
++		URL: "https://cloudflare.com/cdn-cgi/trace",
+ 	}
+ }
+ 
+@@ -35,7 +35,7 @@ func (p *CloudflareTraceProvider) GetIPInfo(ctx context.Context, dialer N.Dialer
+ 		return nil, t, err
+ 	}
+ 	info := &IpInfo{}
+-	for _, line := range strings.Split(string(body), "\n") {
++	for line := range strings.SplitSeq(string(body), "\n") {
+ 		key, value, found := strings.Cut(strings.TrimSpace(line), "=")
+ 		if !found {
+ 			continue
+diff --git a/hiddify/ipinfo/custom.go b/hiddify/ipinfo/custom.go
+index d28987d763d195d32e940c58da2718f4468f436c..301ed00f73aef2357191d873870845f66bb7ece7 100644
+--- a/hiddify/ipinfo/custom.go
++++ b/hiddify/ipinfo/custom.go
+@@ -16,7 +16,7 @@ type CustomIpApiProvider struct {
+ // NewCustomIpApiProvider builds a provider for a panel/custom endpoint.
+ func NewCustomIpApiProvider(rawURL string) *CustomIpApiProvider {
+ 	return &CustomIpApiProvider{
+-		BaseProvider: BaseProvider{URL: rawURL, UserAgent: "curl/8.7.1"},
++		URL: rawURL, UserAgent: "curl/8.7.1",
+ 	}
+ }
+ 
+diff --git a/hiddify/ipinfo/freeipapi.go b/hiddify/ipinfo/freeipapi.go
+index f119ff0d7650dd1de7614c7afa094954c89b0d33..bf3b419ab13e9c066ee51fde2d5213f40a660475 100644
+--- a/hiddify/ipinfo/freeipapi.go
++++ b/hiddify/ipinfo/freeipapi.go
+@@ -14,7 +14,7 @@ type FreeIpApiProvider struct {
+ // NewFreeIpApiProvider initializes a new FreeIpApiProvider.
+ func NewFreeIpApiProvider() *FreeIpApiProvider {
+ 	return &FreeIpApiProvider{
+-		BaseProvider: BaseProvider{URL: "https://free.freeipapi.com/api/json/"},
++		URL: "https://free.freeipapi.com/api/json/",
+ 	}
+ }
+ 
+diff --git a/hiddify/ipinfo/h_ipinfo_test.go b/hiddify/ipinfo/h_ipinfo_test.go
+index 0dbdd2a794f63f7e308629cba46bfb3147ee7731..dd5951f7f73dbd190b415d96651552d4ec04cd4a 100644
+--- a/hiddify/ipinfo/h_ipinfo_test.go
++++ b/hiddify/ipinfo/h_ipinfo_test.go
+@@ -57,7 +57,6 @@ type urlProvider interface {
+ 
+ func (p *FreeIpApiProvider) base() *BaseProvider       { return &p.BaseProvider }
+ func (p *IpApiCoProvider) base() *BaseProvider         { return &p.BaseProvider }
+-func (p *CustomIpApiProvider) base() *BaseProvider     { return &p.BaseProvider }
+ func (p *IpApiProvider) base() *BaseProvider           { return &p.BaseProvider }
+ func (p *IpInfoIoProvider) base() *BaseProvider        { return &p.BaseProvider }
+ func (p *IpSbProvider) base() *BaseProvider            { return &p.BaseProvider }
+@@ -87,18 +86,6 @@ func TestH_IpInfoProviderParsing(t *testing.T) {
+ 			body:     `{"ip":"1.2.3.4","country_code":"US","region":"California","city":"LA","asn":"AS15169","org":"Google LLC","latitude":34.05,"longitude":-118.24,"postal":"90001"}`,
+ 			want:     IpInfo{IP: "1.2.3.4", CountryCode: "US", Region: "California", City: "LA", ASN: 15169, Org: "Google LLC", Latitude: 34.05, Longitude: -118.24, PostalCode: "90001"},
+ 		},
+-		{
+-			name:     "custom ipapi panel",
+-			provider: NewCustomIpApiProvider("https://panel.example/ipapi"),
+-			body:     `{"ip":"9.9.9.9","city":"Paris","region":"Ile-de-France","region_code":"IDF","country_name":"France","country_code":"FR","continent_code":"EU","latitude":48.85,"longitude":2.35,"timezone":"Europe/Paris","utc_offset":"+0200","currency":"EUR","currency_name":"Euro","languages":"fr-FR,en-US","asn":"AS1234","org":"cloudflare"}`,
+-			want:     IpInfo{IP: "9.9.9.9", CountryCode: "FR", Region: "Ile-de-France", City: "Paris", ASN: 1234, Org: "cloudflare", Latitude: 48.85, Longitude: 2.35},
+-		},
+-		{
+-			name:     "ipapi.co asn as number",
+-			provider: NewIpApiCoProvider(),
+-			body:     `{"ip":"1.2.3.4","country_code":"us","asn":15169,"org":"Google LLC"}`,
+-			want:     IpInfo{IP: "1.2.3.4", CountryCode: "US", ASN: 15169, Org: "Google LLC"},
+-		},
+ 		{
+ 			name:     "ipapi.co bad asn",
+ 			provider: NewIpApiCoProvider(),
+@@ -252,13 +239,13 @@ func TestH_IpInfoGetIpInfoFallback(t *testing.T) {
+ 	logger := log.NewNOPFactory().NewLogger("ipinfo")
+ 
+ 	failing, _ := jsonServer(t, http.StatusInternalServerError, `{}`)
+-	ok, _ := jsonServer(t, http.StatusOK, `{"ip":"3.3.3.3","country":"JP"}`)
++	ok, _ := jsonServer(t, http.StatusOK, `{"ip":"3.3.3.3","cc":"JP"}`)
+ 	newFailing := func() Provider {
+ 		p := NewIpSbProvider()
+ 		p.URL = failing.URL
+ 		return p
+ 	}
+-	good := NewCountryIsProvider()
++	good := NewMyIPProvider()
+ 	good.URL = ok.URL
+ 
+ 	providers = []Provider{newFailing(), newFailing()}
+@@ -287,48 +274,6 @@ func TestH_IpInfoGetIpInfoFallback(t *testing.T) {
+ 	require.ErrorIs(t, err, context.Canceled)
+ }
+ 
+-func TestH_IpInfoCustomURLPreferred(t *testing.T) {
+-	oldProviders, oldFallback := providers, fallbackProviders
+-	t.Cleanup(func() { providers, fallbackProviders = oldProviders, oldFallback })
+-	logger := log.NewNOPFactory().NewLogger("ipinfo")
+-
+-	custom, _ := jsonServer(t, http.StatusOK, `{"ip":"8.8.4.4","country_code":"US","asn":"AS15169","org":"Google"}`)
+-	builtin, _ := jsonServer(t, http.StatusOK, `{"ip":"1.1.1.1","country":"AU"}`)
+-	p := NewCountryIsProvider()
+-	p.URL = builtin.URL
+-	providers = []Provider{p}
+-	fallbackProviders = nil
+-
+-	info, _, err := GetIpInfo(logger, testCtx(t), nil, custom.URL)
+-	require.NoError(t, err)
+-	require.Equal(t, "8.8.4.4", info.IP)
+-	require.Equal(t, "US", info.CountryCode)
+-	require.Equal(t, 15169, info.ASN)
+-}
+-
+-func TestH_IpInfoCustomURLFallback(t *testing.T) {
+-	oldProviders, oldFallback := providers, fallbackProviders
+-	t.Cleanup(func() { providers, fallbackProviders = oldProviders, oldFallback })
+-	logger := log.NewNOPFactory().NewLogger("ipinfo")
+-
+-	custom, _ := jsonServer(t, http.StatusInternalServerError, `boom`)
+-	builtin, _ := jsonServer(t, http.StatusOK, `{"ip":"1.1.1.1","country":"AU"}`)
+-	p := NewCountryIsProvider()
+-	p.URL = builtin.URL
+-	providers = []Provider{p}
+-	fallbackProviders = nil
+-
+-	info, _, err := GetIpInfo(logger, testCtx(t), nil, custom.URL)
+-	require.NoError(t, err)
+-	require.Equal(t, "1.1.1.1", info.IP)
+-	require.Equal(t, "AU", info.CountryCode)
+-
+-	emptyCustom, _ := jsonServer(t, http.StatusOK, `{}`)
+-	info, _, err = GetIpInfo(logger, testCtx(t), nil, emptyCustom.URL)
+-	require.NoError(t, err)
+-	require.Equal(t, "1.1.1.1", info.IP)
+-}
+-
+ func TestH_IpInfoString(t *testing.T) {
+ 	s := (&IpInfo{IP: "1.1.1.1", CountryCode: "AU", ASN: 13335}).String()
+ 	require.Contains(t, s, "IP: 1.1.1.1")
+diff --git a/hiddify/ipinfo/h_provider_concurrency_test.go b/hiddify/ipinfo/h_provider_concurrency_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..46b9c807f89200dbf7581154165a9b79e8ad27e7
+--- /dev/null
++++ b/hiddify/ipinfo/h_provider_concurrency_test.go
+@@ -0,0 +1,35 @@
++package ipinfo
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"sync"
++	"testing"
++
++	C "github.com/sagernet/sing-box/constant"
++
++	"github.com/stretchr/testify/require"
++)
++
++func TestH_ConcurrentProviderDefaultUserAgent(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.UserAgent() != C.DefaultBrowserAgent {
++			w.WriteHeader(http.StatusBadRequest)
++			return
++		}
++		_, _ = w.Write([]byte(`{"ip":"127.0.0.1"}`))
++	}))
++	defer server.Close()
++	provider := &BaseProvider{URL: server.URL}
++	var workers sync.WaitGroup
++	errors := make(chan error, 32)
++	for range 32 {
++		workers.Go(func() { _, _, err := provider.fetchData(t.Context(), nil); errors <- err })
++	}
++	workers.Wait()
++	close(errors)
++	for err := range errors {
++		require.NoError(t, err)
++	}
++	require.Empty(t, provider.UserAgent)
++}
+diff --git a/hiddify/ipinfo/ipapico.go b/hiddify/ipinfo/ipapico.go
+index 4ae91f6d728bf18740d628eb5006b1be74c1e78c..22f5615166c75c08f0412d8f4e2edecd28da9b07 100644
+--- a/hiddify/ipinfo/ipapico.go
++++ b/hiddify/ipinfo/ipapico.go
+@@ -2,6 +2,8 @@ package ipinfo
+ 
+ import (
+ 	"context"
++	"strconv"
++	"strings"
+ 
+ 	N "github.com/sagernet/sing/common/network"
+ )
+@@ -13,7 +15,7 @@ type IpApiCoProvider struct {
+ 
+ func NewIpApiCoProvider() *IpApiCoProvider {
+ 	return &IpApiCoProvider{
+-		BaseProvider: BaseProvider{URL: "https://ipapi.co/json/", UserAgent: "curl/8.7.1"},
++		URL: "https://ipapi.co/json/", UserAgent: "curl/8.7.1",
+ 	}
+ }
+ 
+@@ -23,6 +25,38 @@ func (p *IpApiCoProvider) GetIPInfo(ctx context.Context, dialer N.Dialer) (*IpIn
+ 	if err != nil {
+ 		return nil, t, err
+ 	}
+-	parseIpApiJSON(data, info)
++
++	if ip, ok := data["ip"].(string); ok {
++		info.IP = ip
++	}
++	if countryCode, ok := data["country_code"].(string); ok {
++		info.CountryCode = countryCode
++	}
++	if region, ok := data["region"].(string); ok {
++		info.Region = region
++	}
++	if city, ok := data["city"].(string); ok {
++		info.City = city
++	}
++	if asnstr, ok := data["asn"].(string); ok {
++		if after, ok0 := strings.CutPrefix(asnstr, "AS"); ok0 {
++			if asn, ok := strconv.ParseInt(after, 10, 64); ok == nil {
++				info.ASN = int(asn)
++			}
++		}
++	}
++	if org, ok := data["org"].(string); ok {
++		info.Org = org
++	}
++	if latitude, ok := data["latitude"].(float64); ok {
++		info.Latitude = latitude
++	}
++	if longitude, ok := data["longitude"].(float64); ok {
++		info.Longitude = longitude
++	}
++
++	if postalCode, ok := data["postal"].(string); ok {
++		info.PostalCode = postalCode
++	}
+ 	return info, t, nil
+ }
+diff --git a/hiddify/ipinfo/ipapicom.go b/hiddify/ipinfo/ipapicom.go
+index 88bb3875a88787160d94bf88328699dbc3230301..03750b4452131e8d29b75e154158989b5d44cd80 100644
+--- a/hiddify/ipinfo/ipapicom.go
++++ b/hiddify/ipinfo/ipapicom.go
+@@ -15,7 +15,7 @@ type IpApiProvider struct {
+ // NewIpApiProvider initializes a new IpApiProvider.
+ func NewIpApiProvider() *IpApiProvider {
+ 	return &IpApiProvider{
+-		BaseProvider: BaseProvider{URL: "http://ip-api.com/json/"},
++		URL: "http://ip-api.com/json/",
+ 	}
+ }
+ 
+diff --git a/hiddify/ipinfo/ipinfo.go b/hiddify/ipinfo/ipinfo.go
+index 8f693198aa27224e330485df3d630a2200d217a2..b9536c58d8aa169ea393d2c76950d858373a5027 100644
+--- a/hiddify/ipinfo/ipinfo.go
++++ b/hiddify/ipinfo/ipinfo.go
+@@ -9,25 +9,26 @@ import (
+ 	"net"
+ 	"net/http"
+ 	"net/url"
+-	"strings"
+ 	"time"
+ 
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+-	"github.com/sagernet/sing/common"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
+ )
+ 
+-// providers that currently return usable JSON without challenge pages / dead hosts.
+ var providers = []Provider{
++	NewFreeIpApiProvider(),
+ 	NewIpApiCoProvider(),
+ 	NewIpApiProvider(),
+ 	NewIpInfoIoProvider(),
+ 	NewIpSbProvider(),
+ 	NewIpWhoIsProvider(),
++	// NewCloudflareTraceProvider(),
+ 	NewCountryIsProvider(),
++	NewMyIPExpertProvider(),
+ 	NewMyIPioProvider(),
++	NewReallyFreeGeoIPProvider(),
+ }
+ 
+ // fallbackProviders are tried when every provider above failed. The providers are tried from a
+@@ -36,9 +37,9 @@ var providers = []Provider{
+ // network, which the app shows, so they come first, and the trace answers when they rate-limit
+ // (429) or time out on a busy network and the core would otherwise have no measurement at all.
+ var fallbackProviders = []Provider{
+-	NewCloudflareTraceProvider(),
++	NewMyIPProvider(),
+ 	NewCountryIsProvider(),
+-	NewMyIPioProvider(),
++	// NewCloudflareTraceProvider(),
+ }
+ 
+ func GetAllIPCheckerDomainsDomains() []string {
+@@ -49,7 +50,6 @@ func GetAllIPCheckerDomainsDomains() []string {
+ 			if net.ParseIP(d.Hostname()) == nil {
+ 				domains = append(domains, d.Hostname())
+ 			}
+-
+ 		}
+ 	}
+ 	return domains
+@@ -89,22 +89,8 @@ func (p *BaseProvider) GetName() string {
+ 	return p.URL
+ }
+ 
+-// fetchData retrieves the JSON a provider answers with, from its URL, with a custom user agent
+-// and dialer.
+-func (p *BaseProvider) fetchData(ctx context.Context, detour N.Dialer) (map[string]interface{}, uint16, error) {
+-	body, t, err := p.fetchBody(ctx, detour)
+-	if err != nil {
+-		return nil, t, err
+-	}
+-	var jsonResponse map[string]interface{}
+-	if err = json.Unmarshal(body, &jsonResponse); err != nil {
+-		return nil, 65535, fmt.Errorf("failed to parse JSON from [%s]: %v", p.URL, err)
+-	}
+-	return jsonResponse, t, nil
+-}
+-
+-// fetchBody is fetchData without the JSON step, for the providers that answer plain text.
+-func (p *BaseProvider) fetchBody(ctx context.Context, detour N.Dialer) ([]byte, uint16, error) {
++// fetchData retrieves the data from the provider's URL with a custom user agent and dialer.
++func (p *BaseProvider) fetchData(ctx context.Context, detour N.Dialer) (map[string]any, uint16, error) {
+ 	link := p.URL
+ 	linkURL, err := url.Parse(link)
+ 	if err != nil {
+@@ -125,10 +111,11 @@ func (p *BaseProvider) fetchBody(ctx context.Context, detour N.Dialer) ([]byte,
+ 	if err != nil {
+ 		return nil, 65535, err
+ 	}
+-	if p.UserAgent == "" {
+-		p.UserAgent = C.DefaultBrowserAgent
++	agent := p.UserAgent // H: provider is shared by concurrent monitoring tests
++	if agent == "" {
++		agent = C.DefaultBrowserAgent
+ 	}
+-	req.Header.Set("User-Agent", p.UserAgent)
++	req.Header.Set("User-Agent", agent)
+ 	start := time.Now()
+ 	var client http.Client
+ 	if detour != nil {
+@@ -137,7 +124,7 @@ func (p *BaseProvider) fetchBody(ctx context.Context, detour N.Dialer) ([]byte,
+ 			return nil, 65535, err
+ 		}
+ 		defer instance.Close()
+-		if earlyConn, isEarlyConn := common.Cast[N.EarlyConn](instance); isEarlyConn && earlyConn.NeedHandshake() {
++		if N.NeedHandshakeForWrite(instance) { // H
+ 			start = time.Now()
+ 		}
+ 
+@@ -173,27 +160,77 @@ func (p *BaseProvider) fetchBody(ctx context.Context, detour N.Dialer) ([]byte,
+ 		return nil, 65535, fmt.Errorf("failed to read response from [%s]: %v", p.URL, err)
+ 	}
+ 	t := uint16(time.Since(start) / time.Millisecond)
+-	return body, t, nil
++	var jsonResponse map[string]any
++	err = json.Unmarshal(body, &jsonResponse)
++	if err != nil {
++		return nil, 65535, fmt.Errorf("failed to parse JSON from [%s]: %v", p.URL, err)
++	}
++
++	return jsonResponse, t, nil
+ }
+ 
+-// GetIpInfo iterates over the providers to fetch and parse IP information.
+-// When customURL is non-empty (subscription `ipinfo-url`), that endpoint is
+-// tried first with the custom ipapi-compatible parser.
+-func GetIpInfo(logger log.Logger, ctx context.Context, detour N.Dialer, customURL ...string) (*IpInfo, uint16, error) {
+-	var lastErr error
+-	if len(customURL) > 0 {
+-		if u := strings.TrimSpace(customURL[0]); u != "" {
+-			p := NewCustomIpApiProvider(u)
+-			testCtx, cancel := context.WithTimeout(ctx, C.TCPTimeout)
+-			ipInfo, t, err := p.GetIPInfo(testCtx, detour)
+-			cancel()
+-			if err == nil {
+-				return ipInfo, t, nil
++// fetchBody provides the raw-body transport required by the upstream Cloudflare
++// trace provider. It deliberately leaves the fork's existing JSON fetchData
++// implementation untouched, including custom IP information providers.
++func (p *BaseProvider) fetchBody(ctx context.Context, detour N.Dialer) ([]byte, uint16, error) {
++	request, err := http.NewRequestWithContext(ctx, http.MethodGet, p.URL, nil)
++	if err != nil {
++		return nil, 65535, err
++	}
++	agent := p.UserAgent
++	if agent == "" {
++		agent = C.DefaultBrowserAgent
++	}
++	request.Header.Set("User-Agent", agent)
++
++	transport := &http.Transport{
++		TLSHandshakeTimeout: 15 * time.Second,
++	}
++	if detour != nil {
++		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
++			host, port, err := net.SplitHostPort(address)
++			if err != nil {
++				return nil, err
+ 			}
+-			logger.Warn("custom ipinfo-url failed, falling back: ", p.GetName(), " ", err)
+-			lastErr = err
++			return detour.DialContext(ctx, network, M.ParseSocksaddrHostPortStr(host, port))
+ 		}
+ 	}
++	defer transport.CloseIdleConnections()
++
++	client := &http.Client{
++		Transport: transport,
++		CheckRedirect: func(*http.Request, []*http.Request) error {
++			return http.ErrUseLastResponse
++		},
++	}
++	start := time.Now()
++	response, err := client.Do(request)
++	if err != nil {
++		return nil, 65535, err
++	}
++	defer response.Body.Close()
++	if response.StatusCode != http.StatusOK {
++		return nil, 65535, fmt.Errorf("non-200 response from [%s]: %d", p.URL, response.StatusCode)
++	}
++
++	const maxResponseSize = 32 << 10
++	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseSize+1))
++	if err != nil {
++		return nil, 65535, fmt.Errorf("failed to read response from [%s]: %w", p.URL, err)
++	}
++	if len(body) > maxResponseSize {
++		return nil, 65535, fmt.Errorf("response from [%s] exceeds %d bytes", p.URL, maxResponseSize)
++	}
++	ms := time.Since(start) / time.Millisecond
++	if ms >= 65535 {
++		ms = 65534
++	}
++	return body, uint16(ms), nil
++}
++
++// getCurrentIpInfo iterates over the providers to fetch and parse IP information.
++func GetIpInfo(logger log.Logger, ctx context.Context, detour N.Dialer) (*IpInfo, uint16, error) {
++	var lastErr error
+ 	startIndex := rand.Intn(len(providers))
+ 	for i := 0; i < len(providers); i++ {
+ 		select {
+@@ -243,3 +280,23 @@ func GetIpInfo(logger log.Logger, ctx context.Context, detour N.Dialer, customUR
+ 
+ // 	os.Exit(0)
+ // }
++
++// GetIpInfoFromURL retrieves IP information from a custom provider through the outbound. //H
++func GetIpInfoFromURL(ctx context.Context, detour N.Dialer, url string) (*IpInfo, uint16, error) {
++	data, elapsed, err := (&BaseProvider{URL: url}).fetchData(ctx, detour)
++	if err != nil {
++		return nil, elapsed, err
++	}
++	raw, err := json.Marshal(data)
++	if err != nil {
++		return nil, elapsed, err
++	}
++	var info IpInfo
++	if err = json.Unmarshal(raw, &info); err != nil {
++		return nil, elapsed, err
++	}
++	if info.IP == "" {
++		return nil, elapsed, fmt.Errorf("IP provider %s did not supply an IP", url)
++	}
++	return &info, elapsed, nil
++}
+diff --git a/hiddify/ipinfo/ipinfoio.go b/hiddify/ipinfo/ipinfoio.go
+index 2481e5e6dc49f959b9daf7bb6d23790f7eda22dc..34fd8ba1df9bfe2ac9ec4ddb450eb3f8912dc371 100644
+--- a/hiddify/ipinfo/ipinfoio.go
++++ b/hiddify/ipinfo/ipinfoio.go
+@@ -15,7 +15,7 @@ type IpInfoIoProvider struct {
+ 
+ func NewIpInfoIoProvider() *IpInfoIoProvider {
+ 	return &IpInfoIoProvider{
+-		BaseProvider: BaseProvider{URL: "https://ipinfo.io/json"},
++		URL: "http://ipinfo.io/json",
+ 	}
+ }
+ 
+@@ -54,8 +54,8 @@ func (p *IpInfoIoProvider) GetIPInfo(ctx context.Context, dialer N.Dialer) (*IpI
+ 		// Split the org string to extract ASN and Organization
+ 		orgParts := strings.SplitN(org, " ", 2) // Split into 2 parts
+ 		if len(orgParts) > 0 {
+-			if strings.HasPrefix(orgParts[0], "AS") {
+-				if asn, ok := strconv.ParseInt(strings.TrimPrefix(orgParts[0], "AS"), 10, 64); ok == nil {
++			if after, ok0 := strings.CutPrefix(orgParts[0], "AS"); ok0 {
++				if asn, ok := strconv.ParseInt(after, 10, 64); ok == nil {
+ 					info.ASN = int(asn)
+ 				}
+ 			}
+diff --git a/hiddify/ipinfo/ipsb.go b/hiddify/ipinfo/ipsb.go
+index 17c5a3dcd62de62e8c008960de31e8aceb66854a..9fe5ccea821b7234d4e15840b546753e8eb209d8 100644
+--- a/hiddify/ipinfo/ipsb.go
++++ b/hiddify/ipinfo/ipsb.go
+@@ -13,7 +13,7 @@ type IpSbProvider struct {
+ 
+ func NewIpSbProvider() *IpSbProvider {
+ 	return &IpSbProvider{
+-		BaseProvider: BaseProvider{URL: "https://api.ip.sb/geoip/"},
++		URL: "https://api.ip.sb/geoip/",
+ 	}
+ }
+ 
+diff --git a/hiddify/ipinfo/ipwhois.go b/hiddify/ipinfo/ipwhois.go
+index 509a36dcc5990ccc499279bbf8b16484b7913438..36740706f44737ea176196e1e21069418fd0e22a 100644
+--- a/hiddify/ipinfo/ipwhois.go
++++ b/hiddify/ipinfo/ipwhois.go
+@@ -13,7 +13,7 @@ type IpWhoIsProvider struct {
+ 
+ func NewIpWhoIsProvider() *IpWhoIsProvider {
+ 	return &IpWhoIsProvider{
+-		BaseProvider: BaseProvider{URL: "http://ipwho.is/"},
++		URL: "http://ipwho.is/",
+ 	}
+ }
+ 
+@@ -37,7 +37,7 @@ func (p *IpWhoIsProvider) GetIPInfo(ctx context.Context, dialer N.Dialer) (*IpIn
+ 		info.City = city
+ 	}
+ 
+-	if connection, ok := data["connection"].(map[string]interface{}); ok {
++	if connection, ok := data["connection"].(map[string]any); ok {
+ 		if asn, ok := connection["asn"].(float64); ok {
+ 			info.ASN = int(asn)
+ 		}
+diff --git a/hiddify/ipinfo/limited_cloudflare.go b/hiddify/ipinfo/limited_cloudflare.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b5c9affe2b59b28b00973a62449102f439400b42
+--- /dev/null
++++ b/hiddify/ipinfo/limited_cloudflare.go
+@@ -0,0 +1,39 @@
++package ipinfo
++
++// // CloudflareTraceProvider struct and implementation.
++// type CloudflareTraceProvider struct {
++// 	BaseProvider
++// }
++
++// // NewCloudflareTraceProvider initializes a new CloudflareTraceProvider.
++// func NewCloudflareTraceProvider() *CloudflareTraceProvider {
++// 	return &CloudflareTraceProvider{
++// 		BaseProvider: BaseProvider{URL: "https://cloudflare.com/cdn-cgi/trace"},
++// 	}
++// }
++
++// // GetIPInfo fetches and parses IP information from Cloudflare's trace endpoint.
++// func (p *CloudflareTraceProvider) GetIPInfo(ctx context.Context, dialer N.Dialer) (*IpInfo, uint16, error) {
++// 	info := &IpInfo{}
++// 	data, t, err := p.fetchData(ctx, dialer)
++// 	if err != nil {
++// 		return nil, t, err
++// 	}
++
++// 	// Parse the plain text response.
++// 	for _, line := range strings.Split(string(data), "\n") {
++// 		parts := strings.SplitN(line, "=", 2)
++// 		if len(parts) != 2 {
++// 			continue
++// 		}
++// 		key, value := parts[0], parts[1]
++// 		switch key {
++// 		case "ip":
++// 			info.IP = value
++// 		case "loc":
++// 			info.CountryCode = value
++// 		}
++// 	}
++
++// 	return info, t, nil
++// }
+diff --git a/hiddify/ipinfo/limited_countryis.go b/hiddify/ipinfo/limited_countryis.go
+index a5bbdeddb51b40020d53bd836a45bff45f1725f0..ff7aec5b4257d417aa093a7eab4261afcbe1a72a 100644
+--- a/hiddify/ipinfo/limited_countryis.go
++++ b/hiddify/ipinfo/limited_countryis.go
+@@ -14,7 +14,7 @@ type CountryIsProvider struct {
+ // NewCountryIsProvider initializes a new CountryIsProvider.
+ func NewCountryIsProvider() *CountryIsProvider {
+ 	return &CountryIsProvider{
+-		BaseProvider: BaseProvider{URL: "https://api.country.is/"},
++		URL: "https://api.country.is/",
+ 	}
+ }
+ 
+diff --git a/hiddify/ipinfo/limited_myip.go b/hiddify/ipinfo/limited_myip.go
+index 84f93318947aac27bd11cc4cdd0e0e905a93bfe7..d1b3b2f548eef7ff41eb402312929183241c0b6a 100644
+--- a/hiddify/ipinfo/limited_myip.go
++++ b/hiddify/ipinfo/limited_myip.go
+@@ -14,7 +14,7 @@ type MyIPProvider struct {
+ // NewMyIPProvider initializes a new MyIPProvider.
+ func NewMyIPProvider() *MyIPProvider {
+ 	return &MyIPProvider{
+-		BaseProvider: BaseProvider{URL: "https://api.myip.com"},
++		URL: "https://api.myip.com",
+ 	}
+ }
+ 
+diff --git a/hiddify/ipinfo/myipexpert.go b/hiddify/ipinfo/myipexpert.go
+index 91b90f0e435e98c68341684691ad166207bcff98..296289a128c73d7cc85f32071c8d38da1f7c19ab 100644
+--- a/hiddify/ipinfo/myipexpert.go
++++ b/hiddify/ipinfo/myipexpert.go
+@@ -5,8 +5,9 @@ import (
+ 	"strconv"
+ 	"strings"
+ 
+-	"github.com/biter777/countries"
+ 	N "github.com/sagernet/sing/common/network"
++
++	"github.com/biter777/countries"
+ )
+ 
+ // MyIPExpertProvider struct and implementation.
+@@ -17,7 +18,7 @@ type MyIPExpertProvider struct {
+ // NewMyIPExpertProvider initializes a new MyIPExpertProvider.
+ func NewMyIPExpertProvider() *MyIPExpertProvider {
+ 	return &MyIPExpertProvider{
+-		BaseProvider: BaseProvider{URL: "https://myip.expert/api/"},
++		URL: "https://myip.expert/api/",
+ 	}
+ }
+ 
+diff --git a/hiddify/ipinfo/myipio.go b/hiddify/ipinfo/myipio.go
+index bdc757ed45bbefd82464c2ca0239e1c934fbd7fa..089fec6c309750e1046232fdd24d28300cf63eef 100644
+--- a/hiddify/ipinfo/myipio.go
++++ b/hiddify/ipinfo/myipio.go
+@@ -14,7 +14,7 @@ type MyIPioProvider struct {
+ // NewMyIPioProvider initializes a new MyIPioProvider.
+ func NewMyIPioProvider() *MyIPioProvider {
+ 	return &MyIPioProvider{
+-		BaseProvider: BaseProvider{URL: "https://api.my-ip.io/v2/ip.json"},
++		URL: "https://api.my-ip.io/v2/ip.json",
+ 	}
+ }
+ 
+@@ -30,7 +30,7 @@ func (p *MyIPioProvider) GetIPInfo(ctx context.Context, dialer N.Dialer) (*IpInf
+ 		if ip, ok := data["ip"].(string); ok {
+ 			info.IP = ip
+ 		}
+-		if country, ok := data["country"].(map[string]interface{}); ok {
++		if country, ok := data["country"].(map[string]any); ok {
+ 			if code, ok := country["code"].(string); ok {
+ 				info.CountryCode = code
+ 			}
+@@ -41,7 +41,7 @@ func (p *MyIPioProvider) GetIPInfo(ctx context.Context, dialer N.Dialer) (*IpInf
+ 		if city, ok := data["city"].(string); ok {
+ 			info.City = city
+ 		}
+-		if location, ok := data["location"].(map[string]interface{}); ok {
++		if location, ok := data["location"].(map[string]any); ok {
+ 			if lat, ok := location["lat"].(float64); ok {
+ 				info.Latitude = lat
+ 			}
+@@ -49,7 +49,7 @@ func (p *MyIPioProvider) GetIPInfo(ctx context.Context, dialer N.Dialer) (*IpInf
+ 				info.Longitude = lon
+ 			}
+ 		}
+-		if asn, ok := data["asn"].(map[string]interface{}); ok {
++		if asn, ok := data["asn"].(map[string]any); ok {
+ 			if asnNumber, ok := asn["number"].(float64); ok {
+ 				info.ASN = int(asnNumber)
+ 			}
+diff --git a/hiddify/ipinfo/parse.go b/hiddify/ipinfo/parse.go
+index 97206ab994ea37eb07f6eae20005bc064eae4cff..94bf6d4554c6bba42169e31a9048c8fa7b708816 100644
+--- a/hiddify/ipinfo/parse.go
++++ b/hiddify/ipinfo/parse.go
+@@ -6,7 +6,7 @@ import (
+ )
+ 
+ // parseASN accepts JSON numbers, "12322", "AS12322", or "AS12322 Org Name".
+-func parseASN(v interface{}) int {
++func parseASN(v any) int {
+ 	switch x := v.(type) {
+ 	case float64:
+ 		return int(x)
+@@ -33,7 +33,7 @@ func parseASN(v interface{}) int {
+ 	}
+ }
+ 
+-func stringField(data map[string]interface{}, keys ...string) string {
++func stringField(data map[string]any, keys ...string) string {
+ 	for _, key := range keys {
+ 		if v, ok := data[key].(string); ok {
+ 			if s := strings.TrimSpace(v); s != "" && s != "null" {
+@@ -44,7 +44,7 @@ func stringField(data map[string]interface{}, keys ...string) string {
+ 	return ""
+ }
+ 
+-func floatField(data map[string]interface{}, keys ...string) float64 {
++func floatField(data map[string]any, keys ...string) float64 {
+ 	for _, key := range keys {
+ 		if v, ok := data[key].(float64); ok {
+ 			return v
+@@ -57,7 +57,7 @@ func floatField(data map[string]interface{}, keys ...string) float64 {
+ // custom panel schema:
+ //
+ //	ip, city, region, country_code, latitude, longitude, asn ("AS1234"|1234), org, ...
+-func parseIpApiJSON(data map[string]interface{}, info *IpInfo) {
++func parseIpApiJSON(data map[string]any, info *IpInfo) {
+ 	info.IP = stringField(data, "ip")
+ 	info.CountryCode = strings.ToUpper(stringField(data, "country_code"))
+ 	if info.CountryCode == "" {
+diff --git a/hiddify/ipinfo/realyfreegeoip.go b/hiddify/ipinfo/realyfreegeoip.go
+index bcdc0cbcf4117cf8001f7bb7394c0485008e3122..437e676251a7312d44915626bd70dabb7736198c 100644
+--- a/hiddify/ipinfo/realyfreegeoip.go
++++ b/hiddify/ipinfo/realyfreegeoip.go
+@@ -14,7 +14,7 @@ type ReallyFreeGeoIPProvider struct {
+ // NewReallyFreeGeoIPProvider initializes a new ReallyFreeGeoIPProvider.
+ func NewReallyFreeGeoIPProvider() *ReallyFreeGeoIPProvider {
+ 	return &ReallyFreeGeoIPProvider{
+-		BaseProvider: BaseProvider{URL: "https://reallyfreegeoip.org/json/"},
++		URL: "https://reallyfreegeoip.org/json/",
+ 	}
+ }
+ 

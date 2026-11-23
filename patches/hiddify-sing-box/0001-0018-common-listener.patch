@@ -1,0 +1,79 @@
+diff --git a/common/listener/listener_tcp.go b/common/listener/listener_tcp.go
+index a8d9a8e61d7c9a3165f0ca61c7c59f8954456d8c..86e989a5cfaae34e512b20a6795056e6914c338b 100644
+--- a/common/listener/listener_tcp.go
++++ b/common/listener/listener_tcp.go
+@@ -11,6 +11,7 @@ import (
+ 	"github.com/sagernet/sing-box/common/proxyproto"
+ 	"github.com/sagernet/sing-box/common/redir"
+ 	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/hiddify/finalmask"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing/common/control"
+ 	E "github.com/sagernet/sing/common/exceptions"
+@@ -52,7 +53,7 @@ func (l *Listener) ListenTCP() (net.Listener, error) {
+ 			Interval: keepInterval,
+ 		}
+ 	}
+-	listenConfig.SetMultipathTCP(l.listenOptions.TCPMultiPath) //H: Go 1.24+ listens MPTCP by default; only when asked
++	listenConfig.SetMultipathTCP(l.listenOptions.TCPMultiPath) // H: Go 1.24+ listens MPTCP by default; only when asked
+ 	if l.tproxy {
+ 		listenConfig.Control = control.Append(listenConfig.Control, func(network, address string, conn syscall.RawConn) error {
+ 			return control.Raw(conn, func(fd uintptr) error {
+@@ -72,6 +73,16 @@ func (l *Listener) ListenTCP() (net.Listener, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if maskOptions := l.listenOptions.FinalMask; maskOptions != nil && !maskOptions.IsEmpty() {
++		masks, maskErr := finalmask.Build(maskOptions)
++		if maskErr != nil {
++			tcpListener.Close()
++			return nil, maskErr
++		}
++		if masks != nil && masks.HasTCP() {
++			tcpListener = &maskedTCPListener{Listener: tcpListener, masks: masks}
++		}
++	}
+ 	//nolint:staticcheck
+ 	if l.listenOptions.ProxyProtocol || l.listenOptions.ProxyProtocolAcceptNoHeader { // H: restored
+ 		tcpListener = proxyproto.NewListener(tcpListener, l.listenOptions.ProxyProtocolAcceptNoHeader)
+@@ -118,3 +129,23 @@ func (l *Listener) loopTCPIn() {
+ 		go l.connHandler.NewConnection(ctx, conn, metadata, nil)
+ 	}
+ }
++
++// maskedTCPListener unmasks accepted TCP connections before PROXY and TLS parsing.
++type maskedTCPListener struct {
++	net.Listener
++	masks *finalmask.Masks
++}
++
++func (l *maskedTCPListener) Accept() (net.Conn, error) {
++	for {
++		conn, err := l.Listener.Accept()
++		if err != nil {
++			return nil, err
++		}
++		wrapped, err := l.masks.WrapConnServer(conn)
++		if err == nil {
++			return wrapped, nil
++		}
++		_ = conn.Close()
++	}
++}
+diff --git a/common/listener/listener_udp.go b/common/listener/listener_udp.go
+index 73b93d24cd76386849a01e1c9ec73700a1d21bd9..1a04099508e72c46cfed5e23598b2b89102ef688 100644
+--- a/common/listener/listener_udp.go
++++ b/common/listener/listener_udp.go
+@@ -42,10 +42,8 @@ func (l *Listener) ListenUDPWithConfig(listenConfig net.ListenConfig) (net.Packe
+ 	} else {
+ 		udpFragment = l.listenOptions.UDPFragmentDefault
+ 	}
+-	if udpFragment {
+-		listenConfig.Control = control.Append(listenConfig.Control, control.EnableUDPFragment())
+-	} else {
+-		listenConfig.Control = control.Append(listenConfig.Control, control.DisableUDPFragment())
++	if !udpFragment {
++		listenConfig.Control = control.Append(listenConfig.Control, control.DisableUDPFragment()) // H: enabled is the platform default
+ 	}
+ 	if l.tproxy {
+ 		listenConfig.Control = control.Append(listenConfig.Control, func(network, address string, conn syscall.RawConn) error {

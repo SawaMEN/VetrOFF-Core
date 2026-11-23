@@ -1,0 +1,21 @@
+diff --git a/common/process/searcher_linux.go b/common/process/searcher_linux.go
+index 599b6b021bf3f3604f0853f7a9e571d5aab6daca..e546d221ca092dadf4ede5f6ca5217ed548b87e6 100644
+--- a/common/process/searcher_linux.go
++++ b/common/process/searcher_linux.go
+@@ -135,14 +135,9 @@ func (s *linuxSearcher) resolveSocketByNetlink(network string, source netip.Addr
+ 
+ // The socket keeps the uid it was created with, while /proc reflects the
+ // current uid of the process, so a socket created before a privilege drop
+-// only appears under a scan of all users. On Android, netd chowns the DNS
+-// sockets it opens on behalf of an app to the app's uid.
++// only appears under a scan of all users.
+ func (s *linuxSearcher) findProcessPaths(targetInode, uid uint32) ([]string, error) {
+-	scanUIDs := []uint32{uid}
+-	if !C.IsAndroid {
+-		scanUIDs = append(scanUIDs, processPathsAllUsers)
+-	}
+-	for _, scanUID := range scanUIDs {
++	for _, scanUID := range []uint32{uid, processPathsAllUsers} {
+ 		if cached, ok := s.processPathCache.Get(scanUID); ok {
+ 			if processPaths, found := cached.entries[targetInode]; found {
+ 				return processPaths, nil

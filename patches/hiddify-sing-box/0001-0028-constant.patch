@@ -1,0 +1,177 @@
+diff --git a/constant/dns.go b/constant/dns.go
+index c0b785ed2dfbf710b8c0e498fa0e1fa35c2ff025..602cd7c3cd7a7a1486256ad9caa331633d721ccc 100644
+--- a/constant/dns.go
++++ b/constant/dns.go
+@@ -31,15 +31,15 @@ const (
+ 	DNSTypeOpenConnect = "openconnect"
+ 	DNSTypeOpenVPN     = "openvpn"
+ 	DNSTypeGroup       = "group"
+-	DNSTypeMulti       = "multi" //H
+-	DNSTypeSDNS        = "sdns"  //H
++	DNSTypeMulti       = "multi" // H
++	DNSTypeSDNS        = "sdns"  // H
+ )
+ 
+ const (
+-	DNSGroupModeParallel   = "parallel"   //H
+-	DNSGroupModeSequential = "sequential" //H
+-	DNSGroupModeStable     = "stable"     //H
+-	DNSGroupModeFastest    = "fastest"    //H
++	DNSGroupModeParallel   = "parallel" // H
++	DNSGroupModeSequential = "sequential"
++	DNSGroupModeStable     = "stable"  // H
++	DNSGroupModeFastest    = "fastest" // H //H
+ )
+ 
+ const (
+diff --git a/constant/err.go b/constant/err.go
+index 4f070c4d6fc270a0c062438c82df13c6c1f050e9..82a7f8cd2ebf5b371542f473579976380052426e 100644
+--- a/constant/err.go
++++ b/constant/err.go
+@@ -6,4 +6,6 @@ var ErrTLSRequired = E.New("TLS required")
+ 
+ var ErrQUICNotIncluded = E.New(`QUIC is not included in this build, rebuild with -tags with_quic`)
+ 
+-var ErrKCPNotIncluded = E.New(`mKCP is not included in this build, rebuild with -tags with_kcp`) //H
++var ErrKCPNotIncluded = E.New(`mKCP is not included in this build, rebuild with -tags with_kcp`) // H
++
++var ErrXDriveNotIncluded = E.New(`XDRIVE is not included in this build, rebuild with -tags with_xdrive`) // H
+diff --git a/constant/h_proxy_test.go b/constant/h_proxy_test.go
+index 759d04f9c9b7cb5b1dc7e64755b525dc8be62715..dde02eb9b17c67753764e7b42579097ef036eed0 100644
+--- a/constant/h_proxy_test.go
++++ b/constant/h_proxy_test.go
+@@ -20,9 +20,9 @@ func TestH_ProxyDisplayNameHiddifyTypes(t *testing.T) {
+ 		TypeTunnelServer:   "Tunnel Server",
+ 		TypeAwg:            "Awg",
+ 		TypeBalancer:       "Balancer",
+-		TypeFallback:       "Fallback",
+ 		TypeDNSTT:          "DNSTT",
+ 		TypeGooseRelay:     "GooseRelay",
++		TypeMasterDNS:      "MasterDNS",
+ 		TypeTrustTunnel:    "TrustTunnel",
+ 	}
+ 	for proxyType, expected := range cases {
+@@ -46,10 +46,9 @@ func TestH_HiddifyTypeValues(t *testing.T) {
+ 		"TypeCustom":          TypeCustom,
+ 		"TypeAwg":             TypeAwg,
+ 		"TypeBalancer":        TypeBalancer,
+-		"TypeFallback":        TypeFallback,
+ 		"TypeDNSTT":           TypeDNSTT,
+ 		"TypeGooseRelay":      TypeGooseRelay,
+-		"TypeSmartDNSPool":    TypeSmartDNSPool,
++		"TypeMasterDNS":       TypeMasterDNS,
+ 		"TypeTrustTunnel":     TypeTrustTunnel,
+ 		"TypeLegacyWireGuard": TypeLegacyWireGuard,
+ 	}
+diff --git a/constant/proxy.go b/constant/proxy.go
+index 0c5bff59e2e2cd6ea1eb7dbf28096d23e786762c..b888846a0fd0054db5a7d0195a172d7d8462342e 100644
+--- a/constant/proxy.go
++++ b/constant/proxy.go
+@@ -17,7 +17,7 @@ const (
+ 	TypeTrojan             = "trojan"
+ 	TypeNaive              = "naive"
+ 	TypeWireGuard          = "wireguard"
+-	TypeLegacyWireGuard    = "wireguard_legacy" //H
++	TypeLegacyWireGuard    = "wireguard_legacy" // H
+ 	TypeHysteria           = "hysteria"
+ 	TypeTor                = "tor"
+ 	TypeSSH                = "ssh"
+@@ -54,24 +54,29 @@ const (
+ 	TypeTunnelClient       = "tunnel_client"
+ 	TypeTunnelServer       = "tunnel_server"
+ 
+-	TypeHInvalidConfig = "hinvalid"       //H
+-	TypeXray           = "xray"           //H
+-	TypeCustom         = "custom"         //H
+-	TypeAwg            = "awg"            //H
+-	TypeBalancer       = "balancer"       //H
+-	TypeFallback       = "fallback"       //H
+-	TypeSudoku         = "sudoku"         //H
+-	TypeBond           = "bond"           //H
+-	TypeCall           = "call"           //H
+-	TypeDNSTT          = "dnstt"          //H
+-	TypeGooseRelay     = "gooserelay"     //H
+-	TypeSmartDNSPool   = "smart_dns_pool" //H — local recursive-resolver pool with AIMD throttling + recovery probing (github.com/hiddify/hmrd_multi_resolver_dns)
++	TypeHInvalidConfig = "hinvalid"       // H
++	TypeXray           = "xray"           // H
++	TypeCustom         = "custom"         // H
++	TypeAwg            = "awg"            // H
++	TypeBalancer       = "balancer"       // H
++	TypeFallback       = "fallback"       // H
++	TypeSudoku         = "sudoku"         // H
++	TypeBond           = "bond"           // H
++	TypeCall           = "call"           // H
++	TypeDNSTT          = "dnstt"          // H
++	TypeGooseRelay     = "gooserelay"     // H
++	TypeMasterDNS      = "masterdns"      // H
++	TypeSoar           = "soar"           // H
++	TypeSmartDNSPool   = "smart_dns_pool" // H: legacy service
+ 	TypeTrustTunnel    = "trusttunnel"
++	TypeOlcRTC         = "olcrtc"
++	TypeVetrOFF        = "vetroff"
+ )
+ 
+ const (
+-	TypeSelector = "selector"
+-	TypeURLTest  = "urltest"
++	TypeSelector        = "selector"
++	TypeURLTest         = "urltest"
++	URLTestModeFailover = "failover" // H
+ )
+ 
+ // Display names of a warp endpoint, and of a masque outbound to WARP, by tunnel. //H
+@@ -172,20 +177,24 @@ func ProxyDisplayName(proxyType string) string {
+ 		return "Awg"
+ 	case TypeBalancer:
+ 		return "Balancer"
+-	case TypeFallback: //H
+-		return "Fallback" //H
+-	case TypeSudoku: //H
+-		return "Sudoku" //H
+-	case TypeBond: //H
+-		return "Bond" //H
+-	case TypeCall: //H
+-		return "Call" //H
++	case TypeFallback:
++		return "Fallback"
+ 	case TypeDNSTT:
+ 		return "DNSTT"
+ 	case TypeGooseRelay:
+ 		return "GooseRelay"
++	case TypeMasterDNS: // H
++		return "MasterDNS" // H
++	case TypeSoar: // H
++		return "Soar" // H
+ 	case TypeTrustTunnel:
+ 		return "TrustTunnel"
++	case TypeOlcRTC:
++		return "olcRTC"
++	case TypeVetrOFF:
++		return "VetrOFFProxy"
++	case TypeBond:
++		return "Bond"
+ 	case TypeSelector:
+ 		return "Selector"
+ 	case TypeURLTest:
+@@ -196,5 +205,3 @@ func ProxyDisplayName(proxyType string) string {
+ }
+ 
+ const DefaultBrowserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+-
+-const URLTestModeFailover = "failover" //H: keep the selected member until it fails
+diff --git a/constant/v2ray.go b/constant/v2ray.go
+index 89d9d7736d6b7db87f3595bf5d11a76cfafbf372..7e87b35d07ec4318080e1fec2810090893e89b28 100644
+--- a/constant/v2ray.go
++++ b/constant/v2ray.go
+@@ -7,7 +7,8 @@ const (
+ 	V2RayTransportTypeGRPC        = "grpc"
+ 	V2RayTransportTypeHTTPUpgrade = "httpupgrade"
+ 	V2RayTransportTypeXHTTP       = "xhttp"
+-	V2RayTransportTypeRaw         = "raw"  //H
+-	V2RayTransportTypeKCP         = "mkcp" //H: Xray's network name; "kcp" is accepted too
+-	V2RayTransportTypeKCPAlias    = "kcp"  //H
++	V2RayTransportTypeRaw         = "raw"    // H
++	V2RayTransportTypeKCP         = "mkcp"   // H: Xray's network name; "kcp" is accepted too
++	V2RayTransportTypeKCPAlias    = "kcp"    // H
++	V2RayTransportTypeXDrive      = "xdrive" // H
+ )

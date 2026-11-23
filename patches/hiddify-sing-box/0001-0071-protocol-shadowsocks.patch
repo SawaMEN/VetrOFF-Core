@@ -1,0 +1,831 @@
+diff --git a/protocol/shadowsocks/h_method.go b/protocol/shadowsocks/h_method.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f7612bd89df786b1b11f61e00fa9ac4169deabd8
+--- /dev/null
++++ b/protocol/shadowsocks/h_method.go
+@@ -0,0 +1,25 @@
++package shadowsocks
++
++import "strings"
++
++// methodAliases maps the cipher names Xray accepts to the names sing-shadowsocks knows.
++// Subscriptions written for Xray clients use these names (for example "chacha20-poly1305"),
++// and sing-shadowsocks rejects them with "unknown method".
++var methodAliases = map[string]string{
++	"aead_aes_128_gcm":        "aes-128-gcm",
++	"aead_aes_256_gcm":        "aes-256-gcm",
++	"chacha20-poly1305":       "chacha20-ietf-poly1305",
++	"aead_chacha20_poly1305":  "chacha20-ietf-poly1305",
++	"xchacha20-poly1305":      "xchacha20-ietf-poly1305",
++	"aead_xchacha20_poly1305": "xchacha20-ietf-poly1305",
++	"plain":                   "none",
++}
++
++// normalizeMethod returns the sing-shadowsocks name of a cipher given in a user's config.
++func normalizeMethod(method string) string {
++	lower := strings.ToLower(strings.TrimSpace(method))
++	if alias, ok := methodAliases[lower]; ok {
++		return alias
++	}
++	return lower
++}
+diff --git a/protocol/shadowsocks/h_method_test.go b/protocol/shadowsocks/h_method_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..13087820c1f7f04219d9eb347d8b4d2cabfb0020
+--- /dev/null
++++ b/protocol/shadowsocks/h_method_test.go
+@@ -0,0 +1,43 @@
++package shadowsocks
++
++import (
++	"context"
++	"testing"
++
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++
++	"github.com/stretchr/testify/require"
++)
++
++// Subscriptions written for Xray clients name ciphers the way Xray does (hiddify/hiddify-app#2622).
++func TestH_ShadowsocksXrayMethodNames(t *testing.T) {
++	logger := log.NewNOPFactory().NewLogger("test")
++	for _, method := range []string{
++		"chacha20-poly1305", "aead_chacha20_poly1305", "CHACHA20-POLY1305",
++		"xchacha20-poly1305", "aead_xchacha20_poly1305",
++		"aead_aes_128_gcm", "aead_aes_256_gcm", "plain",
++	} {
++		t.Run(method, func(t *testing.T) {
++			_, err := NewOutbound(context.Background(), newTestRouter(), logger, "out", option.ShadowsocksOutboundOptions{
++				Server:     "127.0.0.1",
++				ServerPort: 1,
++				Method:     method,
++				Password:   "password",
++			})
++			require.NoError(t, err)
++			_, err = NewInbound(context.Background(), newTestRouter(), logger, "in", option.ShadowsocksInboundOptions{
++				Method:   method,
++				Password: "password",
++			})
++			require.NoError(t, err)
++		})
++	}
++}
++
++func TestH_ShadowsocksXrayMethodNamesMatchCiphers(t *testing.T) {
++	require.Equal(t, "chacha20-ietf-poly1305", normalizeMethod("chacha20-poly1305"))
++	require.Equal(t, "xchacha20-ietf-poly1305", normalizeMethod("aead_xchacha20_poly1305"))
++	require.Equal(t, "2022-blake3-chacha20-poly1305", normalizeMethod("2022-blake3-chacha20-poly1305"))
++	require.Equal(t, "unknown-cipher", normalizeMethod("unknown-cipher"))
++}
+diff --git a/protocol/shadowsocks/h_obfs.go b/protocol/shadowsocks/h_obfs.go
+index 5c40547f9ecd478f779ad0a9eecf950881b17957..9fbe0df7c80bdaaac95ec3093db3ceed206bb49a 100644
+--- a/protocol/shadowsocks/h_obfs.go
++++ b/protocol/shadowsocks/h_obfs.go
+@@ -3,18 +3,7 @@ package shadowsocks
+ import (
+ 	"context"
+ 	"net"
+-	"strings"
+ 	"sync"
+-
+-	"github.com/sagernet/sing-box/adapter"
+-	"github.com/sagernet/sing-box/option"
+-	obfs "github.com/sagernet/sing-box/transport/simple-obfs"
+-	"github.com/sagernet/sing/common/buf"
+-	"github.com/sagernet/sing/common/bufio"
+-	E "github.com/sagernet/sing/common/exceptions"
+-	"github.com/sagernet/sing/common/logger"
+-	M "github.com/sagernet/sing/common/metadata"
+-	N "github.com/sagernet/sing/common/network"
+ )
+ 
+ // obfsRecordLimit bounds what is kept for replay. A Shadowsocks header and the
+@@ -22,87 +11,6 @@ import (
+ // authenticating is just closed.
+ const obfsRecordLimit = 16 << 10
+ 
+-// obfsServer runs the server side of simple-obfs in front of a Shadowsocks service.
+-// Like obfs-server --failover, a connection that is not simple-obfs is passed to the
+-// fallback address, so a probe sees the decoy site instead of a closed connection.
+-// Unlike it, so is a connection that passes obfs but fails Shadowsocks authentication
+-// (unknown user, wrong password, replayed salt): a probe that copies the obfs request
+-// gets the decoy as well.
+-type obfsServer struct {
+-	mode     string
+-	hosts    []string
+-	fallback M.Socksaddr
+-}
+-
+-func newObfsServer(options option.ShadowsocksInboundOptions) (obfsServer, error) {
+-	switch options.ObfsMode {
+-	case "", "http", "tls":
+-	default:
+-		return obfsServer{}, E.New("shadowsocks: unsupported obfs mode: ", options.ObfsMode)
+-	}
+-	server := obfsServer{mode: options.ObfsMode}
+-	for _, host := range strings.Split(options.ObfsHost, ",") {
+-		if host = strings.TrimSpace(host); host != "" {
+-			server.hosts = append(server.hosts, host)
+-		}
+-	}
+-	if len(server.hosts) > 0 && options.ObfsMode == "" {
+-		return obfsServer{}, E.New("shadowsocks: obfs_host requires obfs_mode")
+-	}
+-	if options.ObfsFallback != nil && options.ObfsFallback.Server != "" {
+-		if options.ObfsMode == "" {
+-			return obfsServer{}, E.New("shadowsocks: obfs_fallback requires obfs_mode")
+-		}
+-		server.fallback = options.ObfsFallback.Build()
+-		if !server.fallback.IsValid() || server.fallback.Port == 0 {
+-			return obfsServer{}, E.New("shadowsocks: invalid obfs_fallback address: ", server.fallback)
+-		}
+-	}
+-	return server, nil
+-}
+-
+-// serve runs the obfs handshake and then service, which is the Shadowsocks service
+-// handling the unwrapped connection. If anything fails before Shadowsocks has
+-// authenticated the client, the bytes the client sent are replayed to the fallback.
+-func (s obfsServer) serve(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc, inbound adapter.Inbound, router adapter.ConnectionRouterEx, logger logger.ContextLogger, service func(ctx context.Context, conn net.Conn) error) {
+-	raw := conn
+-	var recorder *obfsRecorder
+-	if s.fallback.IsValid() {
+-		recorder = &obfsRecorder{Conn: conn}
+-		conn = recorder
+-		ctx = context.WithValue(ctx, obfsRecorderKey{}, recorder)
+-	}
+-	var err error
+-	if s.mode != "" {
+-		var obfsConn net.Conn
+-		obfsConn, _, err = obfs.ServerHandshake(conn, s.mode, s.hosts...)
+-		if err == nil {
+-			conn = obfsConn
+-		}
+-	}
+-	if err == nil {
+-		err = service(ctx, conn)
+-	}
+-	if err != nil && recorder != nil {
+-		if replay, ok := recorder.unauthenticated(); ok {
+-			metadata.Inbound = inbound.Tag()
+-			metadata.InboundType = inbound.Type()
+-			metadata.Destination = s.fallback
+-			logger.InfoContext(ctx, "fallback connection from ", metadata.Source, " to ", s.fallback, ": ", err)
+-			router.RouteConnectionEx(ctx, bufio.NewCachedConn(raw, buf.As(replay)), metadata, onClose)
+-			return
+-		}
+-	}
+-	N.CloseOnHandshakeFailure(conn, onClose, err)
+-	if err != nil {
+-		if E.IsClosedOrCanceled(err) {
+-			logger.DebugContext(ctx, "connection closed: ", err)
+-		} else {
+-			logger.ErrorContext(ctx, E.Cause(err, "process connection from ", metadata.Source))
+-		}
+-	}
+-}
+-
+ type obfsRecorderKey struct{}
+ 
+ // markAuthenticated is called by the inbounds' connection handlers, which the
+@@ -147,17 +55,6 @@ func (r *obfsRecorder) authenticate() {
+ 	r.access.Unlock()
+ }
+ 
+-// unauthenticated returns what the client sent, if it never authenticated and
+-// there is something to replay.
+-func (r *obfsRecorder) unauthenticated() ([]byte, bool) {
+-	r.access.Lock()
+-	defer r.access.Unlock()
+-	if r.authenticated || r.overflow || len(r.recorded) == 0 {
+-		return nil, false
+-	}
+-	return r.recorded, true
+-}
+-
+ func (r *obfsRecorder) Upstream() any {
+ 	return r.Conn
+ }
+diff --git a/protocol/shadowsocks/h_obfs_test.go b/protocol/shadowsocks/h_obfs_test.go
+index 1c4b5d4e8c4ccf82e47effa2db54134aa858f783..0d7412493fc267ad1a74959e6da9cce138b75e71 100644
+--- a/protocol/shadowsocks/h_obfs_test.go
++++ b/protocol/shadowsocks/h_obfs_test.go
+@@ -1,27 +1,22 @@
+ package shadowsocks
+ 
+ import (
+-	"bytes"
+ 	"context"
+-	"crypto/tls"
+-	"fmt"
+-	"github.com/sagernet/sing-box/adapter/htest"
+ 	"io"
+ 	"net"
+-	"net/http"
+-	"net/http/httptest"
+ 	"net/netip"
+ 	"sync"
+ 	"testing"
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/adapter/htest"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+-	obfs "github.com/sagernet/sing-box/transport/simple-obfs"
+ 	"github.com/sagernet/sing/common/json/badoption"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
++
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+@@ -78,7 +73,7 @@ func TestH_ShadowsocksInboundRejectsUnknownObfsMode(t *testing.T) {
+ 		"relay": {
+ 			Method:       "2022-blake3-aes-128-gcm",
+ 			Password:     "AAAAAAAAAAAAAAAAAAAAAA==",
+-			Destinations: []option.ShadowsocksDestination{{Name: "d", Password: "AAAAAAAAAAAAAAAAAAAAAA==", ServerOptions: option.ServerOptions{Server: "127.0.0.1", ServerPort: 1}}},
++			Destinations: []option.ShadowsocksDestination{{Name: "d", Password: "AAAAAAAAAAAAAAAAAAAAAA==", Server: "127.0.0.1", ServerPort: 1}},
+ 			ObfsMode:     "tls1.3",
+ 		},
+ 	}
+@@ -111,7 +106,7 @@ func startShadowsocksInbound(t *testing.T, options option.ShadowsocksInboundOpti
+ 
+ func dialShadowsocks(t *testing.T, port uint16, password, plugin, pluginOpts string, payload string) error {
+ 	out, err := NewOutbound(context.Background(), newTestRouter(), log.NewNOPFactory().Logger(), "ss-out", option.ShadowsocksOutboundOptions{
+-		ServerOptions: option.ServerOptions{Server: "127.0.0.1", ServerPort: port},
++		Server: "127.0.0.1", ServerPort: port,
+ 		Method:        "aes-128-gcm",
+ 		Password:      password,
+ 		Plugin:        plugin,
+@@ -209,278 +204,3 @@ func TestH_ShadowsocksObfsMismatch(t *testing.T) {
+ 		})
+ 	}
+ }
+-
+-// fallbackRouter dials connections routed to the fallback address, like a direct
+-// outbound would, and echoes everything else like testRouter.
+-type fallbackRouter struct {
+-	*testRouter
+-	fallback M.Socksaddr
+-}
+-
+-func (r *fallbackRouter) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+-	if metadata.Destination != r.fallback {
+-		r.testRouter.RouteConnectionEx(ctx, conn, metadata, onClose)
+-		return
+-	}
+-	r.mu.Lock()
+-	r.metadata = append(r.metadata, metadata)
+-	r.mu.Unlock()
+-	r.routed <- struct{}{}
+-	upstream, err := net.Dial("tcp", metadata.Destination.String())
+-	if err == nil {
+-		go io.Copy(upstream, conn)
+-		_, err = io.Copy(conn, upstream)
+-		upstream.Close()
+-	}
+-	conn.Close()
+-	if onClose != nil {
+-		onClose(err)
+-	}
+-}
+-
+-func startDecoy(t *testing.T, useTLS bool) (*httptest.Server, option.ServerOptions) {
+-	decoy := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+-		io.WriteString(w, "decoy site "+r.Host+r.URL.Path)
+-	}))
+-	if useTLS {
+-		decoy.StartTLS()
+-	} else {
+-		decoy.Start()
+-	}
+-	t.Cleanup(decoy.Close)
+-	addr := decoy.Listener.Addr().(*net.TCPAddr)
+-	return decoy, option.ServerOptions{Server: "127.0.0.1", ServerPort: uint16(addr.Port)}
+-}
+-
+-func startShadowsocksInboundWithRouter(t *testing.T, router adapter.Router, options option.ShadowsocksInboundOptions) uint16 {
+-	port := freeTCPPort(t)
+-	listen := badoption.Addr(netip.MustParseAddr("127.0.0.1"))
+-	options.ListenOptions = option.ListenOptions{Listen: &listen, ListenPort: port}
+-	options.Network = "tcp"
+-	in, err := NewInbound(context.Background(), router, log.NewNOPFactory().Logger(), "ss-in", options)
+-	require.NoError(t, err)
+-	require.NoError(t, htest.Start(in, adapter.StartStateStart))
+-	t.Cleanup(func() { htest.Close(in) })
+-	return port
+-}
+-
+-func probe(t *testing.T, port uint16, useTLS bool) string {
+-	client := &http.Client{Timeout: 3 * time.Second}
+-	scheme := "http"
+-	if useTLS {
+-		scheme = "https"
+-		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+-	}
+-	response, err := client.Get(fmt.Sprintf("%s://127.0.0.1:%d/probe", scheme, port))
+-	require.NoError(t, err)
+-	defer response.Body.Close()
+-	require.Equal(t, http.StatusOK, response.StatusCode)
+-	body, err := io.ReadAll(response.Body)
+-	require.NoError(t, err)
+-	return string(body)
+-}
+-
+-func TestH_ShadowsocksObfsFallback(t *testing.T) {
+-	t.Parallel()
+-	inbounds := map[string]option.ShadowsocksInboundOptions{
+-		"single": {Method: "aes-128-gcm", Password: "pass"},
+-		"multi":  {Method: "aes-128-gcm", Users: []option.ShadowsocksUser{{Name: "u", Password: "pass"}}},
+-		"relay": {
+-			Method:       "2022-blake3-aes-128-gcm",
+-			Password:     "AAAAAAAAAAAAAAAAAAAAAA==",
+-			Destinations: []option.ShadowsocksDestination{{Name: "d", Password: "AAAAAAAAAAAAAAAAAAAAAA==", ServerOptions: option.ServerOptions{Server: "127.0.0.1", ServerPort: 1}}},
+-		},
+-	}
+-	cases := []struct {
+-		mode     string
+-		decoyTLS bool
+-	}{
+-		{"tls", true},  // a censor's real TLS handshake against a FakeTLS server
+-		{"tls", false}, // plain HTTP sent to a FakeTLS server
+-		{"http", false},
+-		{"http", true},
+-	}
+-	for kind, base := range inbounds {
+-		for _, tc := range cases {
+-			name := fmt.Sprintf("%s/%s/decoy-tls=%v", kind, tc.mode, tc.decoyTLS)
+-			t.Run(name, func(t *testing.T) {
+-				t.Parallel()
+-				_, fallback := startDecoy(t, tc.decoyTLS)
+-				router := &fallbackRouter{testRouter: newTestRouter(), fallback: fallback.Build()}
+-				options := base
+-				options.ObfsMode = tc.mode
+-				options.ObfsFallback = &fallback
+-				port := startShadowsocksInboundWithRouter(t, router, options)
+-
+-				require.Equal(t, "decoy site 127.0.0.1:"+fmt.Sprint(port)+"/probe", probe(t, port, tc.decoyTLS))
+-				router.mu.Lock()
+-				md := router.metadata[0]
+-				router.mu.Unlock()
+-				require.Equal(t, "ss-in", md.Inbound)
+-				require.Equal(t, fallback.Build(), md.Destination)
+-
+-				if kind == "single" {
+-					// A real obfs client on the same port still reaches Shadowsocks.
+-					pluginOpts := "obfs=" + tc.mode + ";obfs-host=www.example.com"
+-					require.NoError(t, dialShadowsocks(t, port, "pass", "obfs-local", pluginOpts, "through obfs"))
+-				}
+-			})
+-		}
+-	}
+-}
+-
+-func TestH_ShadowsocksObfsFallbackOptions(t *testing.T) {
+-	t.Parallel()
+-	logger := log.NewNOPFactory().Logger()
+-	_, err := NewInbound(context.Background(), newTestRouter(), logger, "ss-in", option.ShadowsocksInboundOptions{
+-		Method: "aes-128-gcm", Password: "p", ObfsFallback: &option.ServerOptions{Server: "127.0.0.1", ServerPort: 443},
+-	})
+-	require.ErrorContains(t, err, "obfs_fallback requires obfs_mode")
+-	_, err = NewInbound(context.Background(), newTestRouter(), logger, "ss-in", option.ShadowsocksInboundOptions{
+-		Method: "aes-128-gcm", Password: "p", ObfsMode: "tls", ObfsFallback: &option.ServerOptions{Server: "127.0.0.1"},
+-	})
+-	require.ErrorContains(t, err, "invalid obfs_fallback address")
+-	in, err := NewInbound(context.Background(), newTestRouter(), logger, "ss-in", option.ShadowsocksInboundOptions{
+-		Method: "aes-128-gcm", Password: "p", ObfsMode: "tls", ObfsFallback: &option.ServerOptions{Server: "decoy.example.com", ServerPort: 443},
+-	})
+-	require.NoError(t, err)
+-	require.NoError(t, htest.Close(in))
+-}
+-
+-// Without obfs_fallback a probe is still just closed, as before.
+-func TestH_ShadowsocksObfsNoFallbackClosesProbe(t *testing.T) {
+-	t.Parallel()
+-	router, port := startShadowsocksInbound(t, option.ShadowsocksInboundOptions{Method: "aes-128-gcm", Password: "p", ObfsMode: "tls"})
+-	client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+-	_, err := client.Get(fmt.Sprintf("https://127.0.0.1:%d/", port))
+-	require.Error(t, err)
+-	select {
+-	case <-router.routed:
+-		t.Fatal("probe was routed without obfs_fallback")
+-	default:
+-	}
+-}
+-
+-type capturingConn struct {
+-	net.Conn
+-	sent []byte
+-}
+-
+-func (c *capturingConn) Write(b []byte) (int, error) {
+-	c.sent = append(c.sent, b...)
+-	return c.Conn.Write(b)
+-}
+-
+-// startRawDecoy accepts one connection, reports what it received and answers "DECOY".
+-func startRawDecoy(t *testing.T) (option.ServerOptions, chan []byte) {
+-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+-	require.NoError(t, err)
+-	t.Cleanup(func() { listener.Close() })
+-	received := make(chan []byte, 1)
+-	go func() {
+-		conn, err := listener.Accept()
+-		if err != nil {
+-			return
+-		}
+-		defer conn.Close()
+-		conn.SetDeadline(time.Now().Add(5 * time.Second))
+-		var got []byte
+-		chunk := make([]byte, 4096)
+-		for {
+-			n, err := conn.Read(chunk)
+-			got = append(got, chunk[:n]...)
+-			if err != nil || len(got) >= 64 {
+-				break
+-			}
+-		}
+-		received <- got
+-		conn.Write([]byte("DECOY"))
+-	}()
+-	return option.ServerOptions{Server: "127.0.0.1", ServerPort: uint16(listener.Addr().(*net.TCPAddr).Port)}, received
+-}
+-
+-// A client that passes obfs but fails Shadowsocks authentication gets the decoy,
+-// and the decoy sees exactly the bytes the client sent.
+-func TestH_ShadowsocksObfsFallbackAfterObfs(t *testing.T) {
+-	t.Parallel()
+-	inbounds := map[string]option.ShadowsocksInboundOptions{
+-		"single": {Method: "aes-128-gcm", Password: "pass"},
+-		"multi":  {Method: "aes-128-gcm", Users: []option.ShadowsocksUser{{Name: "u", Password: "pass"}}},
+-		"multi-2022": {
+-			Method:   "2022-blake3-aes-128-gcm",
+-			Password: "AAAAAAAAAAAAAAAAAAAAAA==",
+-			Users:    []option.ShadowsocksUser{{Name: "u", Password: "AAAAAAAAAAAAAAAAAAAAAA=="}},
+-		},
+-		"relay": {
+-			Method:       "2022-blake3-aes-128-gcm",
+-			Password:     "AAAAAAAAAAAAAAAAAAAAAA==",
+-			Destinations: []option.ShadowsocksDestination{{Name: "d", Password: "AAAAAAAAAAAAAAAAAAAAAA==", ServerOptions: option.ServerOptions{Server: "127.0.0.1", ServerPort: 1}}},
+-		},
+-	}
+-	for kind, base := range inbounds {
+-		for _, mode := range []string{"http", "tls"} {
+-			t.Run(kind+"/"+mode, func(t *testing.T) {
+-				t.Parallel()
+-				fallback, received := startRawDecoy(t)
+-				router := &fallbackRouter{testRouter: newTestRouter(), fallback: fallback.Build()}
+-				options := base
+-				options.ObfsMode = mode
+-				options.ObfsFallback = &fallback
+-				port := startShadowsocksInboundWithRouter(t, router, options)
+-
+-				rawConn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+-				require.NoError(t, err)
+-				defer rawConn.Close()
+-				rawConn.SetDeadline(time.Now().Add(5 * time.Second))
+-				captured := &capturingConn{Conn: rawConn}
+-				var client net.Conn
+-				if mode == "http" {
+-					client = obfs.NewHTTPObfs(captured, "www.example.com", "443")
+-				} else {
+-					client = obfs.NewTLSObfs(captured, "www.example.com")
+-				}
+-				// Valid obfs, but the payload is not a Shadowsocks stream for this server.
+-				_, err = client.Write(bytes.Repeat([]byte("not shadowsocks "), 8))
+-				require.NoError(t, err)
+-
+-				select {
+-				case got := <-received:
+-					require.Equal(t, captured.sent, got)
+-				case <-time.After(5 * time.Second):
+-					t.Fatal("decoy received nothing")
+-				}
+-				reply := make([]byte, 5)
+-				_, err = io.ReadFull(rawConn, reply)
+-				require.NoError(t, err)
+-				require.Equal(t, "DECOY", string(reply))
+-			})
+-		}
+-	}
+-}
+-
+-// With obfs_host, a client that uses another host is not let in, even with the right password:
+-// it gets the fallback. A listed host connects.
+-func TestH_ShadowsocksObfsHost(t *testing.T) {
+-	t.Parallel()
+-	for _, mode := range []string{"http", "tls"} {
+-		t.Run(mode, func(t *testing.T) {
+-			t.Parallel()
+-			fallback, received := startRawDecoy(t)
+-			router := &fallbackRouter{testRouter: newTestRouter(), fallback: fallback.Build()}
+-			port := startShadowsocksInboundWithRouter(t, router, option.ShadowsocksInboundOptions{
+-				Method: "aes-128-gcm", Password: "pass", ObfsMode: mode, ObfsFallback: &fallback,
+-				ObfsHost: "cdn.example.net, www.example.com",
+-			})
+-			require.Error(t, dialShadowsocks(t, port, "pass", "obfs-local", "obfs="+mode+";obfs-host=probe.example.org", "wrong host"))
+-			select {
+-			case got := <-received:
+-				require.NotEmpty(t, got)
+-			case <-time.After(5 * time.Second):
+-				t.Fatal("decoy received nothing")
+-			}
+-			require.NoError(t, dialShadowsocks(t, port, "pass", "obfs-local", "obfs="+mode+";obfs-host=www.example.com", "right host"))
+-		})
+-	}
+-	_, err := newObfsServer(option.ShadowsocksInboundOptions{Method: "aes-128-gcm", Password: "p", ObfsHost: "www.example.com"})
+-	require.ErrorContains(t, err, "obfs_host requires obfs_mode")
+-}
+diff --git a/protocol/shadowsocks/inbound.go b/protocol/shadowsocks/inbound.go
+index e7d4c36bbbf8591194d3aafe9a4ce532a25bb028..8ddbe5673d03c087dbbc5865ad303109d129c962 100644
+--- a/protocol/shadowsocks/inbound.go
++++ b/protocol/shadowsocks/inbound.go
+@@ -13,7 +13,8 @@ import (
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+-	"github.com/sagernet/sing-shadowsocks"
++	obfs "github.com/sagernet/sing-box/transport/simple-obfs"
++	shadowsocks "github.com/sagernet/sing-shadowsocks"
+ 	"github.com/sagernet/sing-shadowsocks/shadowaead"
+ 	"github.com/sagernet/sing-shadowsocks/shadowaead_2022"
+ 	"github.com/sagernet/sing/common"
+@@ -30,6 +31,7 @@ func RegisterInbound(registry *inbound.Registry) {
+ }
+ 
+ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ShadowsocksInboundOptions) (adapter.Inbound, error) {
++	options.Method = normalizeMethod(options.Method) // H
+ 	if len(options.Users) > 0 && len(options.Destinations) > 0 {
+ 		return nil, E.New("users and destinations options must not be combined")
+ 	} else if options.Managed && (len(options.Users) > 0 || len(options.Destinations) > 0) {
+@@ -53,21 +55,23 @@ type Inbound struct {
+ 	logger   logger.ContextLogger
+ 	listener *listener.Listener
+ 	service  shadowsocks.Service
+-	obfs     obfsServer
++	obfsMode string
+ }
+ 
+ func newInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ShadowsocksInboundOptions) (*Inbound, error) {
+-	obfsServer, err := newObfsServer(options)
+-	if err != nil {
+-		return nil, err
++	switch options.ObfsMode {
++	case "", "http", "tls":
++	default:
++		return nil, E.New("shadowsocks: unsupported obfs mode: ", options.ObfsMode)
+ 	}
+ 	inbound := &Inbound{
+-		Adapter: inbound.NewAdapter(C.TypeShadowsocks, tag),
+-		ctx:     ctx,
+-		router:  uot.NewRouter(router, logger),
+-		logger:  logger,
+-		obfs:    obfsServer,
++		Adapter:  inbound.NewAdapter(C.TypeShadowsocks, tag),
++		ctx:      ctx,
++		router:   uot.NewRouter(router, logger),
++		logger:   logger,
++		obfsMode: options.ObfsMode,
+ 	}
++	var err error // H
+ 	inbound.router, err = mux.NewRouterWithOptions(inbound.router, logger, common.PtrValueOrDefault(options.Multiplex))
+ 	if err != nil {
+ 		return nil, err
+@@ -114,9 +118,21 @@ func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 
+ //nolint:staticcheck
+ func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+-	h.obfs.serve(ctx, conn, metadata, onClose, h, h.router, h.logger, func(ctx context.Context, conn net.Conn) error {
+-		return h.service.NewConnection(ctx, conn, adapter.UpstreamMetadata(metadata))
+-	})
++	switch h.obfsMode {
++	case "http":
++		conn = obfs.NewHTTPObfsServer(conn)
++	case "tls":
++		conn = obfs.NewTLSObfsServer(conn)
++	}
++	err := h.service.NewConnection(ctx, conn, adapter.UpstreamMetadata(metadata))
++	N.CloseOnHandshakeFailure(conn, onClose, err)
++	if err != nil {
++		if E.IsClosedOrCanceled(err) {
++			h.logger.DebugContext(ctx, "connection closed: ", err)
++		} else {
++			h.logger.ErrorContext(ctx, E.Cause(err, "process connection from ", metadata.Source))
++		}
++	}
+ }
+ 
+ //nolint:staticcheck
+diff --git a/protocol/shadowsocks/inbound_multi.go b/protocol/shadowsocks/inbound_multi.go
+index e2f8a3ea3ea04001f23e7538776ec1e189001daa..2c4a74239d054094a3759d852716a10506005ce3 100644
+--- a/protocol/shadowsocks/inbound_multi.go
++++ b/protocol/shadowsocks/inbound_multi.go
+@@ -15,7 +15,8 @@ import (
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+-	"github.com/sagernet/sing-shadowsocks"
++	obfs "github.com/sagernet/sing-box/transport/simple-obfs"
++	shadowsocks "github.com/sagernet/sing-shadowsocks"
+ 	"github.com/sagernet/sing-shadowsocks/shadowaead"
+ 	"github.com/sagernet/sing-shadowsocks/shadowaead_2022"
+ 	"github.com/sagernet/sing/common"
+@@ -41,24 +42,26 @@ type MultiInbound struct {
+ 	logger      logger.ContextLogger
+ 	listener    *listener.Listener
+ 	service     shadowsocks.MultiService[int]
+-	usersAccess sync.RWMutex
+ 	users       []option.ShadowsocksUser
++	usersAccess sync.RWMutex // H
+ 	tracker     adapter.SSMTracker
+-	obfs        obfsServer
++	obfsMode    string
+ }
+ 
+ func newMultiInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ShadowsocksInboundOptions) (*MultiInbound, error) {
+-	obfsServer, err := newObfsServer(options)
+-	if err != nil {
+-		return nil, err
++	switch options.ObfsMode {
++	case "", "http", "tls":
++	default:
++		return nil, E.New("shadowsocks: unsupported obfs mode: ", options.ObfsMode)
+ 	}
+ 	inbound := &MultiInbound{
+-		Adapter: inbound.NewAdapter(C.TypeShadowsocks, tag),
+-		ctx:     ctx,
+-		router:  uot.NewRouter(router, logger),
+-		logger:  logger,
+-		obfs:    obfsServer,
++		Adapter:  inbound.NewAdapter(C.TypeShadowsocks, tag),
++		ctx:      ctx,
++		router:   uot.NewRouter(router, logger),
++		logger:   logger,
++		obfsMode: options.ObfsMode,
+ 	}
++	var err error // H
+ 	inbound.router, err = mux.NewRouterWithOptions(inbound.router, logger, common.PtrValueOrDefault(options.Multiplex))
+ 	if err != nil {
+ 		return nil, err
+@@ -158,9 +161,21 @@ func (h *MultiInbound) userName(userIndex int) string {
+ 
+ //nolint:staticcheck
+ func (h *MultiInbound) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+-	h.obfs.serve(ctx, conn, metadata, onClose, h, h.router, h.logger, func(ctx context.Context, conn net.Conn) error {
+-		return h.service.NewConnection(ctx, conn, adapter.UpstreamMetadata(metadata))
+-	})
++	switch h.obfsMode {
++	case "http":
++		conn = obfs.NewHTTPObfsServer(conn)
++	case "tls":
++		conn = obfs.NewTLSObfsServer(conn)
++	}
++	err := h.service.NewConnection(ctx, conn, adapter.UpstreamMetadata(metadata))
++	N.CloseOnHandshakeFailure(conn, onClose, err)
++	if err != nil {
++		if E.IsClosedOrCanceled(err) {
++			h.logger.DebugContext(ctx, "connection closed: ", err)
++		} else {
++			h.logger.ErrorContext(ctx, E.Cause(err, "process connection from ", metadata.Source))
++		}
++	}
+ }
+ 
+ //nolint:staticcheck
+diff --git a/protocol/shadowsocks/inbound_relay.go b/protocol/shadowsocks/inbound_relay.go
+index 04f8220d564f374fa63375d441ce0b93b76645b8..aa70f6ad2ecedc95c08be78d74bdac7de11e1aae 100644
+--- a/protocol/shadowsocks/inbound_relay.go
++++ b/protocol/shadowsocks/inbound_relay.go
+@@ -14,6 +14,7 @@ import (
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
++	obfs "github.com/sagernet/sing-box/transport/simple-obfs"
+ 	"github.com/sagernet/sing-shadowsocks/shadowaead_2022"
+ 	"github.com/sagernet/sing/common"
+ 	"github.com/sagernet/sing/common/auth"
+@@ -35,13 +36,14 @@ type RelayInbound struct {
+ 	listener     *listener.Listener
+ 	service      *shadowaead_2022.RelayService[int]
+ 	destinations []option.ShadowsocksDestination
+-	obfs         obfsServer
++	obfsMode     string
+ }
+ 
+ func newRelayInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ShadowsocksInboundOptions) (*RelayInbound, error) {
+-	obfsServer, err := newObfsServer(options)
+-	if err != nil {
+-		return nil, err
++	switch options.ObfsMode {
++	case "", "http", "tls":
++	default:
++		return nil, E.New("shadowsocks: unsupported obfs mode: ", options.ObfsMode)
+ 	}
+ 	inbound := &RelayInbound{
+ 		Adapter:      inbound.NewAdapter(C.TypeShadowsocks, tag),
+@@ -49,8 +51,9 @@ func newRelayInbound(ctx context.Context, router adapter.Router, logger log.Cont
+ 		router:       uot.NewRouter(router, logger),
+ 		logger:       logger,
+ 		destinations: options.Destinations,
+-		obfs:         obfsServer,
++		obfsMode:     options.ObfsMode,
+ 	}
++	var err error // H
+ 	inbound.router, err = mux.NewRouterWithOptions(inbound.router, logger, common.PtrValueOrDefault(options.Multiplex))
+ 	if err != nil {
+ 		return nil, err
+@@ -105,9 +108,21 @@ func (h *RelayInbound) Start(stage adapter.StartStage, scope *adapter.Scope) err
+ 
+ //nolint:staticcheck
+ func (h *RelayInbound) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+-	h.obfs.serve(ctx, conn, metadata, onClose, h, h.router, h.logger, func(ctx context.Context, conn net.Conn) error {
+-		return h.service.NewConnection(ctx, conn, adapter.UpstreamMetadata(metadata))
+-	})
++	switch h.obfsMode {
++	case "http":
++		conn = obfs.NewHTTPObfsServer(conn)
++	case "tls":
++		conn = obfs.NewTLSObfsServer(conn)
++	}
++	err := h.service.NewConnection(ctx, conn, adapter.UpstreamMetadata(metadata))
++	N.CloseOnHandshakeFailure(conn, onClose, err)
++	if err != nil {
++		if E.IsClosedOrCanceled(err) {
++			h.logger.DebugContext(ctx, "connection closed: ", err)
++		} else {
++			h.logger.ErrorContext(ctx, E.Cause(err, "process connection from ", metadata.Source))
++		}
++	}
+ }
+ 
+ //nolint:staticcheck
+diff --git a/protocol/shadowsocks/outbound.go b/protocol/shadowsocks/outbound.go
+index 700206fe2fa5c7e8e9894557ec7d7e82df1fc79a..9e537810b1de5415c7e4ae9956ad4526a838f665 100644
+--- a/protocol/shadowsocks/outbound.go
++++ b/protocol/shadowsocks/outbound.go
+@@ -13,8 +13,8 @@ import (
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+ 	"github.com/sagernet/sing-box/transport/sip003"
+-	"github.com/sagernet/sing-shadowsocks2"
+-	"github.com/sagernet/sing-shadowsocks2/shadowaead_2022" //H
++	shadowsocks "github.com/sagernet/sing-shadowsocks2"
++	"github.com/sagernet/sing-shadowsocks2/shadowaead_2022" // H
+ 	"github.com/sagernet/sing/common"
+ 	"github.com/sagernet/sing/common/bufio"
+ 	E "github.com/sagernet/sing/common/exceptions"
+@@ -46,6 +46,7 @@ type Outbound struct {
+ }
+ 
+ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ShadowsocksOutboundOptions) (adapter.Outbound, error) {
++	options.Method = normalizeMethod(options.Method) // H
+ 	method, err := shadowsocks.CreateMethod(ctx, options.Method, shadowsocks.MethodOptions{
+ 		Password: options.Password,
+ 	})
+@@ -154,14 +155,8 @@ func (h *Outbound) CloseIdleConnections() {
+ 	}
+ }
+ 
+-func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+-	if stage != adapter.StartStateInitialize {
+-		return nil
+-	}
+-	if h.multiplexDialer != nil {
+-		scope.Add(h.multiplexDialer.Close)
+-	}
+-	return nil
++func (h *Outbound) Close() error {
++	return common.Close(common.PtrOrNil(h.multiplexDialer))
+ }
+ 
+ var _ N.Dialer = (*shadowsocksDialer)(nil)
+@@ -184,16 +179,16 @@ func (h *shadowsocksDialer) DialContext(ctx context.Context, network string, des
+ 		if err != nil {
+ 			return nil, err
+ 		}
+-		if _, is2022 := h.method.(*shadowaead_2022.Method); is2022 { //H
+-			return dialShadowsocks2022(ctx, h.method, outConn, destination) //H
+-		} //H
++		if _, is2022 := h.method.(*shadowaead_2022.Method); is2022 { // H
++			return dialShadowsocks2022(ctx, h.method, outConn, destination) // H
++		} // H
+ 		return h.method.DialEarlyConn(outConn, destination), nil
+ 	case N.NetworkUDP:
+ 		outConn, err := h.dialer.DialContext(ctx, N.NetworkUDP, h.serverAddr)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+-		return bufio.NewBindPacketConn(wholepacket.Wrap(h.method.DialPacketConn(outConn)), destination), nil //H
++		return bufio.NewBindPacketConn(wholepacket.Wrap(h.method.DialPacketConn(outConn)), destination), nil // H
+ 	default:
+ 		return nil, E.Extend(N.ErrUnknownNetwork, network)
+ 	}
+@@ -207,5 +202,5 @@ func (h *shadowsocksDialer) ListenPacket(ctx context.Context, destination M.Sock
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	return wholepacket.Wrap(h.method.DialPacketConn(outConn)), nil //H: QUIC through Shadowsocks cut full packets off
++	return wholepacket.Wrap(h.method.DialPacketConn(outConn)), nil // H: QUIC through Shadowsocks cut full packets off
+ }

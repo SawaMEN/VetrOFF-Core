@@ -1,0 +1,544 @@
+diff --git a/protocol/mieru/accept_loop_test.go b/protocol/mieru/accept_loop_test.go
+index 4b534a5156e6674f33b328f9fd5c45772d1ef270..553c86c1279bfee826b492c070bde81599b79231 100644
+--- a/protocol/mieru/accept_loop_test.go
++++ b/protocol/mieru/accept_loop_test.go
+@@ -7,10 +7,11 @@ import (
+ 	"testing"
+ 	"time"
+ 
+-	mierumodel "github.com/enfein/mieru/v3/apis/model"
+-	mieruserver "github.com/enfein/mieru/v3/apis/server"
+ 	"github.com/sagernet/sing-box/adapter/inbound"
+ 	"github.com/sagernet/sing-box/log"
++
++	mierumodel "github.com/enfein/mieru/v3/apis/model"
++	mieruserver "github.com/enfein/mieru/v3/apis/server"
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+@@ -141,4 +142,4 @@ func TestAcceptLoopKeepsServingAfterTransientErrors(t *testing.T) {
+ 	case <-time.After(5 * time.Second):
+ 		t.Fatal("acceptLoop did not return after context cancellation")
+ 	}
+-}
+\ No newline at end of file
++}
+diff --git a/protocol/mieru/common.go b/protocol/mieru/common.go
+index 2aaee81191a18edcb45d6813b232395a02a524d1..b113c6ef3fa57398ebd66bfbc7e3a94995734158 100644
+--- a/protocol/mieru/common.go
++++ b/protocol/mieru/common.go
+@@ -4,12 +4,12 @@ import (
+ 	"fmt"
+ 	"strings"
+ 
+-	mierupb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
+ 	"github.com/sagernet/sing-box/option"
++
++	mierupb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
+ )
+ 
+ func validateMieruTransport(transport []option.MieruPortBinding) error {
+-
+ 	for _, pr := range transport {
+ 		if getTransportProtocol(pr.Protocol) == nil {
+ 			return fmt.Errorf("transport must be TCP or UDP")
+@@ -47,7 +47,6 @@ func beginAndEndPortFromPortRange(portRange string) (int, int, error) {
+ 
+ 	_, err := fmt.Sscanf(portRange, "%d-%d", &begin, &end)
+ 	return begin, end, err
+-
+ }
+ 
+ func getTransportProtocol(transport string) *mierupb.TransportProtocol {
+diff --git a/protocol/mieru/h_close_test.go b/protocol/mieru/h_close_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f8ec83e2d35e5679155d47cc47087e8f9f6737f9
+--- /dev/null
++++ b/protocol/mieru/h_close_test.go
+@@ -0,0 +1,52 @@
++package mieru
++
++import (
++	"context"
++	"runtime"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++
++	"github.com/stretchr/testify/require"
++)
++
++// muxRoutines counts the maintenance goroutines of mieru multiplexers (protocol.NewMux), one for
++// each client that was started and not stopped.
++func muxRoutines() int {
++	buf := make([]byte, 1<<20)
++	return strings.Count(string(buf[:runtime.Stack(buf, true)]), "mieru/v3/pkg/protocol.NewMux.func1(")
++}
++
++// Closing the outbound stops its mieru client. The client has Stop, not Close, so common.Close
++// did nothing with it: every outbound closed, as keep top closes each lazy one after its test,
++// left its multiplexer behind, with a goroutine a ticker wakes every 5 s.
++func TestH_MieruOutboundCloseStopsClient(t *testing.T) {
++	ctx := context.Background()
++	before := muxRoutines()
++	var outbounds []*Outbound
++	for range 5 {
++		out, err := NewOutbound(ctx, &echoRouter{}, log.NewNOPFactory().Logger(), "mieru-out", option.MieruOutboundOptions{
++			Server:       "127.0.0.1",
++			PortBindings: []option.MieruPortBinding{{Protocol: "TCP", Port: freeTCPPort(t)}},
++			UserName:     "alice",
++			Password:     "secret",
++		})
++		require.NoError(t, err)
++		outbounds = append(outbounds, out.(*Outbound))
++	}
++	require.Equal(t, before+len(outbounds), muxRoutines(), "a multiplexer for each client that runs")
++	for _, out := range outbounds {
++		require.True(t, out.client.IsRunning())
++		require.NoError(t, out.Close())
++		require.False(t, out.client.IsRunning(), "Close must stop the mieru client")
++		_, err := out.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddr("10.0.0.1:80"))
++		require.Error(t, err, "a closed outbound dials nothing")
++	}
++	require.Eventually(t, func() bool { return muxRoutines() == before }, 5*time.Second, 20*time.Millisecond,
++		"the multiplexers of the closed outbounds are gone")
++}
+diff --git a/protocol/mieru/h_mieru_test.go b/protocol/mieru/h_mieru_test.go
+index 4d9712c076203191878dcdeb8afc413f437f68e6..be33ec54e041297a020a877e7b5466c2e700d21a 100644
+--- a/protocol/mieru/h_mieru_test.go
++++ b/protocol/mieru/h_mieru_test.go
+@@ -2,7 +2,6 @@ package mieru
+ 
+ import (
+ 	"context"
+-	"github.com/sagernet/sing-box/adapter/htest"
+ 	"io"
+ 	"net"
+ 	"net/netip"
+@@ -10,15 +9,17 @@ import (
+ 	"testing"
+ 	"time"
+ 
+-	mieruclient "github.com/enfein/mieru/v3/apis/client"
+-	mieruserver "github.com/enfein/mieru/v3/apis/server"
+-	mierupb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
+ 	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/adapter/htest"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+ 	"github.com/sagernet/sing/common/buf"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
++
++	mieruclient "github.com/enfein/mieru/v3/apis/client"
++	mieruserver "github.com/enfein/mieru/v3/apis/server"
++	mierupb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+@@ -91,10 +92,10 @@ func TestH_MieruValidateTransport(t *testing.T) {
+ 
+ func validMieruOutboundOptions() option.MieruOutboundOptions {
+ 	return option.MieruOutboundOptions{
+-		ServerOptions: option.ServerOptions{Server: "127.0.0.1"},
+-		PortBindings:  []option.MieruPortBinding{{Protocol: "TCP", Port: 8964}},
+-		UserName:      "user",
+-		Password:      "pass",
++		Server:       "127.0.0.1",
++		PortBindings: []option.MieruPortBinding{{Protocol: "TCP", Port: 8964}},
++		UserName:     "user",
++		Password:     "pass",
+ 	}
+ }
+ 
+@@ -109,11 +110,11 @@ func TestH_MieruOutboundOptionsValidation(t *testing.T) {
+ 		{"empty server", func(o *option.MieruOutboundOptions) { o.Server = "" }, "server is empty"},
+ 		{"no port", func(o *option.MieruOutboundOptions) { o.PortBindings = nil }, "either server_port or transport"},
+ 		{"server_port matches binding", func(o *option.MieruOutboundOptions) { o.ServerPort = 8964 }, ""},
+-		{"server_port mismatch", func(o *option.MieruOutboundOptions) { o.ServerPort = 1 }, "Transport of Server Port"},
++		{"server_port mismatch", func(o *option.MieruOutboundOptions) { o.ServerPort = 1 }, "transport of Server Port"},
+ 		{"server_port with two bindings", func(o *option.MieruOutboundOptions) {
+ 			o.ServerPort = 8964
+ 			o.PortBindings = append(o.PortBindings, option.MieruPortBinding{Protocol: "UDP", Port: 8964})
+-		}, "Transport of Server Port"},
++		}, "transport of Server Port"},
+ 		{"empty username", func(o *option.MieruOutboundOptions) { o.UserName = "" }, "username is empty"},
+ 		{"empty password", func(o *option.MieruOutboundOptions) { o.Password = "" }, "password is empty"},
+ 		{"bad multiplexing", func(o *option.MieruOutboundOptions) { o.Multiplexing = "huge" }, "invalid multiplexing level"},
+@@ -141,9 +142,11 @@ func TestH_MieruBuildClientConfig(t *testing.T) {
+ 	}
+ 	opts.Multiplexing = "MULTIPLEXING_HIGH"
+ 	opts.HandshakeMode = "no_wait"
++	opts.MTU = 1280
+ 	config, err := buildMieruClientConfig(opts, mieruDialer{})
+ 	require.NoError(t, err)
+ 	profile := config.Profile
++	require.Equal(t, int32(1280), profile.GetMtu())
+ 	require.Equal(t, "user", profile.GetUser().GetName())
+ 	require.Equal(t, "pass", profile.GetUser().GetPassword())
+ 	require.Len(t, profile.GetServers(), 1)
+@@ -189,7 +192,7 @@ func TestH_MieruInboundOptionsValidation(t *testing.T) {
+ 		{"valid", func(o *option.MieruInboundOptions) {}, ""},
+ 		{"no ports", func(o *option.MieruInboundOptions) { o.PortBindings = nil }, "either server_port or transport"},
+ 		{"listen_port matches", func(o *option.MieruInboundOptions) { o.ListenPort = 8964 }, ""},
+-		{"listen_port mismatch", func(o *option.MieruInboundOptions) { o.ListenPort = 1 }, "Transport of Server Port"},
++		{"listen_port mismatch", func(o *option.MieruInboundOptions) { o.ListenPort = 1 }, "transport of Server Port"},
+ 		{"no users", func(o *option.MieruInboundOptions) { o.Users = nil }, "users is empty"},
+ 		{"empty username", func(o *option.MieruInboundOptions) { o.Users[0].Name = "" }, "username is empty"},
+ 		{"empty password", func(o *option.MieruInboundOptions) { o.Users[0].Password = "" }, "password is empty"},
+@@ -357,10 +360,10 @@ func TestH_MieruLoopbackRoundTrip(t *testing.T) {
+ 	defer htest.Close(in)
+ 
+ 	out, err := NewOutbound(ctx, router, logger, "mieru-out", option.MieruOutboundOptions{
+-		ServerOptions: option.ServerOptions{Server: "127.0.0.1"},
+-		PortBindings:  []option.MieruPortBinding{{Protocol: "TCP", Port: port}},
+-		UserName:      "alice",
+-		Password:      "secret",
++		Server:       "127.0.0.1",
++		PortBindings: []option.MieruPortBinding{{Protocol: "TCP", Port: port}},
++		UserName:     "alice",
++		Password:     "secret",
+ 	})
+ 	require.NoError(t, err)
+ 	defer out.(*Outbound).Close()
+diff --git a/protocol/mieru/h_resolver.go b/protocol/mieru/h_resolver.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..788fdfbab21ea20604ea7da36b124fadb654196e
+--- /dev/null
++++ b/protocol/mieru/h_resolver.go
+@@ -0,0 +1,55 @@
++package mieru
++
++import (
++	"context"
++	"net"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/common/dialer"
++	E "github.com/sagernet/sing/common/exceptions"
++	N "github.com/sagernet/sing/common/network"
++	"github.com/sagernet/sing/service"
++
++	mierucommon "github.com/enfein/mieru/v3/apis/common"
++)
++
++// mieruResolver looks up the server for mieru's UDP transport, which resolves the name itself
++// before it dials; without it a UDP server given by name never connects. It asks sing-box's DNS
++// with the outbound's domain resolver, as the dialer would for a TCP server.
++type mieruResolver struct {
++	router  adapter.DNSRouter
++	options adapter.DNSQueryOptions
++}
++
++var _ mierucommon.DNSResolver = (*mieruResolver)(nil)
++
++func newMieruResolver(ctx context.Context, outboundDialer N.Dialer) mierucommon.DNSResolver {
++	router := service.FromContext[adapter.DNSRouter](ctx)
++	if router == nil {
++		return nil
++	}
++	resolver := &mieruResolver{router: router}
++	if resolveDialer, ok := outboundDialer.(dialer.ResolveDialer); ok {
++		resolver.options = resolveDialer.QueryOptions()
++	}
++	return resolver
++}
++
++func (r *mieruResolver) LookupIP(ctx context.Context, network, host string) ([]net.IP, error) {
++	addresses, err := r.router.Lookup(ctx, host, r.options)
++	if err != nil {
++		return nil, err
++	}
++	var ips []net.IP
++	for _, address := range addresses {
++		address = address.Unmap()
++		if network == "ip4" && !address.Is4() || network == "ip6" && !address.Is6() {
++			continue
++		}
++		ips = append(ips, address.AsSlice())
++	}
++	if len(ips) == 0 {
++		return nil, E.New("no ", network, " address for ", host)
++	}
++	return ips, nil
++}
+diff --git a/protocol/mieru/h_resolver_test.go b/protocol/mieru/h_resolver_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ed9a9596cc5ad74919fc2d002f23ad26a8ac3629
+--- /dev/null
++++ b/protocol/mieru/h_resolver_test.go
+@@ -0,0 +1,54 @@
++package mieru
++
++import (
++	"context"
++	"net/netip"
++	"testing"
++
++	"github.com/sagernet/sing-box/adapter"
++	N "github.com/sagernet/sing/common/network"
++	"github.com/sagernet/sing/service"
++
++	mierucommon "github.com/enfein/mieru/v3/apis/common"
++	"github.com/stretchr/testify/require"
++)
++
++type hDNSRouter struct {
++	adapter.DNSRouter
++	asked []string
++}
++
++func (r *hDNSRouter) Lookup(ctx context.Context, domain string, options adapter.DNSQueryOptions) ([]netip.Addr, error) {
++	r.asked = append(r.asked, domain)
++	return []netip.Addr{netip.MustParseAddr("2001:db8::1"), netip.MustParseAddr("::ffff:192.0.2.1")}, nil
++}
++
++// mieru's UDP transport resolves its server itself, and without a resolver a server given by
++// name failed with "look up IP address of ... is not supported".
++func TestH_MieruResolverResolvesUDPServer(t *testing.T) {
++	t.Parallel()
++	router := &hDNSRouter{}
++	ctx := service.ContextWith[adapter.DNSRouter](context.Background(), router)
++	resolver := newMieruResolver(ctx, N.SystemDialer)
++	require.NotNil(t, resolver)
++
++	addr, err := mierucommon.ResolveUDPAddr(ctx, resolver, "udp", "server.example:443")
++	require.NoError(t, err)
++	require.Equal(t, 443, addr.Port)
++	require.Equal(t, []string{"server.example"}, router.asked)
++
++	v4, err := resolver.LookupIP(ctx, "ip4", "server.example")
++	require.NoError(t, err)
++	require.Len(t, v4, 1)
++	require.Equal(t, "192.0.2.1", v4[0].String())
++
++	v6, err := resolver.LookupIP(ctx, "ip6", "server.example")
++	require.NoError(t, err)
++	require.Len(t, v6, 1)
++	require.Equal(t, "2001:db8::1", v6[0].String())
++}
++
++func TestH_MieruResolverWithoutDNSRouter(t *testing.T) {
++	t.Parallel()
++	require.Nil(t, newMieruResolver(context.Background(), N.SystemDialer))
++}
+diff --git a/protocol/mieru/inbound.go b/protocol/mieru/inbound.go
+index 728cb45454fab7005e3c1bc0fbc3c24fe2a69b6b..f277a9d77ee3706d9e599022e847ebc76a498ef7 100644
+--- a/protocol/mieru/inbound.go
++++ b/protocol/mieru/inbound.go
+@@ -27,15 +27,6 @@ import (
+ 	mierumodel "github.com/enfein/mieru/v3/apis/model"
+ 	mieruserver "github.com/enfein/mieru/v3/apis/server"
+ 	mierupb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
+-	"google.golang.org/protobuf/proto"
+-)
+-
+-const (
+-	// A failed Accept is retried after a short pause that grows up to
+-	// acceptErrorBackoffMax, so a permanently failing listener costs a few
+-	// calls per second instead of a whole core.
+-	acceptErrorBackoffInitial = 100 * time.Millisecond
+-	acceptErrorBackoffMax     = 5 * time.Second
+ )
+ 
+ func RegisterInbound(registry *inbound.Registry) {
+@@ -83,10 +74,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+ 	return inboundInstance, nil
+ }
+ 
+-func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+-	if stage == adapter.StartStateInitialize {
+-		scope.Add(h.Close) // H: closed with the box
+-	}
++func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error { // H
+ 	if stage != adapter.StartStateStart {
+ 		return nil
+ 	}
+@@ -98,6 +86,7 @@ func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 		return fmt.Errorf("failed to start mieru server: %w", err)
+ 	}
+ 
++	scope.Add(h.Close) // H
+ 	h.logger.Info("mieru server is started")
+ 	go h.acceptLoop()
+ 	return nil
+@@ -114,30 +103,34 @@ func (h *Inbound) Close() error {
+ }
+ 
+ func (h *Inbound) acceptLoop() {
+-	backoff := acceptErrorBackoffInitial
++	const initialBackoff = 50 * time.Millisecond
++	const maxBackoff = 2 * time.Second
++	backoff := initialBackoff
+ 	for {
++		if h.ctx.Err() != nil {
++			return
++		}
+ 		conn, request, err := h.server.Accept()
+ 		if err != nil {
+-			if !h.server.IsRunning() {
++			if !h.server.IsRunning() || h.ctx.Err() != nil {
+ 				return
+ 			}
+ 			h.logger.Debug("failed to accept mieru connection: ", err)
+-			// Accept reports per-connection handshake failures the same way it
+-			// reports a broken listener, and a listener that stopped working
+-			// keeps failing on every call. Retrying without a delay turns
+-			// either case into a tight loop that pins a CPU core, so wait
+-			// before asking again and give up entirely once the inbound is gone.
+ 			timer := time.NewTimer(backoff)
+ 			select {
+-			case <-timer.C:
+ 			case <-h.ctx.Done():
+ 				timer.Stop()
+ 				return
++			case <-timer.C:
+ 			}
+-			backoff = min(backoff*2, acceptErrorBackoffMax)
++			backoff = min(backoff*2, maxBackoff)
+ 			continue
+ 		}
+-		backoff = acceptErrorBackoffInitial
++		backoff = initialBackoff
++		if h.ctx.Err() != nil {
++			conn.Close()
++			return
++		}
+ 		go h.handleConnection(conn, request)
+ 	}
+ }
+@@ -271,7 +264,7 @@ func (c *mieruPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksadd
+ 	common.Must(header.WriteZeroN(3))
+ 
+ 	var addr mierumodel.AddrSpec
+-	if destination.IsFqdn() {
++	if destination.IsDomain() {
+ 		addr.FQDN = destination.Fqdn
+ 	} else {
+ 		addr.IP = destination.Addr.AsSlice()
+@@ -309,8 +302,8 @@ func buildMieruServerConfig(_ context.Context, options option.MieruInboundOption
+ 	var userNames []string
+ 	for _, user := range options.Users {
+ 		users = append(users, &mierupb.User{
+-			Name:     proto.String(user.Name),
+-			Password: proto.String(user.Password),
++			Name:     new(user.Name),
++			Password: new(user.Password),
+ 		})
+ 		userNames = append(userNames, user.Name)
+ 	}
+@@ -328,7 +321,7 @@ func validateMieruInboundOptions(options option.MieruInboundOptions) error {
+ 		return fmt.Errorf("either server_port or transport must be set")
+ 	}
+ 	if options.ListenPort != 0 && (len(options.PortBindings) != 1 || options.PortBindings[0].Port != options.ListenPort) {
+-		return fmt.Errorf("Transport of Server Port is not defined!")
++		return fmt.Errorf("transport of Server Port is not defined")
+ 	}
+ 	if len(options.Users) == 0 {
+ 		return E.New("users is empty")
+diff --git a/protocol/mieru/outbound.go b/protocol/mieru/outbound.go
+index 927a01ab0d7595cc297d52cb9513abc2a85ce127..e9f2e613be31e7c10632160ec2e76f2cbeec0cb9 100644
+--- a/protocol/mieru/outbound.go
++++ b/protocol/mieru/outbound.go
+@@ -12,7 +12,6 @@ import (
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+-	"github.com/sagernet/sing/common"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
+@@ -21,7 +20,6 @@ import (
+ 	mierucommon "github.com/enfein/mieru/v3/apis/common"
+ 	mierumodel "github.com/enfein/mieru/v3/apis/model"
+ 	mierupb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
+-	"google.golang.org/protobuf/proto"
+ )
+ 
+ type Outbound struct {
+@@ -45,6 +43,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed to build mieru client config: %w", err)
+ 	}
++	config.Resolver = newMieruResolver(ctx, outboundDialer) // H
+ 	c := mieruclient.NewClient()
+ 	if err := c.Store(config); err != nil {
+ 		return nil, fmt.Errorf("failed to store mieru client config: %w", err)
+@@ -110,7 +109,11 @@ func (o *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
+ }
+ 
+ func (o *Outbound) Close() error {
+-	return common.Close(o.client)
++	// The mieru client has Stop, not Close: common.Close did nothing with it, so the multiplexer
++	// of every outbound that was closed stayed for good, with its goroutine and the ticker that
++	// wakes it every 5 s. Keep top closes each lazy outbound after its test, and a profile's
++	// mieru proxies leaked again at every pick. //H
++	return o.client.Stop() // H
+ }
+ 
+ // mieruDialer is an adapter to mieru dialer interface.
+@@ -174,22 +177,22 @@ func buildMieruClientConfig(options option.MieruOutboundOptions, dialer mieruDia
+ 		intport := int32(pr.Port)
+ 
+ 		server.PortBindings = append(server.PortBindings, &mierupb.PortBinding{
+-			PortRange: proto.String(pr.PortRange),
++			PortRange: new(pr.PortRange),
+ 			Port:      &intport,
+ 			Protocol:  getTransportProtocol(pr.Protocol),
+ 		})
+ 	}
+ 	if M.IsDomainName(options.Server) {
+-		server.DomainName = proto.String(options.Server)
++		server.DomainName = new(options.Server)
+ 	} else {
+-		server.IpAddress = proto.String(options.Server)
++		server.IpAddress = new(options.Server)
+ 	}
+ 	config := &mieruclient.ClientConfig{
+ 		Profile: &mierupb.ClientProfile{
+-			ProfileName: proto.String("sing-box"),
++			ProfileName: new("sing-box"),
+ 			User: &mierupb.User{
+-				Name:     proto.String(options.UserName),
+-				Password: proto.String(options.Password),
++				Name:     new(options.UserName),
++				Password: new(options.Password),
+ 			},
+ 			Servers:       []*mierupb.ServerEndpoint{server},
+ 			HandshakeMode: getHandshakeMode(options.HandshakeMode),
+@@ -203,6 +206,9 @@ func buildMieruClientConfig(options option.MieruOutboundOptions, dialer mieruDia
+ 			BypassDialerDNS: true,
+ 		},
+ 	}
++	if options.MTU != 0 {
++		config.Profile.Mtu = new(options.MTU)
++	}
+ 	if multiplexing, ok := mierupb.MultiplexingLevel_value[options.Multiplexing]; ok {
+ 		config.Profile.Multiplexing = &mierupb.MultiplexingConfig{
+ 			Level: mierupb.MultiplexingLevel(multiplexing).Enum(),
+@@ -210,7 +216,11 @@ func buildMieruClientConfig(options option.MieruOutboundOptions, dialer mieruDia
+ 	}
+ 	return config, nil
+ }
++
+ func validateMieruOptions(options option.MieruOutboundOptions) error {
++	if options.MTU != 0 && (options.MTU < 1280 || options.MTU > 1500) {
++		return fmt.Errorf("mieru MTU must be between 1280 and 1500")
++	}
+ 	if options.Server == "" {
+ 		return fmt.Errorf("server is empty")
+ 	}
+@@ -218,7 +228,7 @@ func validateMieruOptions(options option.MieruOutboundOptions) error {
+ 		return fmt.Errorf("either server_port or transport must be set")
+ 	}
+ 	if options.ServerPort != 0 && (len(options.PortBindings) != 1 || options.PortBindings[0].Port != options.ServerPort) {
+-		return fmt.Errorf("Transport of Server Port is not defined!")
++		return fmt.Errorf("transport of Server Port is not defined")
+ 	}
+ 	if options.UserName == "" {
+ 		return fmt.Errorf("username is empty")
