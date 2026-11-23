@@ -28,6 +28,20 @@ Local builds need a Git checkout, Bash, Make, Go and `sha256sum`. Run `git submo
 
 Every Monday GitHub Actions takes the latest original Core commit and uses the sing-box and ray2sing revisions selected by its gitlinks. It applies all three patch series, runs the tests, and attempts the five CLI targets. Successful candidate builds are downloadable from that Actions run. Conflicts stop the candidate and identify the patch and source revision in the log. Stable releases continue to use the reproducible revisions in the three Git submodules.
 
+The workflow now performs a single patch preflight before scheduling platform builds and tests. If an upstream candidate conflicts, the preflight job publishes a Markdown conflict summary and an `upstream-patch-diagnostics` artifact containing component patch logs. The failed candidate cannot be mistaken for a passing upgrade, and the locked source pins remain unchanged.
+
+## Checking personal fork updates
+
+`patches/fork-snapshots.lock` records the three **personal fork revisions that were audited when the patch series were generated**. These revisions are distinct from the three original-project Git submodule SHA pins. On scheduled and manually dispatched workflows, `scripts/audit-forks.sh --strict` checks the latest `main` of each personal fork against its audited snapshot and fails the independent audit job if new work needs to be ported.
+
+Run locally with:
+
+```sh
+bash scripts/audit-forks.sh --strict
+```
+
+When a personal fork advances, review its new commits, regenerate the affected patches, update the corresponding expected source tree, verify all targeted tests and platforms, and only then advance the audited revision in `fork-snapshots.lock`. Do **not** replace the official Git submodules with the forks or update the snapshot SHA without incorporating and verifying its changes.
+
 Patch files use Git binary diff format with full blob IDs for three-way application. After resolving a candidate conflict against the newer original sources, regenerate the affected patch and update the submodule pointers and corresponding `expected-tree` files.
 
 Original project licenses and notices apply to the patched sources and resulting binaries.
