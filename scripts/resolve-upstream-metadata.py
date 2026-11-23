@@ -466,4 +466,28 @@ resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 path = "common/monitoring/outbound_monitoring.go"
 candidate = replace_once(resolutions[path], b"\tonDemand := onDemandTimeouts(options.OnDemandTimeouts)", b"\tif options.IpInfoURL == \"\" {\n\t\toptions.IpInfoURL = options.LegacyIpInfoURL\n\t}\n\tonDemand := onDemandTimeouts(options.OnDemandTimeouts)")
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+# Adapt upstream monitoring regressions to the retained fork test fixtures.
+import re
+for path, hashes in (
+    ("common/monitoring/h_cycle_test.go", (None, "0e802f6177aa208433069f8b7a27a889eb47a224", "862ee9106ae2e130e1b3f7d8375180e028f5a88b")),
+    ("common/monitoring/h_registry_test.go", (None, "9baf4b8ac59ecddf39b75161a87d508527201493", "5da0e5a17e5bdbbe4daf5e64dbde24e8b8351234")),
+    ("common/monitoring/h_ipv6_test.go", ("b2ab2d58a5c8b6fcbc01453f49b29d3918780ceb", "bf793619443349c0c1fa8602192175c3c3f858be", "d37b1c66348c476b3b90dd2b7867af2cada70239")),
+):
+    if hashes[0] is None:
+        assert subprocess.run(["git", "-C", str(repo), "cat-file", "-e", data["base"] + ":" + path], capture_output=True).returncode != 0
+    else:
+        checked_blob(data["base"], path, hashes[0])
+    own = checked_blob(data["patched_tree"], path, hashes[1])
+    new = checked_blob(data["upstream"], path, hashes[2])
+    candidate = re.sub(rb'&fakeGroup\{fakeOutbound: fakeOutbound\{tag: ("[^"]+")\},', rb'&fakeGroup{tag: \1,', new)
+    candidate = candidate.replace(b"m.started = true", b"m.started.Store(true)")
+    candidate = candidate.replace(b"destination.IsFqdn()", b"destination.IsDomain()")
+    if path.endswith("h_registry_test.go"):
+        marker = b"// A group subscribes when it starts."
+        assert candidate.count(marker) == 1
+        assert candidate[:candidate.index(marker)].rstrip() == own.rstrip()
+        assert b"func TestH_SubscribeBeforeTheGroupIsRegistered(" in candidate
+    else:
+        assert candidate == own
+    resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 apply_reviewed(data, resolutions)

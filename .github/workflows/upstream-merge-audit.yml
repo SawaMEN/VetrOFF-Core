@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Verify main monitoring module and configuration compatibility
+      - name: Verify monitoring cycle, reload and IPv6 regression resolutions
         run: bash scripts/audit-upstream-merge.sh 4e5a9a357003d0a995360586702fd24c53042e3f
       - uses: actions/upload-artifact@v4
         if: always()
