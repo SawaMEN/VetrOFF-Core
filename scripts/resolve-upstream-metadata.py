@@ -229,4 +229,54 @@ assert new.replace(
     b'for variable := range strings.SplitSeq(string(content), "\\x00") {',
 ) == own
 resolutions[path] = own
+# Preserve fork protocol identifiers and the new upstream lazy-outbound type.
+path = "constant/proxy.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("0c5bff59e2e2cd6ea1eb7dbf28096d23e786762c",
+     "b888846a0fd0054db5a7d0195a172d7d8462342e",
+     "fb48cade69783e82a11fccf6d78910834067f288")))
+assert own.count(b'TypeHInvalidConfig = "hinvalid"') == 1
+assert new.count(b'TypeHLazy          = "hlazy"') == 1
+candidate = own.replace(b'\tTypeXray           = "xray"', b'\tTypeHLazy          = "hlazy" // H: lazy outbound placeholder\n\tTypeXray           = "xray"', 1)
+candidate = candidate.replace(b'\tcase TypeDNSTT:', b'\tcase TypeSudoku:\n\t\treturn "Sudoku"\n\tcase TypeCall:\n\t\treturn "Call"\n\tcase TypeDNSTT:', 1)
+assert b'TypeHLazy' in candidate
+assert candidate.count(b'URLTestModeFailover = "failover"') == 1
+assert b'TypeVetrOFF' in candidate and b'TypeSmartDNSPool' in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# The fork keeps readiness-only implementations compatible. The upstream
+# IsWarming helper is additive and can use the same shared Status enum.
+path = "adapter/h_status.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("0b09a80400f6542696e6c89e7f59480c68362ecf",
+     "5e788b1830f6ab50d61469f75d0657ed0631b8c3",
+     "30346206ba9ceb7cb6d661f8f997480f82d3609c")))
+interface = checked_blob(data["patched_tree"], "adapter/outbound.go", "6e6c3987e8575fd84c062bcf17ccc472221b8d5b")
+assert b"IsReady() bool" in interface and b"func OutboundStatus(" in own
+assert git("rev-parse", data["tentative_tree"] + ":adapter/outbound.go").decode().strip() == "6e6c3987e8575fd84c062bcf17ccc472221b8d5b"
+marker = b"// IsWarming reports"
+assert marker not in own and new.count(marker) == 1
+candidate = own.rstrip() + b"\n\n" + new[new.index(marker):]
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+path = "adapter/h_display.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("cd547ceb5c229990d217d75c3ed26916cab20a1a",
+     "f9dd9baf357997cbb9114daca0ae1fe4b3716121",
+     "c2ac8efb5a69732a9f58a95ef9f5495a72389927")))
+assert new.replace(b"outbound.Status()", b"OutboundStatus(outbound)") == own
+resolutions[path] = own
+
+path = "adapter/h_display_test.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("337fa79a4709594e736dbee599d09563335c61bd",
+     "bf3c11837955284b19611213b39f82ec8137eb6e",
+     "7149c640703f57e45c2471deea927d515fcdd53c")))
+start = own.index(b"// A v5 outbound only needs")
+end = own.index(b"type hNamedOutbound", start)
+assert own[:start] + own[end:] == new
+resolutions[path] = own
 apply_reviewed(data, resolutions)
