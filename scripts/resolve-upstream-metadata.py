@@ -1582,4 +1582,57 @@ func (h *Outbound) Close() error {
 }
 '''
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+# gRPC: preserve the fork's cancellable wait for the shared connection
+# and the close-versus-publication race fix.
+path = "transport/v2raygrpc/client.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("31226df41cdf2cda5209d6072c14f8d59992e38b",
+     "303a665161cc1f136a8226c5a251963d1c5b6dfb",
+     "6f772cb355b2c7540f1f22faf24198df794247cf")))
+for signature in (b"func (c *Client) DialContext(", b"func (c *Client) Close("):
+    assert balancer_code(function_blob(own, signature)) == balancer_code(function_blob(new, signature))
+assert b"case <-ctx.Done():" in own and b"case <-c.ctx.Done():" in own
+assert b"c.conn.CompareAndSwap(conn, nil)" in own
+candidate = replace_once(own, b"\tconn := c.conn.Load()\n",
+                         b"\tif c.ctx.Err() != nil {\n\t\treturn nil, net.ErrClosed\n\t}\n\tif ctx.Err() != nil {\n\t\treturn nil, context.Cause(ctx)\n\t}\n\tconn := c.conn.Load()\n")
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# SSH: retain legacy entrypoints while incorporating upstream session
+# detachment, multiplex context and UDP capability reporting.
+path = "protocol/ssh/outbound.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("e745d674a79df9f1660aba056d64d6fe6951ab00",
+     "16ff59e0c4cb07069f101ac40cb8f470f9d430b1",
+     "67f91080ee719c9607feddc26a08306f4f2955c7")))
+candidate = new
+needle = b"\tscope.Add(func() error {\n\t\ts.closeOnce.Do(func() { close(s.done) })\n\t\ts.clientAccess.Lock()\n\t\tclientConn := s.clientConn\n\t\ts.clientAccess.Unlock()\n\t\treturn common.Close(clientConn)\n\t})"
+candidate = replace_once(candidate, needle, b"\tscope.Add(s.Close)")
+candidate += b'''
+func (s *Outbound) Close() error {
+	s.closeOnce.Do(func() { close(s.done) })
+	s.clientAccess.Lock()
+	clientConn := s.clientConn
+	s.client = nil
+	s.clientConn = nil
+	s.ready.Store(false)
+	s.clientAccess.Unlock()
+	return common.Close(clientConn)
+}
+'''
+for signature in (b"func (s *Outbound) IsReady(", b"func (s *Outbound) DisplayType("):
+    candidate += b"\n" + function_blob(own, signature) + b"\n"
+assert b"adapter.ContextForMultiplexSession(ctx)" in candidate
+assert b"options.UDPOverTCP == nil || !options.UDPOverTCP.Enabled" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Same test code; only import grouping differs.
+for path, own_sha, new_sha in (
+    ("protocol/hiddify/gooserelay/h_status_test.go", "3b48e55cd1cc3c7ec582513b3741ca863625cf0f", "19a64d4f35b29dda722def85f097f551a303fb71"),
+    ("protocol/hiddify/soar/h_soar_test.go", "880bf2c68d36108dd03e5b4fcd7763964ee729bf", "7f20f4d0496801a70a85e4d40794dba5a749dd88"),
+):
+    own, new = added_pair(path, own_sha, new_sha)
+    assert normalize_imports(own) == normalize_imports(new)
+    resolutions[path] = own
 apply_reviewed(data, resolutions)
