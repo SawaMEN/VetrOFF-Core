@@ -984,7 +984,7 @@ old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
     ("03a47da71c1abf8fee76ea1d4b398ef3f33041a5",
      "26054f8a7fcca714c0dc02743b566d486d0b3e81",
      "e398209aa08a5f57a1d1f7a28e3c68cd69437c96")))
-assert new.replace(b"//H", b"// H") == own
+assert balancer_code(new) == balancer_code(own)
 resolutions[path] = own
 
 path = "transport/v2rayxhttp/h_post_bytes_test.go"
@@ -992,4 +992,115 @@ own, new = added_pair(path, "fdcd705074bd87c1b839ad3e83beb20ef6ce4331",
                       "60629b661d0f4b836e9e304c7b40be99764e9285")
 assert replace_once(new, b"the range is raised and the server works.", b"the limit is kept and the server works.") == own
 resolutions[path] = own
+# Coordinate XHTTP stream lifetime across the dialer, reader and tests.
+# Retain the fork's direct status validation for download-only streams, but
+# detach the established stream from the dial context and synchronize addresses.
+path = "transport/v2rayxhttp/dialer.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("0dba3b4518b6d27447baaa757930b8c9a21ab454",
+     "c6b29ae3a8a2d084cd540cf2495c8db650c30275",
+     "ea9a32d036dcce11e24636e207dc6f3d17beb327")))
+candidate = new
+# Keep WaitReadCloser in its dedicated source file.
+start = candidate.index(b"// WaitReadCloser is the download stream")
+end = candidate.index(b"func ApplyMetaToRequest", start)
+candidate = candidate[:start] + candidate[end:]
+start = candidate.index(b"\treader := &WaitReadCloser{")
+end = candidate.index(b"\n}\n", start)
+candidate = candidate[:start] + b'''	reader := &WaitReadCloser{Wait: make(chan struct{}), cancel: cancelRequest}
+	resultCh := make(chan error, 1)
+	go func() {
+		resp, requestErr := c.client.Do(req)
+		if requestErr != nil {
+			if !uploadOnly {
+				c.closed.Store(true)
+			}
+			reader.closeWithError(requestErr)
+			resultCh <- requestErr
+			return
+		}
+		if resp.StatusCode != http.StatusOK {
+			statusErr := E.New("bad status code: ", resp.Status)
+			reader.closeWithError(statusErr)
+			resp.Body.Close()
+			resultCh <- statusErr
+			return
+		}
+		if uploadOnly {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			reader.Close()
+		} else {
+			reader.Set(resp.Body)
+		}
+		resultCh <- nil
+	}()
+	// A download-only stream must be accepted by the server before returning.
+	// Uploads may need data from the caller before a response can arrive.
+	if body == nil && !uploadOnly {
+		select {
+		case err = <-resultCh:
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
+	} else {
+		select {
+		case err = <-resultCh:
+		case <-gotConn.Wait():
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
+	}
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		reader.Close()
+		return nil, nil, nil, err
+	}
+	addrs := connAddrs.Load()
+	if addrs == nil {
+		reader.Close()
+		return nil, nil, nil, E.New("xhttp connection has no addresses")
+	}
+	return reader, addrs[0], addrs[1], nil''' + candidate[end:]
+assert b"connAddrs.CompareAndSwap" in candidate
+assert b"context.WithCancel(context.WithoutCancel(ctx))" in candidate
+assert b"c.hTakeWarm(ctx)" in candidate
+assert b"c.closed.Load() || c.hClosed.Load()" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "transport/v2rayxhttp/h_wait_read_closer.go"
+own, new = added_pair(path, "c0b1b71b9ece3e5189129ba45b90b25fcd8ce62c",
+                      "753778e2bcacc6792b881761a65abce69ab53614")
+candidate = replace_once(own, b"\tctx  context.Context\n",
+                         b"\tctx context.Context\n\tcancel context.CancelFunc\n\terr error\n")
+candidate = replace_once(candidate, b"\tselect {\n\tcase <-w.ctx.Done():\n\t\treturn 0, w.ctx.Err()\n\tcase <-w.Wait:\n\t}\n",
+                         b"\tif w.ctx == nil {\n\t\t<-w.Wait\n\t} else {\n\t\tselect {\n\t\tcase <-w.ctx.Done():\n\t\t\treturn 0, w.ctx.Err()\n\t\tcase <-w.Wait:\n\t\t}\n\t}\n")
+candidate = replace_once(candidate, b"\trc, closed := w.ReadCloser, w.closed\n",
+                         b"\trc, closed, streamErr := w.ReadCloser, w.closed, w.err\n")
+candidate = replace_once(candidate, b"\tif rc == nil || closed {\n\t\treturn 0, io.ErrClosedPipe\n",
+                         b"\tif rc == nil || closed {\n\t\tif streamErr != nil {\n\t\t\treturn 0, streamErr\n\t\t}\n\t\treturn 0, io.ErrClosedPipe\n")
+candidate = replace_once(candidate, b"\tw.access.Unlock()\n\tif rc != nil {\n\t\treturn rc.Close()\n",
+                         b"\tw.access.Unlock()\n\tif w.cancel != nil {\n\t\tw.cancel()\n\t}\n\tif rc != nil {\n\t\treturn rc.Close()\n")
+candidate += b"\n" + new.split(b"\n\n", 1)[1]
+assert b"if rc == nil {" in candidate
+assert b"if w.closed || w.ReadCloser != nil {" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "transport/v2rayxhttp/h_dialer_error_test.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("461785ae46e243d52165794c3d2c0c19d61f2bef",
+     "830ffe0663d2183e9a5fa72023a4751f74eb9ce1",
+     "77da82a46753054a685970aa121273cca82ed87e")))
+marker = b"// A download stream the server rejects"
+assert new[:new.index(marker)].rstrip() == own[:own.index(b"// A request may finish")].rstrip()
+test = new[new.index(marker):]
+test = replace_once(test,
+    b"\trequire.NoError(t, err)\n\tdefer reader.Close()\n\t_, err = reader.Read(make([]byte, 16))\n\trequire.ErrorContains(t, err, \"400\")",
+    b"\trequire.ErrorContains(t, err, \"400\")\n\trequire.Nil(t, reader)")
+# The status is now surfaced directly by Dial, rather than by the first read.
+resolutions[path] = subprocess.check_output(["gofmt"], input=own + b"\n" + test)
 apply_reviewed(data, resolutions)
