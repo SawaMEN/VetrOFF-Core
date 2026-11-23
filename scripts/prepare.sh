@@ -4,6 +4,7 @@ source "$(dirname "$0")/_common.sh"
 need git
 mkdir -p "$ROOT/.build"
 rm -rf -- "$WORK" "$ROOT/.build/prepared-sources.lock"
+rm -f -- "$ROOT/.build/"*.patch.log "$ROOT/.build/patch-report.md"
 
 checkout_source() {
   local path=$1 url=$2 sha=$3
@@ -47,6 +48,8 @@ apply_series() {
   local name=$1 path=$2 actual=$3 base=$4 line patch
   local args=(--index --whitespace=nowarn)
   local series="$ROOT/patches/$name/series"
+  local log="$ROOT/.build/$name.patch.log"
+  : > "$log"
   [[ -f "$series" ]] || { echo "Missing patch series: $series" >&2; return 1; }
   if [[ "$actual" != "$base" ]]; then
     git -C "$path" fetch --quiet --depth=1 origin "$base" || return 1
@@ -57,11 +60,11 @@ apply_series() {
     [[ "$line" =~ ^[A-Za-z0-9_.-]+\.patch$ ]] || { echo "Invalid patch name: $line" >&2; return 1; }
     patch="$ROOT/patches/$name/$line"
     echo "Applying $name/$line"
-    git -C "$path" apply "${args[@]}" "$patch" || {
+    if ! git -C "$path" apply "${args[@]}" "$patch" 2>&1 | tee -a "$log"; then
       echo "Could not apply $name/$line to $actual" >&2
       git -C "$path" diff --name-only --diff-filter=U >&2
       return 1
-    }
+    fi
   done < "$series"
 }
 
@@ -83,7 +86,25 @@ apply_series hiddify-sing-box "$WORK/hiddify-sing-box" "$sing" "$SING_SHA" || fa
 checkout_source "$WORK/ray2sing" "$RAY_URL" "$ray"
 apply_series ray2sing "$WORK/ray2sing" "$ray" "$RAY_SHA" || failed_components+=(ray2sing)
 if (( ${#failed_components[@]} > 0 )); then
-  echo "Source preparation failed: ${failed_components[*]}" >&2
+  report="$ROOT/.build/patch-report.md"
+  {
+    echo "# VetrOFF-Core upstream patch failures"
+    echo
+    echo "Source mode: ${VETROFF_SOURCE_MODE:-locked}"
+    echo "Hiddify Core revision: $core"
+    echo "Affected components: ${failed_components[*]}"
+    echo
+    for component in "${failed_components[@]}"; do
+      echo "## $component"
+      echo
+      echo "First 40 patch errors/conflicts (complete log in workflow artifacts):"
+      echo '```text'
+      awk '/^(error:|fatal:|Applied patch .* with conflicts)/ { print; if (++n == 40) exit }' "$ROOT/.build/$component.patch.log"
+      echo '```'
+      echo
+    done
+  } > "$report"
+  echo "Source preparation failed: ${failed_components[*]}; report: $report" >&2
   exit 1
 fi
 
