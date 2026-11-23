@@ -1297,14 +1297,15 @@ old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
      "ef1449d97f5effd414327780d6721dc271677010",
      "b80223b11ee9b64ee93d78ec76ccb40bab9f5f47")))
 candidate = own
-# New connections are tracked only if the merged MTU implementation exposes
-# its upstream tracking method. Check the actual merged blob rather than assume.
-mtu = subprocess.check_output(["git", "-C", str(repo), "show", data["tentative_tree"] + ":transport/wireguard/h_mtu_discovery.go"])
-assert b"func (p *mtuProber) track(" in mtu
+# The fork deliberately removed the upstream track method from mtuProber;
+# the three-way merge preserved that removal. Adapt only the TCP dial branch,
+# using the existing interrupt group without adding a duplicate wrapper.
+mtu = git("show", data["tentative_tree"] + ":transport/wireguard/h_mtu_discovery.go")
+assert b"tcp        *interrupt.Group" in mtu
+assert b"p.tcp.Interrupt(true)" in mtu
+assert b"func (p *mtuProber) track(" not in mtu
 candidate = replace_once(candidate, b"\t\treturn e.tunDevice.DialContext(dialCtx, network, destination)",
-                         b"\t\tconnection, err := e.tunDevice.DialContext(dialCtx, network, destination)\n\t\treturn e.mtuProbe.track(network, connection, err)")
-candidate = replace_once(candidate, b"\treturn e.tunDevice.DialContext(ctx, network, destination)",
-                         b"\tconnection, err := e.tunDevice.DialContext(ctx, network, destination)\n\treturn e.mtuProbe.track(network, connection, err)")
+    b"\t\tconnection, err := e.tunDevice.DialContext(dialCtx, network, destination)\n\t\tif err != nil || e.mtuProbe == nil {\n\t\t\treturn connection, err\n\t\t}\n\t\treturn e.mtuProbe.tcp.NewConn(connection, true), nil")
 # Stop the bind permanently before waiting for any device operation.
 candidate = replace_once(candidate, b"\t\tif e.bind != nil {\n\t\t\t_ = e.bind.Close()\n\t\t} // H: release stalled sends before waiting for device locks",
                          b"\t\tif clientBind, ok := e.bind.(*ClientBind); ok {\n\t\t\tclientBind.hAbort()\n\t\t} else if e.bind != nil {\n\t\t\t_ = e.bind.Close()\n\t\t}")
