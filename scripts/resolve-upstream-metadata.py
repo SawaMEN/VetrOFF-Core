@@ -912,4 +912,84 @@ assert b'"chrome_133", "hellochrome_133"' in candidate
 assert b'case "randomizednoalpn":' in candidate
 assert b"tf.NewConn(" in candidate
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+# XDrive is already enabled in the fork's standard build. Preserve its
+# storage routing, template compatibility and explicit connection lifecycle.
+path = "include/h_xdrive.go"
+own, new = added_pair(path, "8525e397c862488fe7a19fde0d7a6805825515bc",
+                      "c9e5da7e866a69ef09542ba01dfd79f41b80399d")
+assert replace_once(new, b"//go:build with_xdrive\n\n", b"") == own
+resolutions[path] = own
+
+path = "option/h_v2ray_xdrive.go"
+own, new = added_pair(path, "a26762ce86c7e33c2140d2d18913856e27951f97",
+                      "c028ed574d32db49d696e434443feafb694cd4c5")
+plain = own[:own.index(b"// UnmarshalJSON also accepts")].rstrip() + b"\n"
+plain = replace_once(plain, b'\t"bytes"\n\n', b"")
+plain = re.sub(rb"(?m)^\t(?:FrontAddress|FrontPort|StorageDialer)\s+.*\n", b"", plain)
+plain = replace_once(plain, b"SessionTtlSeconds", b"SessionTTLSeconds")
+assert subprocess.check_output(["gofmt"], input=plain) == subprocess.check_output(["gofmt"], input=new)
+resolutions[path] = own
+
+path = "transport/v2rayxdrive/config.go"
+own, new = added_pair(path, "619cd9d142a5b9bb2cfafb4ea1f9923e2b8c2554",
+                      "163da14b75ad01153d44edc8af0ffb50c6e35aa1")
+plain = replace_once(own, b"\tif options.FrontingAddress == \"\" {\n\t\toptions.FrontingAddress, options.FrontingPort = options.FrontAddress, options.FrontPort // H: legacy fronting names\n\t}\n", b"")
+plain = replace_once(plain, b"options.SessionTtlSeconds", b"options.SessionTTLSeconds")
+assert plain == new
+resolutions[path] = own
+
+path = "transport/v2rayxdrive/transport.go"
+own, new = added_pair(path, "0aab39bf6635461c481e6c7403e0f62c4c556780",
+                      "47a76fd150558f3d9c75e248f1ee3d6a95dfcbd2")
+for signature in (b"func init()", b"func streamSettings(", b"func (s *Server) Network(", b"func (s *Server) Serve(", b"func (s *Server) newConnection(", b"func (s *Server) ServePacket("):
+    assert function_blob(own, signature) == function_blob(new, signature)
+assert b"context.AfterFunc(c.ctx, cancel)" in own
+assert b"return c.closeConnections()" in own
+assert b"dialer.New(ctx, options.StorageDialer, true)" in own
+assert b"s.cancel()" in own
+resolutions[path] = own
+
+# XHTTP: preserve bounded allocation for uploads, including small post sizes,
+# and the fork's explicit handling of clearing a deadline.
+path = "transport/v2rayxhttp/writer.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("785f8e548ceee6ea962c3e6bdf65a32457f3d763",
+     "923a396333bf564ade2f97964a75a37dade2116a",
+     "a803be53f952d2f6024c0245129f5998f1359fa2")))
+assert own.split(b"func (w uploadWriter) Write(")[0] == new.split(b"func (w uploadWriter) Write(")[0]
+assert b"end := written + min(piece, len(data)-written)" in own
+assert b"return written, err" in own
+assert b"w.WriteMultiBuffer(buf.MultiBuffer{buffer})" in own
+resolutions[path] = own
+
+path = "transport/v2rayxhttp/conn.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("1d28adcac43a717424b3b26af7a45e7721ae6007",
+     "717161bbeda32caed485364dd1ab33284930b328",
+     "6000a435df09749e5144ada7fd1c5c09b3ab8513")))
+candidate = own
+for signature in (b"func (c *splitConn) Write(", b"func (c *splitConn) Read(", b"func (c *splitConn) Close("):
+    candidate = replace_once(candidate, function_blob(own, signature), function_blob(new, signature))
+# Close also tolerates a missing writer on a partially constructed stream.
+candidate = replace_once(candidate, b"\terr := c.writer.Close()\n", b"\tvar err error\n\tif c.writer != nil {\n\t\terr = c.writer.Close()\n\t}\n")
+assert b"hWrapH3(baderror.WrapH2(err))" in candidate
+assert b"if t.IsZero()" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "transport/v2rayxhttp/http.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("03a47da71c1abf8fee76ea1d4b398ef3f33041a5",
+     "26054f8a7fcca714c0dc02743b566d486d0b3e81",
+     "e398209aa08a5f57a1d1f7a28e3c68cd69437c96")))
+assert new.replace(b"//H", b"// H") == own
+resolutions[path] = own
+
+path = "transport/v2rayxhttp/h_post_bytes_test.go"
+own, new = added_pair(path, "fdcd705074bd87c1b839ad3e83beb20ef6ce4331",
+                      "60629b661d0f4b836e9e304c7b40be99764e9285")
+assert replace_once(new, b"the range is raised and the server works.", b"the limit is kept and the server works.") == own
+resolutions[path] = own
 apply_reviewed(data, resolutions)
