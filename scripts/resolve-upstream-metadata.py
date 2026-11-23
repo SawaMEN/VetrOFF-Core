@@ -1326,4 +1326,43 @@ assert b"func (e *Endpoint) ensureDeviceStarted(" in candidate
 assert b"e.closeOnce.Do(" in candidate
 assert b"e.tunDevice.SetDevice(wgDevice, nil)" in candidate
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+# WARP diagnostics and configuration validation. Explicit registration
+# detours remain strict; only automatic selection may try other outbounds.
+path = "protocol/warp/endpoint_warp.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("31df5021ca8cdf7017968e28b893fc37ce162f45",
+     "8d8246f4f4d2e0bd7706722d09269381704a41e7",
+     "453fe3f9b9e67d87bf791919c2aaa298fe653817")))
+candidate = new
+for signature in (b"func warpPeerEndpoint(", b"func warpInterfaceAddresses(", b"func withWARPAPI("):
+    candidate = replace_once(candidate, function_blob(new, signature), function_blob(own, signature))
+# Preserve the explicit detour policy while taking the new automatic ordering.
+candidate = replace_once(candidate, b"for _, outbound := range manager.Outbounds() {",
+                         b"for _, outbound := range registerDetours(ctx, manager.Outbounds()) {")
+candidate = replace_once(candidate, b"if err := call(outbound); err == nil {",
+                         b"if err := registerThrough(outbound, call); err == nil {")
+candidate = replace_once(candidate, b"return inner.Status()", b"return adapter.OutboundStatus(inner)")
+# Keep conditional MASQUE state; builds without MASQUE need no link state.
+candidate = re.sub(rb"(?m)^\tlinkRefused\s+atomic.Bool[^\n]*", b"\tmasqueLinkState", candidate)
+assert b"masqueLinkState" in candidate and b"linkRefused   atomic.Bool" not in candidate
+assert b"config == nil || len(config.Peers) == 0" in candidate
+assert b"net.SplitHostPort(endpoint.Host)" in candidate
+assert b"return call(outbound)" in candidate
+assert b"w.attemptError.Set(err)" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "protocol/warp/h_status.go"
+own, new = added_pair(path, "719c191c6338a07b0b2e3c2c9f0b5c94286ca785",
+                      "14bf21f3cbcf855de851690e699deb7e8f9536ff")
+assert function_blob(own, b"func (w *WARPEndpoint) StatusError()") == function_blob(new, b"func (w *WARPEndpoint) StatusError()")
+resolutions[path] = new
+
+path = "protocol/warp/h_link_device.go"
+own, new = added_pair(path, "90f531f439a07913d97676fd657694f5caf91555",
+                      "ebf01e1c5f7a46db0351135aee5f69905d2fc137")
+plain = replace_once(own, b' "sync/atomic"\n', b"")
+plain = plain[:plain.index(b"type masqueLinkState struct")].rstrip() + b"\n"
+assert plain == new
+resolutions[path] = subprocess.check_output(["gofmt"], input=own)
 apply_reviewed(data, resolutions)
