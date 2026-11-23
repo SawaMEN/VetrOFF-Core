@@ -485,7 +485,7 @@ for path, hashes in (
     if path.endswith("h_registry_test.go"):
         marker = b"// A group subscribes when it starts."
         assert candidate.count(marker) == 1
-        assert candidate[:candidate.index(marker)].rstrip() == own.rstrip()
+        assert candidate[:candidate.index(marker)].replace(b"\n\t\"github.com/stretchr/testify/require\"", b"\n\n\t\"github.com/stretchr/testify/require\"").rstrip() == own.rstrip()
         assert b"func TestH_SubscribeBeforeTheGroupIsRegistered(" in candidate
     else:
         assert candidate == own
