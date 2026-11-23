@@ -1,0 +1,553 @@
+diff --git a/transport/device/device.go b/transport/device/device.go
+index c8074dcb2d1b8587f9e789b0ef818824f88e568d..ef8c72619251033f4161580c4bc5268e75cf24b0 100644
+--- a/transport/device/device.go
++++ b/transport/device/device.go
+@@ -6,7 +6,7 @@ import (
+ 	"sync/atomic"
+ 	"time"
+ 
+-	"github.com/sagernet/sing-tun"
++	tun "github.com/sagernet/sing-tun"
+ 	"github.com/sagernet/sing/common"
+ 	"github.com/sagernet/sing/common/buf"
+ 	"github.com/sagernet/sing/common/control"
+@@ -35,24 +35,22 @@ type Device interface {
+ }
+ 
+ type Options struct {
+-	Context             context.Context
+-	Logger              logger.ContextLogger
+-	System              bool
+-	Handler             tun.Handler
+-	UDPTimeout          time.Duration
+-	ICMPTimeout         time.Duration
+-	UDPMapping          tun.NATMapping
+-	UDPFiltering        tun.NATFiltering
+-	UDPNATMax           uint32
+-	InterfaceFinder     control.InterfaceFinder
+-	MemoryPressure      func() tun.MemoryPressure
+-	Name                string
+-	NamePrefix          string
+-	MTU                 uint32
+-	PacketFrontHeadroom int
+-	PacketRearHeadroom  int
+-	Route               func(packet []byte) *tun.OutboundQueue
+-	Configuration       Configuration
++	Context         context.Context
++	Logger          logger.ContextLogger
++	System          bool
++	Handler         tun.Handler
++	UDPTimeout      time.Duration
++	ICMPTimeout     time.Duration
++	UDPMapping      tun.NATMapping
++	UDPFiltering    tun.NATFiltering
++	UDPNATMax       uint32
++	InterfaceFinder control.InterfaceFinder
++	MemoryPressure  func() tun.MemoryPressure
++	Name            string
++	NamePrefix      string
++	MTU             uint32
++	PacketHeadroom  int
++	Configuration   Configuration
+ }
+ 
+ type Configuration struct {
+@@ -86,10 +84,13 @@ func newStack(options Options, memoryTun *tun.MemoryTun) (*tun.Go, error) {
+ }
+ 
+ type baseDevice struct {
+-	packetWriter PacketWriter
+-	returnState  atomic.Pointer[returnPathState]
++	packetHeadroom int
++	packetWriter   PacketWriter
++	returnState    atomic.Pointer[returnPathState]
+ }
+ 
++func (d *baseDevice) UpstreamPort() any { return nil } // H: stack-only devices have no system port
++
+ func (d *baseDevice) SetPacketWriter(writer PacketWriter) {
+ 	d.packetWriter = writer
+ }
+@@ -140,6 +141,10 @@ func (d *baseDevice) processInboundBuffers(packetBuffers []*buf.Buffer, writeBuf
+ }
+ 
+ func (d *baseDevice) AttachReturn(returnPath tun.Return) error {
++	headroom := returnPath.ReturnHeadroom()
++	if headroom > d.packetHeadroom {
++		return E.New("return path headroom ", headroom, " exceeds available ", d.packetHeadroom)
++	}
+ 	newState := &returnPathState{
+ 		returnPath: returnPath,
+ 		headroom:   returnPath.ReturnHeadroom(),
+diff --git a/transport/device/h_udp_reconfiguration_test.go b/transport/device/h_udp_reconfiguration_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d0d0deeebfbe1d055d911d733e048e625e7e2355
+--- /dev/null
++++ b/transport/device/h_udp_reconfiguration_test.go
+@@ -0,0 +1,69 @@
++package device
++
++import (
++	"context"
++	"errors"
++	"net"
++	"net/netip"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing/common/logger"
++	M "github.com/sagernet/sing/common/metadata"
++
++	"github.com/stretchr/testify/require"
++)
++
++func TestH_UDPReconfigurationClosesChangedFamily(t *testing.T) {
++	addresses := []netip.Prefix{netip.MustParsePrefix("172.16.0.2/32"), netip.MustParsePrefix("fd00::2/128")}
++	d, err := newStackDevice(Options{Context: context.Background(), Logger: logger.NOP(), MTU: 1280, Configuration: Configuration{Address: addresses}})
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = d.Close() })
++	require.NoError(t, d.Start())
++
++	connected, err := d.DialContext(context.Background(), "udp", M.ParseSocksaddr("192.0.2.1:53"))
++	require.NoError(t, err)
++	defer connected.Close()
++	packet4, err := d.ListenPacket(context.Background(), M.ParseSocksaddr("192.0.2.1:53"))
++	require.NoError(t, err)
++	defer packet4.Close()
++	packet6, err := d.ListenPacket(context.Background(), M.ParseSocksaddr("[fd00::1]:53"))
++	require.NoError(t, err)
++	defer packet6.Close()
++
++	// Reapplying the same addresses preserves sockets in both address families.
++	require.NoError(t, d.UpdateConfiguration(Configuration{Address: addresses}))
++	hPacketTimesOut(t, packet4)
++	hPacketTimesOut(t, packet6)
++
++	changed := []netip.Prefix{netip.MustParsePrefix("172.16.0.3/32"), addresses[1]}
++	require.NoError(t, d.UpdateConfiguration(Configuration{Address: changed}))
++	require.NoError(t, connected.SetReadDeadline(time.Now().Add(time.Second)))
++	_, err = connected.Read(make([]byte, 1))
++	hRequireClosed(t, err)
++	require.NoError(t, packet4.SetReadDeadline(time.Now().Add(time.Second)))
++	_, _, err = packet4.ReadFrom(make([]byte, 1))
++	hRequireClosed(t, err)
++	hPacketTimesOut(t, packet6)
++
++	// Removing IPv6 invalidates only that family's remaining socket.
++	require.NoError(t, d.UpdateConfiguration(Configuration{Address: changed[:1]}))
++	require.NoError(t, packet6.SetReadDeadline(time.Now().Add(time.Second)))
++	_, _, err = packet6.ReadFrom(make([]byte, 1))
++	hRequireClosed(t, err)
++}
++
++func hPacketTimesOut(t *testing.T, conn net.PacketConn) {
++	t.Helper()
++	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Millisecond)))
++	_, _, err := conn.ReadFrom(make([]byte, 1))
++	var timeout net.Error
++	require.True(t, errors.As(err, &timeout) && timeout.Timeout(), "unchanged socket must remain open: %v", err)
++}
++
++func hRequireClosed(t *testing.T, err error) {
++	t.Helper()
++	require.Error(t, err)
++	var timeout net.Error
++	require.False(t, errors.As(err, &timeout) && timeout.Timeout(), "socket must close immediately after its address changes")
++}
+diff --git a/transport/device/stack.go b/transport/device/stack.go
+index 2c3cc6d10c58f526595a7671b62989b3365f12a8..8e62858ced6d7a77bea1d09b89c24ec27c36504a 100644
+--- a/transport/device/stack.go
++++ b/transport/device/stack.go
+@@ -6,7 +6,8 @@ import (
+ 	"net/netip"
+ 	"sync"
+ 
+-	"github.com/sagernet/sing-tun"
++	"github.com/sagernet/sing-box/common/interrupt"
++	tun "github.com/sagernet/sing-tun"
+ 	"github.com/sagernet/sing/common"
+ 	"github.com/sagernet/sing/common/buf"
+ 	E "github.com/sagernet/sing/common/exceptions"
+@@ -24,30 +25,28 @@ type stackDevice struct {
+ 	memoryTun    *tun.MemoryTun
+ 	inet4Address netip.Addr
+ 	inet6Address netip.Addr
++	inet4UDP     interrupt.Group
++	inet6UDP     interrupt.Group
+ 	closeOnce    sync.Once
+ }
+ 
+ func newStackDevice(options Options) (*stackDevice, error) {
+ 	device := &stackDevice{
+-		options: options,
++		packetHeadroom: options.PacketHeadroom,
++		options:        options,
+ 	}
+ 	device.inet4Address, device.inet6Address = firstAddresses(options.Configuration.Address)
+ 	device.memoryTun = tun.NewMemoryTun(tun.MemoryTunOptions{
+ 		MTU:       int(options.MTU),
+-		Headroom:  options.PacketFrontHeadroom,
+-		RearSpace: options.PacketRearHeadroom,
+-		Outbound: func(packetBuffers []*buf.Buffer) {
+-			err := device.writeOutbound(packetBuffers)
+-			if err != nil {
+-				options.Logger.Debug(E.Cause(err, "write packet batch"))
+-			}
++		Headroom:  options.PacketHeadroom,
++		RearSpace: 0, // H: the current MemoryTun has its own inbound rear-space management
++		Outbound: func(packets []*buf.Buffer) { // H: MemoryTun uses an ownership-taking callback without a return value
++			_ = device.writeOutbound(packets)
+ 		},
+-		Route: options.Route,
+ 	})
+ 	var err error
+ 	device.stack, err = newStack(options, device.memoryTun)
+ 	if err != nil {
+-		device.memoryTun.Close()
+ 		return nil, err
+ 	}
+ 	return device, nil
+@@ -65,16 +64,27 @@ func (d *stackDevice) UpdateConfiguration(configuration Configuration) error {
+ 		d.memoryTun.UpdateMTU(int(configuration.MTU))
+ 	}
+ 	d.options.Configuration = configuration
+-	d.inet4Address, d.inet6Address = firstAddresses(configuration.Address)
++	inet4Address, inet6Address := firstAddresses(configuration.Address)
++	if d.inet4Address != inet4Address {
++		d.inet4UDP.Interrupt(true)
++	}
++	if d.inet6Address != inet6Address {
++		d.inet6UDP.Interrupt(true)
++	}
++	d.inet4Address, d.inet6Address = inet4Address, inet6Address
+ 	return nil
+ }
+ 
+-func (d *stackDevice) WriteInboundBuffers(packetBuffers []*buf.Buffer) error {
+-	return d.processInboundBuffers(packetBuffers, d.writeBuffers)
++func (d *stackDevice) WaitWriteInboundBuffers(packetBuffers []*buf.Buffer) error { // H
++	return d.memoryTun.WaitWritePackets(common.Map(packetBuffers, (*buf.Buffer).Bytes))
++}
++
++func (d *stackDevice) NewOutboundQueue(handler func(packetBuffers []*buf.Buffer)) *tun.OutboundQueue { // H
++	return d.memoryTun.NewOutboundQueue(handler)
+ }
+ 
+-func (d *stackDevice) WaitWriteInboundBuffers(packetBuffers []*buf.Buffer) error {
+-	return d.processInboundBuffers(packetBuffers, d.waitWriteBuffers)
++func (d *stackDevice) WriteInboundBuffers(packetBuffers []*buf.Buffer) error {
++	return d.processInboundBuffers(packetBuffers, d.writeBuffers)
+ }
+ 
+ func (d *stackDevice) writeBuffers(packetBuffers []*buf.Buffer) error {
+@@ -82,37 +92,41 @@ func (d *stackDevice) writeBuffers(packetBuffers []*buf.Buffer) error {
+ 	return err
+ }
+ 
+-func (d *stackDevice) waitWriteBuffers(packetBuffers []*buf.Buffer) error {
+-	return d.memoryTun.WaitWritePackets(common.Map(packetBuffers, (*buf.Buffer).Bytes))
+-}
+-
+ func (d *stackDevice) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+-	bind, err := d.bindAddress(destination)
+-	if err != nil {
+-		return nil, err
+-	}
+ 	switch N.NetworkName(network) {
+ 	case N.NetworkTCP:
+-		var tcpConn *tun.GoConn
+-		tcpConn, err = d.stack.DialTCP(ctx, bind, destination.AddrPort())
++		d.stateAccess.RLock()
++		bind, _, err := d.bindAddressLocked(destination)
++		d.stateAccess.RUnlock()
++		if err != nil {
++			return nil, err
++		}
++		tcpConn, err := d.stack.DialTCP(ctx, bind, destination.AddrPort())
+ 		if err != nil {
+ 			return nil, err
+ 		}
+ 		return tcpConn, nil
+ 	case N.NetworkUDP:
+-		var udpConn *tun.GoUDPConn
+-		udpConn, err = d.stack.DialUDP(netip.AddrPortFrom(bind, 0), destination.AddrPort())
++		d.stateAccess.RLock()
++		defer d.stateAccess.RUnlock()
++		bind, udpGroup, err := d.bindAddressLocked(destination)
++		if err != nil {
++			return nil, err
++		}
++		udpConn, err := d.stack.DialUDP(netip.AddrPortFrom(bind, 0), destination.AddrPort())
+ 		if err != nil {
+ 			return nil, err
+ 		}
+-		return udpConn, nil
++		return udpGroup.NewConn(udpConn, false), nil
+ 	default:
+ 		return nil, E.Extend(N.ErrUnknownNetwork, network)
+ 	}
+ }
+ 
+ func (d *stackDevice) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+-	bind, err := d.bindAddress(destination)
++	d.stateAccess.RLock()
++	defer d.stateAccess.RUnlock()
++	bind, udpGroup, err := d.bindAddressLocked(destination)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -120,25 +134,23 @@ func (d *stackDevice) ListenPacket(ctx context.Context, destination M.Socksaddr)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	return udpConn, nil
++	return udpGroup.NewPacketConn(udpConn, false), nil
+ }
+ 
+-func (d *stackDevice) bindAddress(destination M.Socksaddr) (netip.Addr, error) {
+-	d.stateAccess.RLock()
+-	defer d.stateAccess.RUnlock()
++func (d *stackDevice) bindAddressLocked(destination M.Socksaddr) (netip.Addr, *interrupt.Group, error) {
+ 	if destination.IsIPv4() {
+ 		if !d.inet4Address.IsValid() {
+-			return netip.Addr{}, E.New("missing IPv4 local address")
++			return netip.Addr{}, nil, E.New("missing IPv4 local address")
+ 		}
+-		return d.inet4Address, nil
++		return d.inet4Address, &d.inet4UDP, nil
+ 	}
+ 	if d.options.Configuration.BlockIPv6 {
+-		return netip.Addr{}, E.New("IPv6 is blocked")
++		return netip.Addr{}, nil, E.New("IPv6 is blocked")
+ 	}
+ 	if !d.inet6Address.IsValid() {
+-		return netip.Addr{}, E.New("missing IPv6 local address")
++		return netip.Addr{}, nil, E.New("missing IPv6 local address")
+ 	}
+-	return d.inet6Address, nil
++	return d.inet6Address, &d.inet6UDP, nil
+ }
+ 
+ func (d *stackDevice) PortAddresses() (netip.Addr, netip.Addr) {
+@@ -153,14 +165,6 @@ func (d *stackDevice) PortMTU() uint32 {
+ 	return d.options.MTU
+ }
+ 
+-func (d *stackDevice) UpstreamPort() any {
+-	return d.stack
+-}
+-
+-func (d *stackDevice) NewOutboundQueue(handler func(packetBuffers []*buf.Buffer)) *tun.OutboundQueue {
+-	return d.memoryTun.NewOutboundQueue(handler)
+-}
+-
+ func (d *stackDevice) Close() error {
+ 	var err error
+ 	d.closeOnce.Do(func() {
+diff --git a/transport/device/system.go b/transport/device/system.go
+index 815526e991668f9c31667a316603c7c6fb6a81a3..dd80a157c6494131a0aeaadb9cda98bef736ba59 100644
+--- a/transport/device/system.go
++++ b/transport/device/system.go
+@@ -12,7 +12,7 @@ import (
+ 	"github.com/sagernet/sing-box/common/dialer"
+ 	"github.com/sagernet/sing-box/common/kernelports"
+ 	"github.com/sagernet/sing-box/option"
+-	"github.com/sagernet/sing-tun"
++	tun "github.com/sagernet/sing-tun"
+ 	"github.com/sagernet/sing-tun/gtcpip/header"
+ 	"github.com/sagernet/sing/common"
+ 	"github.com/sagernet/sing/common/buf"
+@@ -22,7 +22,10 @@ import (
+ 	"github.com/sagernet/sing/service"
+ )
+ 
+-const systemDeviceReadBufferSize = 65535 + tun.PacketOffset
++const (
++	systemDeviceReadBufferSize  = 65535 + tun.PacketOffset
++	systemDevicePacketRearSpace = 0 // H: legacy fixed rear padding was removed by sing-tun v5
++)
+ 
+ type systemDevice struct {
+ 	baseDevice
+@@ -40,21 +43,21 @@ func newSystemDevice(options Options) (*systemDevice, error) {
+ 	if options.Name == "" {
+ 		options.Name = tun.CalculateInterfaceName(options.NamePrefix)
+ 	}
+-	interfaceDialer, err := dialer.NewDefault(options.Context, option.DialerOptions{
+-		AbstractDialerOptions: option.AbstractDialerOptions{
+-			BindInterface: options.Name,
+-		},
+-	})
++	dialOptions := option.DialerOptions{}
++	dialOptions.AbstractDialerOptions.BindInterface = options.Name
++	interfaceDialer, err := dialer.NewDefault(options.Context, dialOptions)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	inet4Address, inet6Address := firstAddresses(options.Configuration.Address)
+-	return &systemDevice{
++	device := &systemDevice{
+ 		options:      options,
+ 		dialer:       interfaceDialer,
+ 		inet4Address: inet4Address,
+ 		inet6Address: inet6Address,
+-	}, nil
++	}
++	device.baseDevice.packetHeadroom = options.PacketHeadroom
++	return device, nil
+ }
+ 
+ func (d *systemDevice) Start() error {
+@@ -132,11 +135,13 @@ func (d *systemDevice) readLoop(tunInterface tun.Tun, mtu int) {
+ 		d.readLoopDarwin(darwinTUN)
+ 		return
+ 	}
+-	frontHeadroom := d.options.PacketFrontHeadroom
+-	rearHeadroom := d.options.PacketRearHeadroom
+-	readBuffer := make([]byte, systemDeviceReadBufferSize)
++	packetBuffer := buf.NewSize(d.packetHeadroom + systemDeviceReadBufferSize + systemDevicePacketRearSpace)
++	defer packetBuffer.Release()
+ 	for {
+-		readN, err := tunInterface.Read(readBuffer)
++		packetBuffer.Reset()
++		packetBuffer.Resize(d.packetHeadroom, 0)
++		readData := packetBuffer.FreeBytes()[:systemDeviceReadBufferSize] // H
++		readN, err := tunInterface.Read(readData)
+ 		if err != nil {
+ 			if E.IsClosed(err) {
+ 				return
+@@ -147,12 +152,12 @@ func (d *systemDevice) readLoop(tunInterface tun.Tun, mtu int) {
+ 		if readN <= tun.PacketOffset {
+ 			continue
+ 		}
+-		packet := readBuffer[tun.PacketOffset:readN]
++		packet := readData[tun.PacketOffset:readN] // H
+ 		if d.blockIPv6Enabled() && header.IPVersion(packet) == header.IPv6Version {
+ 			continue
+ 		}
+-		packetBuffer := buf.NewSize(frontHeadroom + len(packet) + rearHeadroom)
+-		packetBuffer.Resize(frontHeadroom, 0)
++		packetBuffer := buf.NewSize(d.packetHeadroom + len(packet)) // H
++		packetBuffer.Resize(d.packetHeadroom, 0)                    // H
+ 		common.Must1(packetBuffer.Write(packet))
+ 		err = d.writeOutbound([]*buf.Buffer{packetBuffer})
+ 		if err != nil {
+@@ -162,20 +167,20 @@ func (d *systemDevice) readLoop(tunInterface tun.Tun, mtu int) {
+ }
+ 
+ func (d *systemDevice) readLoopLinux(tunInterface tun.LinuxTUN, batchSize int, mtu int) {
+-	frontHeadroom := d.options.PacketFrontHeadroom
+-	packetSize := frontHeadroom + mtu + d.options.PacketRearHeadroom
++	frontHeadroom := d.options.PacketHeadroom                       // H
++	packetSize := frontHeadroom + mtu + systemDevicePacketRearSpace // H
+ 	packetBuffers := make([]*buf.Buffer, batchSize)
+ 	readBuffers := make([][]byte, batchSize)
+ 	packetSizes := make([]int, batchSize)
+ 	outboundBuffers := make([]*buf.Buffer, 0, batchSize)
+ 	for i := range packetBuffers {
+-		packetBuffers[i] = buf.NewSize(packetSize)
++		packetBuffers[i] = buf.NewSize(d.packetHeadroom + mtu + systemDevicePacketRearSpace)
+ 	}
+ 	defer buf.ReleaseMulti(packetBuffers)
+ 	for {
+ 		for i, packetBuffer := range packetBuffers {
+ 			packetBuffer.Reset()
+-			packetBuffer.Resize(frontHeadroom, 0)
++			packetBuffer.Resize(d.packetHeadroom, 0)
+ 			readBuffers[i] = packetBuffer.FreeBytes()[:mtu]
+ 		}
+ 		packetCount, readErr := tunInterface.BatchRead(readBuffers, 0, packetSizes)
+@@ -207,8 +212,8 @@ func (d *systemDevice) readLoopLinux(tunInterface tun.LinuxTUN, batchSize int, m
+ }
+ 
+ func (d *systemDevice) readLoopDarwin(tunInterface tun.DarwinTUN) {
+-	frontHeadroom := d.options.PacketFrontHeadroom
+-	rearHeadroom := d.options.PacketRearHeadroom
++	frontHeadroom := d.options.PacketHeadroom   // H
++	rearHeadroom := systemDevicePacketRearSpace // H
+ 	for {
+ 		packetBuffers, readErr := tunInterface.BatchRead(frontHeadroom, rearHeadroom)
+ 		outboundBuffers := packetBuffers[:0]
+diff --git a/transport/device/system_stack.go b/transport/device/system_stack.go
+index bcc30d3b8c9889baf885cc29aedfb2d163cf1994..454cee09d1f4acb3edcc1d68ef224b100ace5cb7 100644
+--- a/transport/device/system_stack.go
++++ b/transport/device/system_stack.go
+@@ -3,7 +3,7 @@ package device
+ import (
+ 	"net/netip"
+ 
+-	"github.com/sagernet/sing-tun"
++	tun "github.com/sagernet/sing-tun"
+ 	"github.com/sagernet/sing-tun/gtcpip/header"
+ 	"github.com/sagernet/sing/common/buf"
+ 	E "github.com/sagernet/sing/common/exceptions"
+@@ -54,19 +54,19 @@ func (d *systemStackDevice) UpdateConfiguration(configuration Configuration) err
+ 	return d.stackDevice.UpdateConfiguration(configuration)
+ }
+ 
+-func (d *systemStackDevice) WriteInboundBuffers(packetBuffers []*buf.Buffer) error {
+-	return d.systemDevice.processInboundBuffers(packetBuffers, func(unconsumedBuffers []*buf.Buffer) error {
+-		return d.writeBuffers(unconsumedBuffers, d.stackDevice.writeBuffers)
+-	})
++func (d *systemStackDevice) WaitWriteInboundBuffers(packetBuffers []*buf.Buffer) error { // H
++	return d.WriteInboundBuffers(packetBuffers)
+ }
+ 
+-func (d *systemStackDevice) WaitWriteInboundBuffers(packetBuffers []*buf.Buffer) error {
+-	return d.systemDevice.processInboundBuffers(packetBuffers, func(unconsumedBuffers []*buf.Buffer) error {
+-		return d.writeBuffers(unconsumedBuffers, d.stackDevice.waitWriteBuffers)
+-	})
++func (d *systemStackDevice) NewOutboundQueue(handler func(packetBuffers []*buf.Buffer)) *tun.OutboundQueue { // H
++	return d.stackDevice.NewOutboundQueue(handler)
++}
++
++func (d *systemStackDevice) WriteInboundBuffers(packetBuffers []*buf.Buffer) error {
++	return d.systemDevice.processInboundBuffers(packetBuffers, d.writeBuffers)
+ }
+ 
+-func (d *systemStackDevice) writeBuffers(packetBuffers []*buf.Buffer, writeStackBuffers func(packetBuffers []*buf.Buffer) error) error {
++func (d *systemStackDevice) writeBuffers(packetBuffers []*buf.Buffer) error {
+ 	addresses := d.systemDevice.configurationAddresses()
+ 	runStart := 0
+ 	runUsesSystemDevice := false
+@@ -85,7 +85,7 @@ func (d *systemStackDevice) writeBuffers(packetBuffers []*buf.Buffer, writeStack
+ 			if runUsesSystemDevice {
+ 				err = d.systemDevice.writeBuffers(packetBuffers[runStart:i])
+ 			} else {
+-				err = writeStackBuffers(packetBuffers[runStart:i])
++				err = d.stackDevice.writeBuffers(packetBuffers[runStart:i])
+ 			}
+ 			writeErr = E.Errors(writeErr, err)
+ 			runStart = i
+@@ -100,30 +100,20 @@ func (d *systemStackDevice) writeBuffers(packetBuffers []*buf.Buffer, writeStack
+ 	if runUsesSystemDevice {
+ 		return E.Errors(writeErr, d.systemDevice.writeBuffers(packetBuffers[runStart:]))
+ 	}
+-	return E.Errors(writeErr, writeStackBuffers(packetBuffers[runStart:]))
++	return E.Errors(writeErr, d.stackDevice.writeBuffers(packetBuffers[runStart:]))
+ }
+ 
+ func packetDestination(packet []byte) netip.Addr {
+ 	switch header.IPVersion(packet) {
+ 	case header.IPv4Version:
+-		if len(packet) < header.IPv4MinimumSize {
+-			return netip.Addr{}
+-		}
+ 		return header.IPv4(packet).DestinationAddr()
+ 	case header.IPv6Version:
+-		if len(packet) < header.IPv6MinimumSize {
+-			return netip.Addr{}
+-		}
+ 		return header.IPv6(packet).DestinationAddr()
+ 	default:
+ 		return netip.Addr{}
+ 	}
+ }
+ 
+-func (d *systemStackDevice) NewOutboundQueue(handler func(packetBuffers []*buf.Buffer)) *tun.OutboundQueue {
+-	return d.stackDevice.NewOutboundQueue(handler)
+-}
+-
+ func (d *systemStackDevice) Close() error {
+ 	return E.Errors(d.stackDevice.Close(), d.systemDevice.Close())
+ }

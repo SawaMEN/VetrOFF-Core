@@ -1,0 +1,123 @@
+diff --git a/protocol/trusttunnel/h_trusttunnel_test.go b/protocol/trusttunnel/h_trusttunnel_test.go
+index 96fa13616b21cf9872d63721081a148180c557ea..54d40f06602cb165c8c45cc0da8ac47a8a3b549e 100644
+--- a/protocol/trusttunnel/h_trusttunnel_test.go
++++ b/protocol/trusttunnel/h_trusttunnel_test.go
+@@ -8,7 +8,6 @@ import (
+ 	"crypto/x509"
+ 	"crypto/x509/pkix"
+ 	"encoding/pem"
+-	"github.com/sagernet/sing-box/adapter/htest"
+ 	"io"
+ 	"math/big"
+ 	"net"
+@@ -18,6 +17,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/adapter/htest"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+@@ -26,6 +26,7 @@ import (
+ 	"github.com/sagernet/sing/common/json/badoption"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
++
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+@@ -130,8 +131,8 @@ func TestH_TrustTunnelInboundValidation(t *testing.T) {
+ 	}{
+ 		{"udp without tls", option.TrustTunnelInboundOptions{Users: users}, C.ErrTLSRequired.Error()},
+ 		{"udp with disabled tls", option.TrustTunnelInboundOptions{
+-			Users:                      users,
+-			InboundTLSOptionsContainer: option.InboundTLSOptionsContainer{TLS: &option.InboundTLSOptions{}},
++			Users: users,
++			TLS:   &option.InboundTLSOptions{},
+ 		}, C.ErrTLSRequired.Error()},
+ 		{"no users", option.TrustTunnelInboundOptions{Network: "tcp"}, "missing users"},
+ 		{"empty username", option.TrustTunnelInboundOptions{Network: "tcp", Users: []auth.User{users[0], {Password: "p"}}}, "missing username or password of user 1"},
+@@ -160,7 +161,7 @@ func TestH_TrustTunnelOutboundValidation(t *testing.T) {
+ 		{"no tls", option.TrustTunnelOutboundOptions{ServerOptions: server, Username: "u", Password: "p"}, C.ErrTLSRequired.Error()},
+ 		{"tls disabled", option.TrustTunnelOutboundOptions{
+ 			ServerOptions: server, Username: "u", Password: "p",
+-			OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{TLS: &option.OutboundTLSOptions{}},
++			TLS: &option.OutboundTLSOptions{},
+ 		}, C.ErrTLSRequired.Error()},
+ 		{"no username", option.TrustTunnelOutboundOptions{ServerOptions: server, Password: "p", OutboundTLSOptionsContainer: tlsOn}, "require auth"},
+ 		{"no password", option.TrustTunnelOutboundOptions{ServerOptions: server, Username: "u", OutboundTLSOptionsContainer: tlsOn}, "require auth"},
+@@ -190,16 +191,16 @@ func startTrustTunnelInbound(t *testing.T) *tunnelFixture {
+ 	f := &tunnelFixture{router: newTestRouter(), port: freeTCPPort(t), cert: certPEM}
+ 	listen := badoption.Addr(netip.MustParseAddr("127.0.0.1"))
+ 	in, err := NewInbound(context.Background(), f.router, log.NewNOPFactory().Logger(), "tt-in", option.TrustTunnelInboundOptions{
+-		ListenOptions: option.ListenOptions{Listen: &listen, ListenPort: f.port},
+-		Network:       "tcp",
+-		Users:         []auth.User{{Username: "alice", Password: "secret"}, {Username: "bob", Password: "hunter2"}},
+-		InboundTLSOptionsContainer: option.InboundTLSOptionsContainer{TLS: &option.InboundTLSOptions{
++		Listen: &listen, ListenPort: f.port,
++		Network: "tcp",
++		Users:   []auth.User{{Username: "alice", Password: "secret"}, {Username: "bob", Password: "hunter2"}},
++		TLS: &option.InboundTLSOptions{
+ 			Enabled:     true,
+ 			ServerName:  testServerName,
+ 			ALPN:        []string{"h2"},
+ 			Certificate: []string{certPEM},
+ 			Key:         []string{keyPEM},
+-		}},
++		},
+ 	})
+ 	require.NoError(t, err)
+ 	require.NoError(t, htest.Start(in, adapter.StartStateStart))
+@@ -209,14 +210,14 @@ func startTrustTunnelInbound(t *testing.T) *tunnelFixture {
+ 
+ func (f *tunnelFixture) outbound(t *testing.T, user, password string) adapter.Outbound {
+ 	out, err := NewOutbound(context.Background(), f.router, log.NewNOPFactory().Logger(), "tt-out", option.TrustTunnelOutboundOptions{
+-		ServerOptions: option.ServerOptions{Server: "127.0.0.1", ServerPort: f.port},
+-		Username:      user,
+-		Password:      password,
+-		OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{TLS: &option.OutboundTLSOptions{
++		Server: "127.0.0.1", ServerPort: f.port,
++		Username: user,
++		Password: password,
++		TLS: &option.OutboundTLSOptions{
+ 			Enabled:     true,
+ 			ServerName:  testServerName,
+ 			Certificate: []string{f.cert},
+-		}},
++		},
+ 	})
+ 	require.NoError(t, err)
+ 	t.Cleanup(func() { out.(*Outbound).Close() })
+diff --git a/protocol/trusttunnel/inbound.go b/protocol/trusttunnel/inbound.go
+index c2791b1df3c8d396933b108acc5e849a3c04e566..a7d546d6d9c53b8c104f09a922f64c0be831aa6d 100644
+--- a/protocol/trusttunnel/inbound.go
++++ b/protocol/trusttunnel/inbound.go
+@@ -17,7 +17,7 @@ import (
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
+ 
+-	"github.com/xchacha20-poly1305/sing-trusttunnel"
++	trusttunnel "github.com/xchacha20-poly1305/sing-trusttunnel"
+ )
+ 
+ func RegistryInbound(registry *inbound.Registry) {
+@@ -81,9 +81,6 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+ }
+ 
+ func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) (err error) {
+-	if stage == adapter.StartStateInitialize {
+-		scope.Add(h.Close) // H: closed with the box
+-	}
+ 	if stage != adapter.StartStateStart {
+ 		return
+ 	}
+@@ -117,6 +114,9 @@ func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) (err err
+ 		_ = common.Close(h.tlsConfig, tcpListener, udpConn)
+ 		return
+ 	}
++	if err == nil {
++		scope.Add(h.Close)
++	}
+ 	return
+ }
+ 

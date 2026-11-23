@@ -1,0 +1,660 @@
+diff --git a/transport/call/common/h_http_test.go b/transport/call/common/h_http_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2e588be6e74028693eed0181dad8552131c48a1b
+--- /dev/null
++++ b/transport/call/common/h_http_test.go
+@@ -0,0 +1,19 @@
++package common
++
++import (
++	"testing"
++
++	N "github.com/sagernet/sing/common/network"
++
++	"github.com/stretchr/testify/require"
++)
++
++// A URL taken from a remote page that net/http cannot parse fails the request instead of
++// crashing the app on a nil request.
++func TestH_HttpGetBadURLIsAnError(t *testing.T) {
++	var err error
++	require.NotPanics(t, func() {
++		_, err = HttpGet(N.SystemDialer, "http://2001:db8::1/")
++	})
++	require.Error(t, err)
++}
+diff --git a/transport/call/common/http.go b/transport/call/common/http.go
+index f0d8ffdb036e3cde50bd30d91dbaba5fd1509c94..8a6fddccc79264600afade85217a37ab99571ce2 100644
+--- a/transport/call/common/http.go
++++ b/transport/call/common/http.go
+@@ -89,7 +89,10 @@ func HttpClient(dialer N.Dialer) *http.Client {
+ }
+ 
+ func HttpGet(dialer N.Dialer, endpoint string) ([]byte, error) {
+-	req, _ := http.NewRequest("GET", endpoint, nil)
++	req, err := http.NewRequest("GET", endpoint, nil) // H
++	if err != nil {                                   // H: the URL can come from a scraped page; a nil request crashed the app
++		return nil, err // H
++	} // H
+ 	req.Header.Set("User-Agent", UserAgent)
+ 	resp, err := HttpClient(dialer).Do(req)
+ 	if err != nil {
+diff --git a/transport/call/dion/api.go b/transport/call/dion/api.go
+index 596ef4a7de7c143638f9a4565b636aa5aa8e4b0a..81e120b7cefab061eba2d7280dbf792de1cd3d0d 100644
+--- a/transport/call/dion/api.go
++++ b/transport/call/dion/api.go
+@@ -101,7 +101,6 @@ type Session struct {
+ 	AccessTokenExp time.Time
+ 	UserID         string
+ 	SessionID      string
+-	cookiesPath    string
+ 	email          string
+ 	password       string
+ 	refreshMu      sync.Mutex
+diff --git a/transport/call/telemost/api.go b/transport/call/telemost/api.go
+index 184c6d99de882f73f9b5ecb4ce8cd539ab35c32e..29e722e648adc3676847595bd0d760f203b94b33 100644
+--- a/transport/call/telemost/api.go
++++ b/transport/call/telemost/api.go
+@@ -183,7 +183,6 @@ func MungeSDPAddVideoContent(sdp string) string {
+ 		if strings.HasPrefix(line, "m=") {
+ 			if inVideo && !inserted {
+ 				out = append(out, "a=content:speaker,main")
+-				inserted = true
+ 			}
+ 			inVideo = strings.HasPrefix(line, "m=video")
+ 			inserted = false
+diff --git a/transport/call/telemost/connect.go b/transport/call/telemost/connect.go
+index 01f73adeb84db95d6cdfe50e42ba1da861461a31..5deac3777f1dc9fc9a09ccf3f885c3fc4c23fa6c 100644
+--- a/transport/call/telemost/connect.go
++++ b/transport/call/telemost/connect.go
+@@ -29,7 +29,10 @@ func ConnectCreator(ctx context.Context, cookieStr, joinLink string, readBuf int
+ 	if readBuf <= 0 {
+ 		readBuf = 32768
+ 	}
++	bridgeCtx, cancel := context.WithCancel(context.Background()) // the session outlives the dial
+ 	bridge := &Bridge{
++		ctx:       bridgeCtx,
++		cancel:    cancel,
+ 		connInfo:  connInfo,
+ 		config:    cfg,
+ 		cookieStr: cookieStr,
+@@ -42,11 +45,15 @@ func ConnectCreator(ctx context.Context, cookieStr, joinLink string, readBuf int
+ 	go bridge.Run()
+ 	deadline := time.Now().Add(60 * time.Second)
+ 	for bridge.getActiveBridge() == nil {
++		// a connect that gives up ends the session it started: left running, it kept the call
++		// and joined it again for the rest of the process
+ 		if time.Now().After(deadline) {
++			bridge.Close()
+ 			return nil, "", fmt.Errorf("telemost: creator tunnel timed out")
+ 		}
+ 		select {
+ 		case <-ctx.Done():
++			bridge.Close()
+ 			return nil, "", ctx.Err()
+ 		case <-time.After(200 * time.Millisecond):
+ 		}
+diff --git a/transport/call/telemost/creator.go b/transport/call/telemost/creator.go
+index 7972642aa2372c1dce701eb41e0258e81bbb5d1d..236587fb240b174fd51fc2b32d35c194fe8341d9 100644
+--- a/transport/call/telemost/creator.go
++++ b/transport/call/telemost/creator.go
+@@ -8,6 +8,7 @@ import (
+ 	"net/url"
+ 	"strings"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/transport/call/common"
+@@ -42,9 +43,13 @@ type ConnInfo struct {
+ }
+ 
+ type Bridge struct {
+-	mu           sync.Mutex
+-	ws           *websocket.Conn
+-	relay        *SFURelay
++	mu sync.Mutex
++	ws *websocket.Conn
++	// relay is the WebRTC relay of the current websocket session: made at its serverHello,
++	// closed when the session ends; nil before, and when it could not be made
++	relay        atomic.Pointer[SFURelay]
++	ctx          context.Context // the bridge runs until it is cancelled (Close)
++	cancel       context.CancelFunc
+ 	connInfo     *ConnInfo
+ 	config       TMConfig
+ 	cookieStr    string
+@@ -213,8 +218,22 @@ func (b *Bridge) sendHello() {
+ 	b.logger.Debug("[tm-ws] -> hello")
+ }
+ 
++// session is the relay of the current session, or an error when there is none: the server sent
++// signalling for the relay before its serverHello, or the relay could not be made.
++func (b *Bridge) session() (*SFURelay, error) {
++	if relay := b.relay.Load(); relay != nil {
++		return relay, nil
++	}
++	return nil, errRelayClosed
++}
++
+ func (b *Bridge) sendPubOffer() {
+-	offer, err := b.relay.CreatePubOffer()
++	relay, err := b.session()
++	if err != nil {
++		b.logger.Warn(fmt.Sprintf("[tm-ws] pub offer failed: %v", err))
++		return
++	}
++	offer, err := relay.CreatePubOffer()
+ 	if err != nil {
+ 		b.logger.Warn(fmt.Sprintf("[tm-ws] pub offer failed: %v", err))
+ 		return
+@@ -249,13 +268,18 @@ func (b *Bridge) enableScreenshare() {
+ 	}
+ 	b.shareEnabled = true
+ 	b.logger.Debug("[ss] enabling screenshare: describe DISPLAY_VIDEO -> updateMe -> offer")
+-	if err := b.relay.AddSharingDataChannel(); err != nil {
++	relay, err := b.session()
++	if err != nil {
++		b.logger.Warn(fmt.Sprintf("[ss] enable: %v", err))
++		return
++	}
++	if err := relay.AddSharingDataChannel(); err != nil {
+ 		b.logger.Warn(fmt.Sprintf("[ss] AddSharingDataChannel: %v", err))
+ 		return
+ 	}
+ 	b.wsSend(UpdatePublisherSharingTrackMessage("Screen"))
+ 	b.wsSend(UpdateMeMessage(b.selfName, true, true))
+-	offer, err := b.relay.CreatePubRenegotiate()
++	offer, err := relay.CreatePubRenegotiate()
+ 	if err != nil {
+ 		b.logger.Warn(fmt.Sprintf("[ss] enable renegotiate failed: %v", err))
+ 		return
+@@ -272,8 +296,13 @@ func (b *Bridge) disableScreenshare() {
+ 	b.shareEnabled = false
+ 	b.logger.Debug("[ss] disabling screenshare (peer requested trackCount<2)")
+ 	b.wsSend(UpdateMeMessage(b.selfName, true, false))
+-	b.relay.RemoveSharingDataChannel()
+-	offer, err := b.relay.CreatePubRenegotiate()
++	relay, err := b.session()
++	if err != nil {
++		b.logger.Warn(fmt.Sprintf("[ss] disable: %v", err))
++		return
++	}
++	relay.RemoveSharingDataChannel()
++	offer, err := relay.CreatePubRenegotiate()
+ 	if err != nil {
+ 		b.logger.Warn(fmt.Sprintf("[ss] disable renegotiate failed: %v", err))
+ 		return
+@@ -308,7 +337,11 @@ func (b *Bridge) sendInitBundle() {
+ 	b.initBundleSent = true
+ 	b.logger.Debug("[tm-ws] -> sdkCodecsInfo + updatePublisherTrackDescription")
+ 	b.wsSend(SdkCodecsInfoMessage())
+-	b.wsSend(UpdatePublisherTrackDescriptionMessage(b.relay.pubPC, "Microphone", "MacBook Pro Camera (0000:0001)"))
++	if relay, err := b.session(); err == nil {
++		if description := relay.publisherTrackDescription("Microphone", "MacBook Pro Camera (0000:0001)"); description != nil {
++			b.wsSend(description)
++		}
++	}
+ 	b.sendStartupSlotsRamp()
+ }
+ 
+@@ -334,14 +367,22 @@ func (b *Bridge) handleMessage(raw []byte) {
+ 		b.ack(uid)
+ 		b.logger.Debug("[tm-ws] -> setSlotsOffset")
+ 		b.wsSend(SetSlotsOffsetMessage(0))
+-		b.initRelay()
++		if err := b.initRelay(); err != nil {
++			// the session cannot carry the tunnel: it ends, and Run joins again
++			b.logger.Error(fmt.Sprintf("[relay] %v; joining again", err))
++			b.closeWebSocket()
++		}
+ 		return
+ 	}
+ 	if pa, ok := msg["publisherSdpAnswer"]; ok {
+ 		paMap, _ := pa.(map[string]any)
+ 		sdp, _ := paMap["sdp"].(string)
+ 		b.logger.Debug(fmt.Sprintf("[tm-ws] <- publisherSdpAnswer %d bytes", len(sdp)))
+-		if err := b.relay.SetPubAnswer(sdp); err != nil {
++		relay, err := b.session()
++		if err == nil {
++			err = relay.SetPubAnswer(sdp)
++		}
++		if err != nil {
+ 			b.logger.Warn(fmt.Sprintf("[tm-ws]    error: %v", err))
+ 			return
+ 		}
+@@ -355,7 +396,12 @@ func (b *Bridge) handleMessage(raw []byte) {
+ 		b.subSeq = int(pcSeq)
+ 		b.logger.Debug(fmt.Sprintf("[tm-ws] <- subscriberSdpOffer pcSeq=%d", b.subSeq))
+ 		b.ack(uid)
+-		answer, err := b.relay.SetSubOffer(sdp)
++		relay, err := b.session()
++		if err != nil {
++			b.logger.Warn(fmt.Sprintf("[tm-ws]    error: %v", err))
++			return
++		}
++		answer, err := relay.SetSubOffer(sdp)
+ 		if err != nil {
+ 			b.logger.Warn(fmt.Sprintf("[tm-ws]    error: %v", err))
+ 			return
+@@ -376,10 +422,12 @@ func (b *Bridge) handleMessage(raw []byte) {
+ 		sdpIdx, _ := icMap["sdpMlineIndex"].(float64)
+ 		idx := uint16(sdpIdx)
+ 		cand := webrtc.ICECandidateInit{Candidate: candidate, SDPMid: &sdpMid, SDPMLineIndex: &idx}
+-		if target == "PUBLISHER" {
+-			b.relay.AddPubICECandidate(cand)
++		if relay, err := b.session(); err != nil {
++			b.logger.Warn(fmt.Sprintf("[tm-ws] ICE candidate: %v", err))
++		} else if target == "PUBLISHER" {
++			relay.AddPubICECandidate(cand)
+ 		} else {
+-			b.relay.AddSubICECandidate(cand)
++			relay.AddSubICECandidate(cand)
+ 		}
+ 		b.ack(uid)
+ 		return
+@@ -718,9 +766,12 @@ func (b *Bridge) pollAndAdmit() {
+ 		nil, b.cookieStr, b.config)
+ }
+ 
+-func (b *Bridge) initRelay() {
+-	if b.relay != nil {
+-		b.relay.Close()
++// initRelay makes the relay of a new session. On failure there is none, and the session cannot
++// carry the tunnel: before, the failure was only logged and the next signalling message called
++// into the missing (or the previous, closed) relay and crashed the process.
++func (b *Bridge) initRelay() error {
++	if previous := b.relay.Swap(nil); previous != nil {
++		previous.Close()
+ 	}
+ 	b.pubSeq = 1
+ 	b.subSeq = 0
+@@ -729,8 +780,7 @@ func (b *Bridge) initRelay() {
+ 	relay.readBufSize = b.readBuf
+ 	obf, err := tunnel.NewTunnelObfuscator(tunnel.DeriveSecretFromJoinLink(b.connInfo.ConferenceURI))
+ 	if err != nil {
+-		b.logger.Error(fmt.Sprintf("[relay] obfuscator init failed: %v", err)) // Fatal would exit the whole process
+-		return
++		return fmt.Errorf("obfuscator init failed: %w", err)
+ 	}
+ 	relay.SetObfuscator(obf)
+ 	b.logger.Debug(fmt.Sprintf("[relay] obfuscator localEpoch=0x%08x", obf.LocalEpoch()))
+@@ -775,10 +825,36 @@ func (b *Bridge) initRelay() {
+ 		b.sendICE(cand, "SUBSCRIBER", b.subSeq)
+ 	}
+ 	if err := relay.Init(b.connInfo.ICEServers); err != nil {
+-		b.logger.Error(fmt.Sprintf("[relay] init failed: %v", err)) // Fatal would exit the whole process
+-		return
++		relay.Close() // what Init made before it failed
++		return fmt.Errorf("init failed: %w", err)
++	}
++	b.relay.Store(relay)
++	return nil
++}
++
++// closeWebSocket ends the current session: Run reads the close and joins again.
++func (b *Bridge) closeWebSocket() {
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	if b.ws != nil {
++		b.ws.Close()
++	}
++}
++
++// Close ends the bridge: the call session, its relay and the joining loop.
++func (b *Bridge) Close() {
++	b.cancel()
++	b.closeWebSocket()
++}
++
++// sleep waits d, or until the bridge is closed; false when it is.
++func (b *Bridge) sleep(d time.Duration) bool {
++	select {
++	case <-b.ctx.Done():
++		return false
++	case <-time.After(d):
++		return true
+ 	}
+-	b.relay = relay
+ }
+ 
+ func (b *Bridge) Run() {
+@@ -789,15 +865,25 @@ func (b *Bridge) Run() {
+ 			return b.dialer.DialContext(ctx, network, M.ParseSocksaddr(addr))
+ 		},
+ 	})
+-	for {
++	defer func() {
++		if relay := b.relay.Swap(nil); relay != nil {
++			relay.Close()
++		}
++	}()
++	for b.ctx.Err() == nil {
+ 		b.logger.Debug("[tm-ws] Connecting...")
+-		ws, _, err := wsDialer.Dial(b.connInfo.MediaServerURL, wsHeader)
++		ws, _, err := wsDialer.DialContext(b.ctx, b.connInfo.MediaServerURL, wsHeader)
+ 		if err != nil {
+ 			b.logger.Warn(fmt.Sprintf("[tm-ws] Connect failed: %s, retrying in 5s...", common.MaskError(err)))
+-			time.Sleep(5 * time.Second)
++			b.sleep(5 * time.Second)
+ 			continue
+ 		}
+ 		b.mu.Lock()
++		if b.ctx.Err() != nil { // closed while it connected
++			b.mu.Unlock()
++			ws.Close()
++			return
++		}
+ 		b.ws = ws
+ 		b.mu.Unlock()
+ 		b.logger.Debug("[tm-ws] Connected")
+@@ -865,12 +951,18 @@ func (b *Bridge) Run() {
+ 		b.mu.Lock()
+ 		b.ws = nil
+ 		b.mu.Unlock()
++		// the relay was this session's: the next one makes its own at its serverHello
++		if relay := b.relay.Swap(nil); relay != nil {
++			relay.Close()
++		}
+ 		b.logger.Debug("[tm-ws] Rejoining in 3s...")
+-		time.Sleep(3 * time.Second)
++		if !b.sleep(3 * time.Second) {
++			return
++		}
+ 		newConn, err := getConnection(b.dialer, b.cookieStr, url.QueryEscape(b.connInfo.ConferenceURI), b.config)
+ 		if err != nil {
+ 			b.logger.Warn(fmt.Sprintf("[rejoin] Failed: %v, retrying in 5s...", err))
+-			time.Sleep(5 * time.Second)
++			b.sleep(5 * time.Second)
+ 			continue
+ 		}
+ 		if oldPid := b.connInfo.PeerID; oldPid != "" && oldPid != newConn.PeerID {
+diff --git a/transport/call/telemost/h_relay_test.go b/transport/call/telemost/h_relay_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1fad329a003b30ddcb58a4997f00a15a5c42cc89
+--- /dev/null
++++ b/transport/call/telemost/h_relay_test.go
+@@ -0,0 +1,76 @@
++package telemost
++
++import (
++	"context"
++	"encoding/json"
++	"testing"
++
++	"github.com/sagernet/sing/common/logger"
++
++	"github.com/kulikov0/headless-client/webrtc"
++	"github.com/stretchr/testify/require"
++)
++
++func hBridge(t *testing.T, iceServers []webrtc.ICEServer) *Bridge {
++	ctx, cancel := context.WithCancel(context.Background())
++	t.Cleanup(cancel)
++	return &Bridge{
++		ctx:      ctx,
++		cancel:   cancel,
++		connInfo: &ConnInfo{ConferenceURI: "https://telemost.yandex.ru/j/1", ICEServers: iceServers},
++		peers:    make(map[string]string),
++		seenPids: make(map[string]bool),
++		logger:   logger.NOP(),
++	}
++}
++
++func hMessage(t *testing.T, message map[string]any) []byte {
++	raw, err := json.Marshal(message)
++	require.NoError(t, err)
++	return raw
++}
++
++// A closed relay answers with an error: its peer connections are gone, and the session's
++// signalling went on calling into them and crashed the process.
++func TestH_ClosedRelayAnswersAnError(t *testing.T) {
++	relay := NewSFURelay(logger.NOP())
++	require.NoError(t, relay.Init(nil))
++	relay.Close()
++	relay.Close()
++	_, err := relay.SetSubOffer("v=0")
++	require.ErrorIs(t, err, errRelayClosed)
++	require.ErrorIs(t, relay.SetPubAnswer("v=0"), errRelayClosed)
++	_, err = relay.CreatePubOffer()
++	require.ErrorIs(t, err, errRelayClosed)
++	relay.AddPubICECandidate(webrtc.ICECandidateInit{Candidate: "candidate:1"})
++	relay.RemoveSharingDataChannel()
++}
++
++// A relay that cannot be made leaves the session without one, and the signalling for it is
++// refused: before, the failure was only logged and the next message crashed the process on the
++// missing relay.
++func TestH_SignallingWithoutARelayIsRefused(t *testing.T) {
++	bridge := hBridge(t, []webrtc.ICEServer{{URLs: []string{"not-an-ice-url"}}})
++	require.Error(t, bridge.initRelay())
++	_, err := bridge.session()
++	require.Error(t, err)
++
++	bridge.handleMessage(hMessage(t, map[string]any{"uid": "1", "subscriberSdpOffer": map[string]any{"sdp": "v=0", "pcSeq": 1}}))
++	bridge.handleMessage(hMessage(t, map[string]any{"uid": "2", "publisherSdpAnswer": map[string]any{"sdp": "v=0"}}))
++	bridge.handleMessage(hMessage(t, map[string]any{"uid": "3", "webrtcIceCandidate": map[string]any{"candidate": "candidate:1", "target": "PUBLISHER"}}))
++	bridge.enableScreenshare()
++	bridge.disableScreenshare()
++}
++
++// A connect that gives up ends the session it started.
++func TestH_ClosedBridgeStopsJoining(t *testing.T) {
++	bridge := hBridge(t, nil)
++	bridge.connInfo.MediaServerURL = "wss://127.0.0.1:1/ws"
++	done := make(chan struct{})
++	go func() {
++		bridge.Run()
++		close(done)
++	}()
++	bridge.Close()
++	<-done
++}
+diff --git a/transport/call/telemost/relay.go b/transport/call/telemost/relay.go
+index b9f97dcbbd0c99f6cc419971bcb1fad684649913..7c184e5c6df01e4a7b82f8d95cc6498f95e26c63 100644
+--- a/transport/call/telemost/relay.go
++++ b/transport/call/telemost/relay.go
+@@ -1,6 +1,7 @@
+ package telemost
+ 
+ import (
++	"errors"
+ 	"fmt"
+ 	"sync"
+ 
+@@ -47,8 +48,14 @@ type SFURelay struct {
+ 
+ 	readBufSize int
+ 	tunFired    bool
++	// closed: a closed relay answers its calls with errRelayClosed. Its peer connections are
++	// gone (nil), and the signalling of the Telemost session, which goes on after a failure or a
++	// rejoin, called into them and crashed the process.
++	closed bool
+ }
+ 
++var errRelayClosed = errors.New("relay closed")
++
+ type sharingDCSink struct {
+ 	dc         *webrtc.DataChannel
+ 	mu         sync.Mutex
+@@ -90,6 +97,11 @@ func (s *sharingDCSink) sendFrame(frame []byte) error {
+ }
+ 
+ func (r *SFURelay) AddSharingDataChannel() error {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if r.closed {
++		return errRelayClosed
++	}
+ 	if r.pubPC == nil {
+ 		return fmt.Errorf("pub PC nil")
+ 	}
+@@ -127,6 +139,11 @@ func (r *SFURelay) AddSharingDataChannel() error {
+ }
+ 
+ func (r *SFURelay) RemoveSharingDataChannel() {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if r.closed {
++		return
++	}
+ 	if r.mt != nil {
+ 		r.mt.RemoveLastSubTunnel()
+ 	}
+@@ -163,15 +180,19 @@ func (r *SFURelay) Init(iceServers []webrtc.ICEServer) error {
+ 	pubPC.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+ 		r.logger.Debug(fmt.Sprintf("[pub] connection state: %s", state.String()))
+ 		if state == webrtc.PeerConnectionStateConnected {
+-			if r.tun == nil {
++			r.mu.Lock()
++			closed := r.closed
++			if !closed && r.tun == nil {
+ 				r.logger.Debug("[relay] starting VP8 publish tunnel on pub PC connected")
+ 				r.tun = rtc.NewVP8DataTunnel(r.sampleTrack, r.obf, r.logger)
+ 				r.tun.Start(0, 0)
+ 				r.tunFired = false
+ 				r.mt = rtc.NewMultiTrackTunnel([]*rtc.VP8DataTunnel{r.tun})
+-				r.mt.SetOnData(func(payload []byte) { r.activate(r.mt, payload) })
++				mt := r.mt
++				mt.SetOnData(func(payload []byte) { r.activate(mt, payload) })
+ 			}
+-			if r.OnPubReady != nil {
++			r.mu.Unlock()
++			if !closed && r.OnPubReady != nil {
+ 				r.OnPubReady()
+ 			}
+ 		}
+@@ -247,6 +268,11 @@ func (r *SFURelay) resetForNewPeer() {
+ }
+ 
+ func (r *SFURelay) CreatePubOffer() (webrtc.SessionDescription, error) {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if r.closed {
++		return webrtc.SessionDescription{}, errRelayClosed
++	}
+ 	offer, err := r.pubPC.CreateOffer(nil)
+ 	if err != nil {
+ 		return offer, err
+@@ -261,6 +287,9 @@ func (r *SFURelay) CreatePubOffer() (webrtc.SessionDescription, error) {
+ func (r *SFURelay) SetPubAnswer(sdp string) error {
+ 	r.mu.Lock()
+ 	defer r.mu.Unlock()
++	if r.closed {
++		return errRelayClosed
++	}
+ 	err := r.pubPC.SetRemoteDescription(webrtc.SessionDescription{
+ 		Type: webrtc.SDPTypeAnswer, SDP: sdp,
+ 	})
+@@ -278,6 +307,9 @@ func (r *SFURelay) SetPubAnswer(sdp string) error {
+ func (r *SFURelay) SetSubOffer(sdp string) (webrtc.SessionDescription, error) {
+ 	r.mu.Lock()
+ 	defer r.mu.Unlock()
++	if r.closed {
++		return webrtc.SessionDescription{}, errRelayClosed
++	}
+ 	err := r.subPC.SetRemoteDescription(webrtc.SessionDescription{
+ 		Type: webrtc.SDPTypeOffer, SDP: sdp,
+ 	})
+@@ -300,6 +332,9 @@ func (r *SFURelay) SetSubOffer(sdp string) (webrtc.SessionDescription, error) {
+ func (r *SFURelay) AddPubICECandidate(cand webrtc.ICECandidateInit) {
+ 	r.mu.Lock()
+ 	defer r.mu.Unlock()
++	if r.closed {
++		return
++	}
+ 	if !r.pubRemoteSet {
+ 		r.pubPending = append(r.pubPending, cand)
+ 		return
+@@ -310,6 +345,9 @@ func (r *SFURelay) AddPubICECandidate(cand webrtc.ICECandidateInit) {
+ func (r *SFURelay) AddSubICECandidate(cand webrtc.ICECandidateInit) {
+ 	r.mu.Lock()
+ 	defer r.mu.Unlock()
++	if r.closed {
++		return
++	}
+ 	if !r.subRemoteSet {
+ 		r.subPending = append(r.subPending, cand)
+ 		return
+@@ -318,6 +356,11 @@ func (r *SFURelay) AddSubICECandidate(cand webrtc.ICECandidateInit) {
+ }
+ 
+ func (r *SFURelay) CreatePubRenegotiate() (webrtc.SessionDescription, error) {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if r.closed {
++		return webrtc.SessionDescription{}, errRelayClosed
++	}
+ 	offer, err := r.pubPC.CreateOffer(&webrtc.OfferOptions{ICERestart: false})
+ 	if err != nil {
+ 		return offer, err
+@@ -327,26 +370,42 @@ func (r *SFURelay) CreatePubRenegotiate() (webrtc.SessionDescription, error) {
+ 		return offer, err
+ 	}
+ 	offer.SDP = MungeSDPAddVideoContent(offer.SDP)
+-	r.mu.Lock()
+ 	r.pubRemoteSet = false
+ 	r.pubPending = nil
+-	r.mu.Unlock()
+ 	return offer, nil
+ }
+ 
++// Close stops the relay; it can be called more than once. The peer connections are closed
++// outside the lock: their callbacks take it.
+ func (r *SFURelay) Close() {
+-	if r.tun != nil {
+-		r.tun.Stop()
+-		r.tun = nil
++	r.mu.Lock()
++	if r.closed {
++		r.mu.Unlock()
++		return
+ 	}
+-	if r.pubPC != nil {
+-		r.pubPC.Close()
+-		r.pubPC = nil
++	r.closed = true
++	tun, pubPC, subPC := r.tun, r.pubPC, r.subPC
++	r.tun, r.pubPC, r.subPC = nil, nil, nil
++	r.mu.Unlock()
++	if tun != nil {
++		tun.Stop()
++	}
++	if pubPC != nil {
++		pubPC.Close()
++	}
++	if subPC != nil {
++		subPC.Close()
+ 	}
+-	if r.subPC != nil {
+-		r.subPC.Close()
+-		r.subPC = nil
++}
++
++// publisherTrackDescription is the publisher's track description message, nil once closed.
++func (r *SFURelay) publisherTrackDescription(audio, video string) any {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if r.closed {
++		return nil
+ 	}
++	return UpdatePublisherTrackDescriptionMessage(r.pubPC, audio, video)
+ }
+ 
+ func (r *SFURelay) readTrack(track *webrtc.TrackRemote) {
+diff --git a/transport/call/vk/vk_auth.go b/transport/call/vk/vk_auth.go
+index 029bed0d3f801e9439344a032210955aebf3ed18..1ee660dbc7cb72e33f5401627d6a8227f36769d3 100644
+--- a/transport/call/vk/vk_auth.go
++++ b/transport/call/vk/vk_auth.go
+@@ -35,7 +35,10 @@ type vkCaptchaError struct {
+ func RunVKAuth(dialer N.Dialer, joinLink, displayName string, logger logger.ContextLogger) (string, error) {
+ 	client := common.HttpClient(dialer)
+ 	httpPost := func(targetURL string, form url.Values, extraHeaders map[string]string) (map[string]any, error) {
+-		req, _ := http.NewRequest("POST", targetURL, strings.NewReader(form.Encode()))
++		req, err := http.NewRequest("POST", targetURL, strings.NewReader(form.Encode())) // H
++		if err != nil {                                                                  // H: the URL can come from VK's reply; a nil request crashed the app
++			return nil, err // H
++		} // H
+ 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+ 		req.Header.Set("User-Agent", headless.ChromeWindows.UserAgent())
+ 		req.Header.Set("Origin", "https://vk.ru")

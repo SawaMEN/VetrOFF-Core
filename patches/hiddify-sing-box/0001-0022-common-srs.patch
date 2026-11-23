@@ -1,0 +1,165 @@
+diff --git a/common/srs/binary.go b/common/srs/binary.go
+index 7c7e3d924d805b0c1b125f31a281bfe73960ff9f..3e7dd3993f2cf6a5189f5ee5e02ad2ad19ec92e6 100644
+--- a/common/srs/binary.go
++++ b/common/srs/binary.go
+@@ -6,7 +6,6 @@ import (
+ 	"encoding/binary"
+ 	"io"
+ 	"net/netip"
+-	"slices"
+ 
+ 	"github.com/sagernet/sing-box/common/ipset"
+ 	C "github.com/sagernet/sing-box/constant"
+@@ -219,8 +218,8 @@ func readDefaultRule(reader varbin.Reader, recover bool, mmap *mmapReader) (rule
+ 				return
+ 			}
+ 			if recover {
+-				rule.SourceIPCIDR = common.Map(rule.SourceIPSet.Prefixes(), func(it netip.Prefix) *badoption.Prefixable {
+-					return common.Ptr(badoption.Prefixable(it))
++				rule.SourceIPCIDR = common.Map(rule.SourceIPSet.Prefixes(), func(it netip.Prefix) string {
++					return it.String()
+ 				})
+ 			}
+ 		case ruleItemIPCIDR:
+@@ -233,8 +232,8 @@ func readDefaultRule(reader varbin.Reader, recover bool, mmap *mmapReader) (rule
+ 				return
+ 			}
+ 			if recover {
+-				rule.IPCIDR = common.Map(rule.IPSet.Prefixes(), func(it netip.Prefix) *badoption.Prefixable {
+-					return common.Ptr(badoption.Prefixable(it))
++				rule.IPCIDR = common.Map(rule.IPSet.Prefixes(), func(it netip.Prefix) string {
++					return it.String()
+ 				})
+ 			}
+ 		case ruleItemSourcePort:
+@@ -304,7 +303,7 @@ func readDefaultRule(reader varbin.Reader, recover bool, mmap *mmapReader) (rule
+ 					if err != nil {
+ 						return
+ 					}
+-					value = append(value, common.Ptr(badoption.Prefixable(prefix)))
++					value = append(value, new(badoption.Prefixable(prefix)))
+ 				}
+ 				rule.NetworkInterfaceAddress.Put(option.InterfaceType(key), value)
+ 			}
+@@ -321,7 +320,7 @@ func readDefaultRule(reader varbin.Reader, recover bool, mmap *mmapReader) (rule
+ 				if err != nil {
+ 					return
+ 				}
+-				value = append(value, common.Ptr(badoption.Prefixable(prefix)))
++				value = append(value, new(badoption.Prefixable(prefix)))
+ 			}
+ 			rule.DefaultInterfaceAddress = value
+ 		case ruleItemFinal:
+@@ -357,12 +356,6 @@ func writeDefaultRule(writer varbin.Writer, rule option.DefaultHeadlessRule, gen
+ 		}
+ 	}
+ 	if len(rule.Domain) > 0 || len(rule.DomainSuffix) > 0 || mmap != nil && rule.DomainMatcher != nil {
+-		if slices.Contains(rule.Domain, "") {
+-			return E.New("domain: empty item is not allowed")
+-		}
+-		if slices.Contains(rule.DomainSuffix, "") {
+-			return E.New("domain_suffix: empty item is not allowed")
+-		}
+ 		err = binary.Write(writer, binary.BigEndian, ruleItemDomain)
+ 		if err != nil {
+ 			return err
+@@ -679,12 +672,22 @@ func writeRuleItemUint16(writer varbin.Writer, itemType uint8, value []uint16) e
+ 	return varbin.Write(writer, binary.BigEndian, value)
+ }
+ 
+-func writeRuleItemCIDR(writer varbin.Writer, itemType uint8, value []*badoption.Prefixable, rawSet *ipset.Set, mmap *mmapWriter) error {
++func writeRuleItemCIDR(writer varbin.Writer, itemType uint8, value []string, rawSet *ipset.Set, mmap *mmapWriter) error {
+ 	set := rawSet
+ 	if len(value) > 0 {
+ 		var builder netipx.IPSetBuilder
+-		for _, prefixable := range value {
+-			builder.AddPrefix(prefixable.Build(netip.Prefix{}))
++		for i, prefixString := range value {
++			prefix, err := netip.ParsePrefix(prefixString)
++			if err == nil {
++				builder.AddPrefix(prefix)
++				continue
++			}
++			addr, addrErr := netip.ParseAddr(prefixString)
++			if addrErr == nil {
++				builder.Add(addr)
++				continue
++			}
++			return E.Cause(err, "parse [", i, "]")
+ 		}
+ 		ipSet, err := builder.IPSet()
+ 		if err != nil {
+diff --git a/common/srs/h_recover_cidr_test.go b/common/srs/h_recover_cidr_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b4496ab89b9cfc06add3ddca0290de3f63be315d
+--- /dev/null
++++ b/common/srs/h_recover_cidr_test.go
+@@ -0,0 +1,34 @@
++package srs
++
++import (
++	"bytes"
++	"testing"
++
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/option"
++
++	"github.com/stretchr/testify/require"
++)
++
++// A recovered binary rule set must use the source JSON field types, not
++// internal prefix pointer types. Both source and destination CIDRs round-trip.
++func TestH_RecoverCIDRFields(t *testing.T) {
++	original := option.PlainRuleSet{
++		Rules: []option.HeadlessRule{{
++			Type: C.RuleTypeDefault,
++			DefaultOptions: option.DefaultHeadlessRule{
++				SourceIPCIDR: []string{"192.0.2.0/24"},
++				IPCIDR:       []string{"2001:db8::/32"},
++			},
++		}},
++	}
++	var data bytes.Buffer
++	require.NoError(t, Write(&data, original, C.RuleSetVersionCurrent))
++
++	recovered, err := Read(bytes.NewReader(data.Bytes()), true)
++	require.NoError(t, err)
++	require.Len(t, recovered.Options.Rules, 1)
++	rule := recovered.Options.Rules[0].DefaultOptions
++	require.Equal(t, []string{"192.0.2.0/24"}, []string(rule.SourceIPCIDR))
++	require.Equal(t, []string{"2001:db8::/32"}, []string(rule.IPCIDR))
++}
+diff --git a/common/srs/mmap_test.go b/common/srs/mmap_test.go
+index 04340ef6f79e9c54196b477e72234e9b5be106c4..f18f6cd0cc63acad3fc8ff62bf633623c28aca09 100644
+--- a/common/srs/mmap_test.go
++++ b/common/srs/mmap_test.go
+@@ -12,7 +12,6 @@ import (
+ 
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/option"
+-	"github.com/sagernet/sing/common"
+ 	"github.com/sagernet/sing/common/json/badoption"
+ 
+ 	"github.com/stretchr/testify/require"
+@@ -26,11 +25,7 @@ func TestMmapMatchesSource(t *testing.T) {
+ 			DefaultOptions: option.DefaultHeadlessRule{
+ 				Domain:       badoption.Listable[string]{"example.com"},
+ 				DomainSuffix: badoption.Listable[string]{".example.org"},
+-				IPCIDR: badoption.Listable[*badoption.Prefixable]{
+-					common.Ptr(badoption.Prefixable(netip.MustParsePrefix("10.0.0.0/8"))),
+-					common.Ptr(badoption.Prefixable(netip.MustParsePrefix("2001:db8::/32"))),
+-					common.Ptr(badoption.Prefixable(netip.MustParsePrefix("192.0.2.1/32"))),
+-				},
++				IPCIDR:       badoption.Listable[string]{"10.0.0.0/8", "2001:db8::/32", "192.0.2.1"},
+ 			},
+ 		},
+ 		{
+@@ -41,7 +36,7 @@ func TestMmapMatchesSource(t *testing.T) {
+ 					Type: C.RuleTypeDefault,
+ 					DefaultOptions: option.DefaultHeadlessRule{
+ 						AdGuardDomain: badoption.Listable[string]{"||ads.example.net^"},
+-						SourceIPCIDR:  badoption.Listable[*badoption.Prefixable]{common.Ptr(badoption.Prefixable(netip.MustParsePrefix("172.16.0.0/12")))},
++						SourceIPCIDR:  badoption.Listable[string]{"172.16.0.0/12"},
+ 					},
+ 				}},
+ 			},

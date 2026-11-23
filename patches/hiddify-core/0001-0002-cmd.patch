@@ -1,0 +1,208 @@
+diff --git a/cmd/android-root/main.go b/cmd/android-root/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..85fbf814adf8abcdeb7413697266feb85fd927b9
+--- /dev/null
++++ b/cmd/android-root/main.go
+@@ -0,0 +1,85 @@
++// Android root companion: no Android VpnService or Java platform callback.
++package main
++
++import (
++	"encoding/json"
++	"fmt"
++	"io"
++	"os"
++	"os/signal"
++	"path/filepath"
++	"syscall"
++	"time"
++
++	"github.com/hiddify/hiddify-core/v2/config"
++	"github.com/hiddify/hiddify-core/v2/hcore"
++	"github.com/sagernet/sing-box/experimental/libbox"
++)
++
++type envelope struct {
++	Base               string          `json:"base"`
++	Port               int             `json:"port"`
++	Secret             string          `json:"secret"`
++	Options            json.RawMessage `json:"options"`
++	Config             string          `json:"config"`
++	AutoStart          bool            `json:"autoStart"`
++	Name               string          `json:"name"`
++	Debug              bool            `json:"debug"`
++	DisableMemoryLimit bool            `json:"disableMemoryLimit"`
++}
++
++func run() error {
++	if os.Getuid() != 0 {
++		return fmt.Errorf("root permission required")
++	}
++	if len(os.Args) != 2 {
++		return fmt.Errorf("expected private configuration file")
++	}
++	content, err := os.ReadFile(os.Args[1])
++	if err != nil {
++		return err
++	}
++	var args envelope
++	if err = json.Unmarshal(content, &args); err != nil {
++		return err
++	}
++	if args.Port < 1 || args.Port > 65535 || len(args.Secret) < 32 || !filepath.IsAbs(args.Base) {
++		return fmt.Errorf("invalid root configuration")
++	}
++	if err = hcore.Setup(&hcore.SetupRequest{BasePath: args.Base, WorkingDir: args.Base, TempDir: filepath.Join(args.Base, "tmp"), Mode: hcore.SetupMode_GRPC_BACKGROUND_INSECURE, Listen: fmt.Sprintf("127.0.0.1:%d", args.Port), Secret: args.Secret, Debug: args.Debug}, nil); err != nil {
++		return err
++	}
++	defer hcore.Close(hcore.SetupMode_GRPC_BACKGROUND_INSECURE)
++	if err = config.SetNetworkPrivacyPolicyJSON(string(args.Options)); err != nil {
++		return err
++	}
++	if _, err = hcore.ChangeHiddifySettings(&hcore.ChangeHiddifySettingsRequest{HiddifySettingsJson: string(args.Options)}, false); err != nil {
++		return err
++	}
++	if args.AutoStart {
++		if _, err = hcore.StartService(libbox.BaseContext(nil), &hcore.StartRequest{ConfigPath: args.Config, ConfigName: args.Name, DisableMemoryLimit: args.DisableMemoryLimit}); err != nil {
++			return err
++		}
++	}
++	// The app owns stdin. EOF (including an app crash) triggers normal sing-tun route cleanup.
++	lostParent := make(chan struct{})
++	go func() { io.Copy(io.Discard, os.Stdin); close(lostParent) }()
++	signals := make(chan os.Signal, 1)
++	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
++	defer signal.Stop(signals)
++	fmt.Println("HC_ROOT_READY")
++	select {
++	case <-lostParent:
++	case <-signals:
++	}
++	// Bound graceful shutdown even if a native transport never returns.
++	time.AfterFunc(10*time.Second, func() { os.Exit(1) })
++	_, err = hcore.Stop()
++	return err
++}
++func main() {
++	if err := run(); err != nil {
++		fmt.Fprintln(os.Stderr, err)
++		os.Exit(1)
++	}
++}
+diff --git a/cmd/cmd_admin_bgservice.go b/cmd/cmd_admin_bgservice.go
+index ac64b776e82a7f16618d0147faf6ecbd9d5d4765..42c6300aab307f27681e2d31d995073dde4f685a 100644
+--- a/cmd/cmd_admin_bgservice.go
++++ b/cmd/cmd_admin_bgservice.go
+@@ -30,7 +30,6 @@ var commandService = &cobra.Command{
+ 			adminbgservice.ActivateAdminBgService(&adminbgservice.AdminBgStartRequest{
+ 				Ipv6:       true,
+ 				ServerPort: 12334,
+-				Stack:      "gvisor",
+ 			})
+ 			<-time.After(1 * time.Second)
+ 		case "deactivate":
+diff --git a/cmd/cmd_config_parse.go b/cmd/cmd_config_parse.go
+index 01642c703d42ee0fb4468de07b1cc88dbd99aeba..befa716fe7ecc9d72395bcb0798a9adf0796e5a3 100644
+--- a/cmd/cmd_config_parse.go
++++ b/cmd/cmd_config_parse.go
+@@ -99,6 +99,20 @@ func parseToXray(path string) ([]byte, error) {
+ 	return pretty.Bytes(), nil
+ }
+ 
++// shareLinksToXray converts plain share links with libxray, which returns the outbounds as JSON
++// ({"outbounds": [...]}) since v1.261031.0; the empty key is for links that are not Age-encrypted.
++func shareLinksToXray(text string) (*conf.Config, error) {
++	raw, err := share.ConvertShareLinksToXrayJson(text, "")
++	if err != nil {
++		return nil, err
++	}
++	cfg := &conf.Config{}
++	if err := json.Unmarshal(raw, cfg); err != nil {
++		return nil, err
++	}
++	return cfg, nil
++}
++
+ // Share links are converted one by one, working around three things libxray gets wrong:
+ //   - it reads HTML-escaped links ("&amp;" between the parameters, as some subscriptions write them) as
+ //     parameters named "amp;pbk", and so on. "&amp;" is turned back into "&", as ray2sing does;
+@@ -115,7 +129,7 @@ func convertShareLinksToXray(text string) (*conf.Config, error) {
+ 		}
+ 	}
+ 	if !strings.Contains(text, "://") {
+-		return share.ConvertShareLinksToXrayJson(text)
++		return shareLinksToXray(text)
+ 	}
+ 	var result *conf.Config
+ 	var lastErr error
+@@ -129,7 +143,7 @@ func convertShareLinksToXray(text string) (*conf.Config, error) {
+ 		if vmessExtra != "" {
+ 			extra = vmessExtra
+ 		}
+-		cfg, err := share.ConvertShareLinksToXrayJson(line)
++		cfg, err := shareLinksToXray(line)
+ 		if err != nil {
+ 			lastErr = err
+ 			continue
+diff --git a/cmd/cmd_xui_check.go b/cmd/cmd_xui_check.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f88be2052b96664955c5cd6957f9fed506064819
+--- /dev/null
++++ b/cmd/cmd_xui_check.go
+@@ -0,0 +1,24 @@
++package cmd
++
++import (
++	"fmt"
++
++	"github.com/spf13/cobra"
++)
++
++func init() {
++	command := &cobra.Command{
++		Use:   "check",
++		Short: "Validate raw server configuration without starting listeners",
++		Args:  cobra.NoArgs,
++		RunE: func(cmd *cobra.Command, args []string) error {
++			if len(configPaths) == 0 && len(configDirectories) == 0 {
++				return fmt.Errorf("check requires --config or --config-directory")
++			}
++			return check()
++		},
++	}
++	command.Flags().StringArrayVarP(&configPaths, "config", "c", nil, "set configuration file path")
++	command.Flags().StringArrayVarP(&configDirectories, "config-directory", "C", nil, "set configuration directory path")
++	mainCommand.AddCommand(command)
++}
+diff --git a/cmd/internal/build_root/main.go b/cmd/internal/build_root/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..fd308a7b0e0324a6a8df6a48d59dd9167ff3f35d
+--- /dev/null
++++ b/cmd/internal/build_root/main.go
+@@ -0,0 +1,26 @@
++package main
++
++import (
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"runtime"
++
++	"github.com/hiddify/hiddify-core/cmd/internal/build_shared"
++)
++
++func main() {
++	build_shared.FindSDK()
++	compiler := filepath.Join(os.Getenv("ANDROID_NDK_HOME"), "toolchains", "llvm", "prebuilt", runtime.GOOS+"-x86_64", "bin", "aarch64-linux-android24-clang")
++	output := filepath.Join("bin", "libhiddify-root.so")
++	tags := "with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,with_grpc,with_awg,tfogo_checklinkname0,with_naive_outbound,with_conntrack,with_embedded_tor,with_openvpn,with_openconnect"
++	command := exec.Command("go", "build", "-trimpath", "-buildmode=pie", "-tags", tags, "-ldflags=-s -w -checklinkname=0 -extldflags=-Wl,-z,max-page-size=16384", "-o", output, "./cmd/android-root")
++	command.Env = append(os.Environ(), "GOOS=android", "GOARCH=arm64", "CGO_ENABLED=1", "CC="+compiler)
++	command.Stdout = os.Stdout
++	command.Stderr = os.Stderr
++	if err := command.Run(); err != nil {
++		fmt.Fprintln(os.Stderr, err)
++		os.Exit(1)
++	}
++}

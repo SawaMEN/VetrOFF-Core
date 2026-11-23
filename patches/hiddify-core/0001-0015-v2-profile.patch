@@ -1,0 +1,287 @@
+diff --git a/v2/profile/profile_repository.go b/v2/profile/profile_repository.go
+index d48f61a7f6a38a49cf6d956f6973242fec370e60..94dd9218ad5e27f35cc6ef4495f0e0ae2eb74c5f 100644
+--- a/v2/profile/profile_repository.go
++++ b/v2/profile/profile_repository.go
+@@ -12,6 +12,7 @@ import (
+ 	"github.com/hiddify/hiddify-core/v2/hcommon/request"
+ 	hcore "github.com/hiddify/hiddify-core/v2/hcore"
+ 	"github.com/sagernet/sing-box/option"
++	"google.golang.org/protobuf/proto"
+ )
+ 
+ const (
+@@ -73,7 +74,7 @@ func (s *ProfileRepositoryServer) DeleteProfile(ctx context.Context, req *Profil
+ 	default:
+ 		profile, err1 := s.GetProfile(ctx, req)
+ 
+-		if profile.Profile == nil {
++		if profile == nil || profile.Profile == nil {
+ 			err = fmt.Errorf("error deleting profile: %v", err1)
+ 		} else {
+ 			err = DeleteById(profile.Profile.Id)
+@@ -102,7 +103,7 @@ func (s *ProfileRepositoryServer) SetActiveProfile(ctx context.Context, req *Pro
+ 		var profile *ProfileResponse
+ 		profile, err = s.GetProfile(ctx, req)
+ 
+-		if profile.Profile == nil {
++		if profile == nil || profile.Profile == nil {
+ 			err = fmt.Errorf("error setting profile as active: %v", err)
+ 		} else {
+ 			err = SetActiveProfile(profile.Profile)
+@@ -152,7 +153,11 @@ func GetActiveProfile() (*ProfileEntity, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	prof, err := GetById(active.Value.(string))
++	activeID, ok := active.Value.(string)
++	if !ok || activeID == "" {
++		return nil, fmt.Errorf("invalid active profile id")
++	}
++	prof, err := GetById(activeID)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -160,6 +165,9 @@ func GetActiveProfile() (*ProfileEntity, error) {
+ }
+ 
+ func SetActiveProfile(entity *ProfileEntity) error {
++	if entity == nil || entity.Id == "" {
++		return fmt.Errorf("invalid active profile")
++	}
+ 	table := db.GetTable[hcommon.AppSettings]()
+ 	return table.UpdateInsert(&hcommon.AppSettings{
+ 		Id:    "active_profile",
+@@ -179,32 +187,49 @@ func GetById(id string) (*ProfileEntity, error) {
+ func GetByName(name string) (*ProfileEntity, error) {
+ 	table := db.GetTable[ProfileEntity]()
+ 	allEntities, err := table.All()
++	if err != nil {
++		return nil, fmt.Errorf("error listing profiles: %v", err)
++	}
+ 	for _, entity := range allEntities {
+ 		if entity.Name == name {
+ 			return entity, nil
+ 		}
+ 	}
+ 
+-	return nil, fmt.Errorf("error fetching profile by ID: %v", err)
++	return nil, fmt.Errorf("profile not found by name: %s", name)
+ }
+ 
+ func GetByUrl(ctx context.Context, url string) (*ProfileEntity, error) {
+ 	table := db.GetTable[ProfileEntity]()
+ 	allEntities, err := table.All()
++	if err != nil {
++		return nil, fmt.Errorf("error listing profiles: %v", err)
++	}
+ 	for _, entity := range allEntities {
+ 		if entity.Url == url {
+ 			return entity, nil
+ 		}
+ 	}
+ 
+-	return nil, fmt.Errorf("error fetching profile by ID: %v", err)
++	return nil, fmt.Errorf("profile not found by URL: %s", url)
+ }
+ 
+ func AddByUrl(ctx context.Context, url string, optionalName string, markAsActive bool) (*ProfileEntity, error) {
+ 	existingProfile, _ := GetByUrl(ctx, url)
+ 	if existingProfile != nil {
+-		// If the profile already exists, update it
+-		return existingProfile, UpdateSubscription(existingProfile, false)
++		if err := UpdateSubscription(existingProfile, false); err != nil {
++			return nil, err
++		}
++		updated, err := GetById(existingProfile.Id)
++		if err != nil {
++			return nil, err
++		}
++		if markAsActive {
++			if err := SetActiveProfile(updated); err != nil {
++				return nil, fmt.Errorf("error setting updated profile active: %v", err)
++			}
++		}
++		return updated, nil
+ 	}
+ 
+ 	profileId := generateUuid()
+@@ -221,9 +246,8 @@ func AddByUrl(ctx context.Context, url string, optionalName string, markAsActive
+ 	}
+ 
+ 	newProfile := &ProfileEntity{
+-		Id: profileId,
+-
+-		LastUpdate: time.Now().UnixMicro(),
++		Id:         profileId,
++		LastUpdate: time.Now().UnixMilli(),
+ 		Url:        url,
+ 	}
+ 	newProfile.Parse(content.Header)
+@@ -236,7 +260,9 @@ func AddByUrl(ctx context.Context, url string, optionalName string, markAsActive
+ 	}
+ 
+ 	if markAsActive {
+-		SetActiveProfile(newProfile)
++		if err := SetActiveProfile(newProfile); err != nil {
++			return nil, fmt.Errorf("error setting new profile active: %v", err)
++		}
+ 	}
+ 	return newProfile, nil
+ }
+@@ -322,27 +348,90 @@ func AddByContent(ctx context.Context, content, name string, markAsActive bool)
+ 		return nil, fmt.Errorf("error inserting new profile into the database: %v", err)
+ 	}
+ 	if markAsActive {
+-		SetActiveProfile(newProfile)
++		if err := SetActiveProfile(newProfile); err != nil {
++			return nil, fmt.Errorf("error setting new profile active: %v", err)
++		}
+ 	}
+ 	return newProfile, nil
+ }
+ 
+ func UpdateSubscription(baseProfile *ProfileEntity, patchBaseProfile bool) error {
+-	return nil
++	if baseProfile == nil || baseProfile.Id == "" || baseProfile.Url == "" {
++		return fmt.Errorf("invalid remote profile")
++	}
++
++	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
++	defer cancel()
++	content, err := downloadProfileContent(ctx, baseProfile.Url)
++	if err != nil {
++		return fmt.Errorf("error downloading profile update: %v", err)
++	}
++	if err := UpdateContent(ctx, baseProfile.Id, content.Body); err != nil {
++		return fmt.Errorf("error updating profile content: %v", err)
++	}
++
++	updated := proto.Clone(baseProfile).(*ProfileEntity)
++	updated.LastUpdate = time.Now().UnixMilli()
++	updated.Parse(content.Header)
++	if patchBaseProfile {
++		return Patch(updated)
++	}
++	return UpdateProfile(updated)
+ }
+ 
+ func Patch(profile *ProfileEntity) error {
+-	// Implement patch logic
+-	return nil
++	if profile == nil || profile.Id == "" {
++		return fmt.Errorf("invalid profile patch")
++	}
++	existing, err := GetById(profile.Id)
++	if err != nil {
++		return err
++	}
++	if profile.Name != "" {
++		existing.Name = profile.Name
++	}
++	if profile.Url != "" {
++		existing.Url = profile.Url
++	}
++	if profile.LastUpdate != 0 {
++		existing.LastUpdate = profile.LastUpdate
++	}
++	if profile.Options != nil {
++		existing.Options = profile.Options
++	}
++	if profile.SubInfo != nil {
++		existing.SubInfo = profile.SubInfo
++	}
++	if profile.OverrideHiddifyOptions != nil {
++		existing.OverrideHiddifyOptions = profile.OverrideHiddifyOptions
++	}
++	return UpdateProfile(existing)
+ }
+ 
+ func DeleteById(id string) error {
++	profile, err := GetById(id)
++	if err != nil {
++		return err
++	}
+ 	table := db.GetTable[ProfileEntity]()
+-	os.Remove(profilesDirName + "/" + id + ".info")
+-	return table.Delete(id)
++	if err := table.Delete(id); err != nil {
++		return err
++	}
++	if err := os.Remove(profilesDirName + "/" + id + ".info"); err != nil && !os.IsNotExist(err) {
++		// Restore the metadata row if deleting the profile file failed. This keeps the repository
++		// internally consistent and makes a later delete retry possible.
++		if restoreErr := table.UpdateInsert(profile); restoreErr != nil {
++			return fmt.Errorf("failed to delete profile file: %v; failed to restore metadata: %v", err, restoreErr)
++		}
++		return fmt.Errorf("failed to delete profile file: %v", err)
++	}
++	return nil
+ }
+ 
+ func UpdateProfile(profile *ProfileEntity) error {
++	if profile == nil || profile.Id == "" {
++		return fmt.Errorf("invalid profile")
++	}
+ 	table := db.GetTable[ProfileEntity]()
+ 	return table.UpdateInsert(profile)
+ }
+diff --git a/v2/profile/test/profile_test.go b/v2/profile/test/profile_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1a4971f59d38b321a831dc7f8b0492ee71ace142
+--- /dev/null
++++ b/v2/profile/test/profile_test.go
+@@ -0,0 +1,54 @@
++package test
++
++import (
++	"encoding/base64"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/hiddify/hiddify-core/v2/profile"
++	"github.com/sagernet/sing-box/experimental/libbox"
++)
++
++func TestAddByContent(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		w.Header().Set("Profile-Title", "base64:"+base64.StdEncoding.EncodeToString([]byte("🔥 WARP 🔥")))
++		w.Header().Set("Subscription-Userinfo", "upload=0; download=0; total=10737418240000000; expire=2546249531")
++		w.Header().Set("Support-Url", "https://t.me/hiddify")
++		w.Header().Set("Profile-Web-Page-Url", "https://hiddify.com")
++		fmt.Fprintln(w, `{"outbounds":[{"type":"socks","tag":"test-proxy","server":"127.0.0.1","server_port":1080}]}`)
++	}))
++	defer server.Close()
++	ctx := libbox.BaseContext(nil)
++	entity, err := profile.AddByUrl(ctx, server.URL, "", false)
++	if err != nil {
++		t.Fatalf("expected no error, but got: %v", err)
++	}
++	fmt.Printf("entity: %v\n", entity)
++	// Check if the content has been added correctly
++	profileTitle := entity.Name
++	expectedTitle := "🔥 WARP 🔥" // The Base64 decoded title
++	if profileTitle != expectedTitle {
++		t.Errorf("expected profile title to be %v, got %v", expectedTitle, profileTitle)
++	}
++
++	// Check subscription userinfo
++	userInfo := entity.SubInfo
++	if userInfo.Upload != 0 || userInfo.Download != 0 || userInfo.Total != 10737418240000000 || userInfo.Expire != 2546249531 {
++		t.Errorf("subscription userinfo not parsed correctly, got: %v", userInfo)
++	}
++
++	// Check URLs
++	supportURL := entity.SubInfo.SupportUrl
++	if supportURL != "https://t.me/hiddify" {
++		t.Errorf("expected support URL to be https://t.me/hiddify, got %v", supportURL)
++	}
++
++	profileWebPageURL := entity.SubInfo.WebPageUrl
++	if profileWebPageURL != "https://hiddify.com" {
++		t.Errorf("expected profile web page URL to be https://hiddify.com, got %v", profileWebPageURL)
++	}
++	profile.DeleteById(entity.Id)
++	// You can further assert individual fields of warp configurations
++}

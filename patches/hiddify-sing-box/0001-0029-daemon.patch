@@ -1,0 +1,634 @@
+diff --git a/daemon/errors.go b/daemon/errors.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..17a4e80066e443ad0dea832508e98cbc39cdaabc
+--- /dev/null
++++ b/daemon/errors.go
+@@ -0,0 +1,42 @@
++package daemon
++
++import (
++	"context"
++	"errors"
++	"os"
++
++	"google.golang.org/grpc"
++	"google.golang.org/grpc/codes"
++	"google.golang.org/grpc/status"
++)
++
++func UnaryErrorInterceptor(ctx context.Context, request any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
++	response, err := handler(ctx, request)
++	if err != nil {
++		return nil, mapStatusError(err)
++	}
++	return response, nil
++}
++
++func StreamErrorInterceptor(server any, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
++	err := handler(server, stream)
++	if err != nil {
++		return mapStatusError(err)
++	}
++	return nil
++}
++
++func mapStatusError(err error) error {
++	if _, loaded := status.FromError(err); loaded {
++		return err
++	}
++	switch {
++	case errors.Is(err, os.ErrInvalid):
++		return status.Error(codes.FailedPrecondition, "service not started")
++	case errors.Is(err, os.ErrClosed):
++		return status.Error(codes.Unavailable, "service is closing")
++	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
++		return status.FromContextError(err).Err()
++	}
++	return err
++}
+diff --git a/daemon/managed_service.go b/daemon/managed_service.go
+index dfc986cb52cc85d07ca2532a6ac78013adff845b..a099568bebf01cf5ae1334bcd072ddfff322679d 100644
+--- a/daemon/managed_service.go
++++ b/daemon/managed_service.go
+@@ -3,7 +3,6 @@ package daemon
+ import (
+ 	"context"
+ 	"time"
+-	"unsafe"
+ 
+ 	"github.com/sagernet/sing-box/service/oomkiller"
+ 
+@@ -72,7 +71,7 @@ func (s *ManagedService) TriggerDebugCrash(ctx context.Context, request *DebugCr
+ 	switch request.Type {
+ 	case DebugCrashRequest_GO:
+ 		time.AfterFunc(200*time.Millisecond, func() {
+-			*(*int)(unsafe.Pointer(uintptr(0))) = 0
++			panic("debug crash requested") // H: deliberate debug crash, not an unsafe null-pointer conversion
+ 		})
+ 	case DebugCrashRequest_NATIVE:
+ 		err := s.handler.TriggerNativeCrash()
+diff --git a/daemon/platform.go b/daemon/platform.go
+index 5f96ec59d2114a9f617236de3c70dc5ff50d6e70..5c54715eec8107aa229478fbe384b69de9bc3897 100644
+--- a/daemon/platform.go
++++ b/daemon/platform.go
+@@ -13,4 +13,5 @@ type ManagedHandler interface {
+ 	SystemProxyStatus() (*SystemProxyStatus, error)
+ 	SetSystemProxyEnabled(enabled bool) error
+ 	TriggerNativeCrash() error
++	WriteDebugMessage(message string)
+ }
+diff --git a/daemon/server.go b/daemon/server.go
+index 539a3b2ba346944ebab685e493719426ef331907..6cd806efb50dfde1e77c4d1b15489b33911fae0a 100644
+--- a/daemon/server.go
++++ b/daemon/server.go
+@@ -15,8 +15,8 @@ import (
+ 
+ func NewServer(startedService *StartedService, secret string) *grpc.Server {
+ 	server := grpc.NewServer(
+-		grpc.ChainUnaryInterceptor(newUnaryAuthInterceptor(secret), UnaryLocaleInterceptor),
+-		grpc.ChainStreamInterceptor(newStreamAuthInterceptor(secret), StreamLocaleInterceptor),
++		grpc.ChainUnaryInterceptor(newUnaryAuthInterceptor(secret), UnaryLocaleInterceptor, UnaryErrorInterceptor),
++		grpc.ChainStreamInterceptor(newStreamAuthInterceptor(secret), StreamLocaleInterceptor, StreamErrorInterceptor),
+ 	)
+ 	healthServer := health.NewServer()
+ 	RegisterStartedServiceServer(server, startedService)
+diff --git a/daemon/started_service.go b/daemon/started_service.go
+index f84113bb5713252e8578a49603be05ad01169ac5..68cdd3495f7ec7c7eaf69dfe35223e8724a610a1 100644
+--- a/daemon/started_service.go
++++ b/daemon/started_service.go
+@@ -51,7 +51,7 @@ type StartedService struct {
+ 	oomKillerEnabled  bool
+ 	oomKillerDisabled bool
+ 	oomMemoryLimit    uint64
+-	extraServices     []adapter.LifecycleService //H
++	extraServices     []adapter.LifecycleService // H
+ 	// workingDirectory string
+ 	// tempDirectory    string
+ 	// userID           int
+@@ -87,7 +87,7 @@ type ServiceOptions struct {
+ 	OOMKillerEnabled  bool
+ 	OOMKillerDisabled bool
+ 	OOMMemoryLimit    uint64
+-	ExtraServices     []adapter.LifecycleService //H
++	ExtraServices     []adapter.LifecycleService // H
+ 	// WorkingDirectory   string
+ 	// TempDirectory      string
+ 	// UserID             int
+@@ -105,7 +105,7 @@ func NewStartedService(options ServiceOptions) *StartedService {
+ 		oomKillerEnabled:  options.OOMKillerEnabled,
+ 		oomKillerDisabled: options.OOMKillerDisabled,
+ 		oomMemoryLimit:    options.OOMMemoryLimit,
+-		extraServices:     options.ExtraServices, //H
++		extraServices:     options.ExtraServices, // H
+ 		// workingDirectory: options.WorkingDirectory,
+ 		// tempDirectory:    options.TempDirectory,
+ 		// userID:           options.UserID,
+@@ -292,7 +292,7 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+ 		s.serviceAccess.Unlock()
+ 		return err
+ 	}
+-	for _, extraService := range s.extraServices { //H
++	for _, extraService := range s.extraServices { // H
+ 		instance.Box().AddService(extraService)
+ 	}
+ 	instance.urlTestHistoryStorage.AddUpdateHook(s.urlTestSubscriber)
+@@ -302,7 +302,12 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+ 	s.serviceAccess.Lock()
+ 	s.instance = instance
+ 	s.serviceAccess.Unlock()
++	stopStartupCancellation := context.AfterFunc(ctx, instance.cancel)
+ 	err = instance.Start()
++	stopStartupCancellation()
++	if ctx.Err() != nil {
++		err = ctx.Err()
++	}
+ 	s.serviceAccess.Lock()
+ 	if s.startInterrupted {
+ 		s.startInterrupted = false
+@@ -310,7 +315,7 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+ 		s.serviceAccess.Unlock()
+ 		_ = instance.Close()
+ 		runtimeDebug.FreeOSMemory()
+-		return nil
++		return context.Canceled
+ 	}
+ 	if err != nil {
+ 		s.instance = nil
+@@ -351,15 +356,16 @@ func (s *StartedService) CloseService() error {
+ 	s.instance = nil
+ 	s.updateStatus(ServiceStatus_STOPPING)
+ 	s.serviceAccess.Unlock()
++	var closeErr error
+ 	if instance != nil {
+-		_ = instance.Close()
++		closeErr = instance.Close()
+ 	}
+ 	s.serviceAccess.Lock()
+ 	s.startedAt = time.Time{}
+ 	s.updateStatus(ServiceStatus_IDLE)
+ 	s.serviceAccess.Unlock()
+ 	runtimeDebug.FreeOSMemory()
+-	return nil
++	return closeErr
+ }
+ 
+ func (s *StartedService) SetError(err error) {
+diff --git a/daemon/started_service.pb.go b/daemon/started_service.pb.go
+index 894063cd742012fb88d1655fbaff518e77bf2488..d502926b5c33a45094b56d6e7dad1e20a9da6aee 100644
+--- a/daemon/started_service.pb.go
++++ b/daemon/started_service.pb.go
+@@ -1,13 +1,12 @@
+ package daemon
+ 
+ import (
+-	reflect "reflect"
+-	sync "sync"
+-	unsafe "unsafe"
+-
+ 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+ 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+ 	emptypb "google.golang.org/protobuf/types/known/emptypb"
++	reflect "reflect"
++	sync "sync"
++	unsafe "unsafe"
+ )
+ 
+ const (
+@@ -8097,123 +8096,120 @@ func file_daemon_started_service_proto_rawDescGZIP() []byte {
+ 	return file_daemon_started_service_proto_rawDescData
+ }
+ 
+-var (
+-	file_daemon_started_service_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
+-	file_daemon_started_service_proto_msgTypes  = make([]protoimpl.MessageInfo, 104)
+-	file_daemon_started_service_proto_goTypes   = []any{
+-		LogLevel(0),                               // 0: daemon.LogLevel
+-		ConnectionEventType(0),                    // 1: daemon.ConnectionEventType
+-		USBDeviceState(0),                         // 2: daemon.USBDeviceState
+-		USBBackend(0),                             // 3: daemon.USBBackend
+-		ServiceStatus_Type(0),                     // 4: daemon.ServiceStatus.Type
+-		(*Version)(nil),                           // 5: daemon.Version
+-		(*ServiceStatus)(nil),                     // 6: daemon.ServiceStatus
+-		(*SubscribeStatusRequest)(nil),            // 7: daemon.SubscribeStatusRequest
+-		(*Log)(nil),                               // 8: daemon.Log
+-		(*DefaultLogLevel)(nil),                   // 9: daemon.DefaultLogLevel
+-		(*Status)(nil),                            // 10: daemon.Status
+-		(*Groups)(nil),                            // 11: daemon.Groups
+-		(*Group)(nil),                             // 12: daemon.Group
+-		(*GroupItem)(nil),                         // 13: daemon.GroupItem
+-		(*URLTestRequest)(nil),                    // 14: daemon.URLTestRequest
+-		(*SelectOutboundRequest)(nil),             // 15: daemon.SelectOutboundRequest
+-		(*SetGroupExpandRequest)(nil),             // 16: daemon.SetGroupExpandRequest
+-		(*ClashMode)(nil),                         // 17: daemon.ClashMode
+-		(*ClashModeStatus)(nil),                   // 18: daemon.ClashModeStatus
+-		(*SubscribeConnectionsRequest)(nil),       // 19: daemon.SubscribeConnectionsRequest
+-		(*ConnectionEvent)(nil),                   // 20: daemon.ConnectionEvent
+-		(*ConnectionEvents)(nil),                  // 21: daemon.ConnectionEvents
+-		(*Connection)(nil),                        // 22: daemon.Connection
+-		(*ProcessInfo)(nil),                       // 23: daemon.ProcessInfo
+-		(*CloseConnectionRequest)(nil),            // 24: daemon.CloseConnectionRequest
+-		(*DeprecatedWarnings)(nil),                // 25: daemon.DeprecatedWarnings
+-		(*DeprecatedWarning)(nil),                 // 26: daemon.DeprecatedWarning
+-		(*StartedAt)(nil),                         // 27: daemon.StartedAt
+-		(*OutboundList)(nil),                      // 28: daemon.OutboundList
+-		(*NetworkQualityTestRequest)(nil),         // 29: daemon.NetworkQualityTestRequest
+-		(*NetworkQualityTestProgress)(nil),        // 30: daemon.NetworkQualityTestProgress
+-		(*STUNTestRequest)(nil),                   // 31: daemon.STUNTestRequest
+-		(*STUNTestProgress)(nil),                  // 32: daemon.STUNTestProgress
+-		(*TailscaleStatusUpdate)(nil),             // 33: daemon.TailscaleStatusUpdate
+-		(*TailscaleEndpointStatus)(nil),           // 34: daemon.TailscaleEndpointStatus
+-		(*TailscaleUserGroup)(nil),                // 35: daemon.TailscaleUserGroup
+-		(*TailscalePeer)(nil),                     // 36: daemon.TailscalePeer
+-		(*TailscalePingRequest)(nil),              // 37: daemon.TailscalePingRequest
+-		(*TailscalePingResponse)(nil),             // 38: daemon.TailscalePingResponse
+-		(*SetTailscaleExitNodeRequest)(nil),       // 39: daemon.SetTailscaleExitNodeRequest
+-		(*TailscaleLogoutRequest)(nil),            // 40: daemon.TailscaleLogoutRequest
+-		(*TailscaleCertificateRequest)(nil),       // 41: daemon.TailscaleCertificateRequest
+-		(*TailscaleCertificate)(nil),              // 42: daemon.TailscaleCertificate
+-		(*TailscaleSSHClientMessage)(nil),         // 43: daemon.TailscaleSSHClientMessage
+-		(*TailscaleSSHStart)(nil),                 // 44: daemon.TailscaleSSHStart
+-		(*TailscaleSSHInput)(nil),                 // 45: daemon.TailscaleSSHInput
+-		(*TailscaleSSHResize)(nil),                // 46: daemon.TailscaleSSHResize
+-		(*TailscaleSSHServerMessage)(nil),         // 47: daemon.TailscaleSSHServerMessage
+-		(*TailscaleSSHAuthBanner)(nil),            // 48: daemon.TailscaleSSHAuthBanner
+-		(*TailscaleSSHReady)(nil),                 // 49: daemon.TailscaleSSHReady
+-		(*TailscaleSSHOutput)(nil),                // 50: daemon.TailscaleSSHOutput
+-		(*TailscaleSSHExit)(nil),                  // 51: daemon.TailscaleSSHExit
+-		(*TailscaleSSHError)(nil),                 // 52: daemon.TailscaleSSHError
+-		(*SubscribeTaildropInboxRequest)(nil),     // 53: daemon.SubscribeTaildropInboxRequest
+-		(*MarkTaildropInboxReadRequest)(nil),      // 54: daemon.MarkTaildropInboxReadRequest
+-		(*TaildropInbox)(nil),                     // 55: daemon.TaildropInbox
+-		(*TaildropFile)(nil),                      // 56: daemon.TaildropFile
+-		(*TaildropReceivingFile)(nil),             // 57: daemon.TaildropReceivingFile
+-		(*TaildropSendClientMessage)(nil),         // 58: daemon.TaildropSendClientMessage
+-		(*TaildropSendStart)(nil),                 // 59: daemon.TaildropSendStart
+-		(*TaildropOutgoingFile)(nil),              // 60: daemon.TaildropOutgoingFile
+-		(*TaildropFileChunk)(nil),                 // 61: daemon.TaildropFileChunk
+-		(*TaildropFileDone)(nil),                  // 62: daemon.TaildropFileDone
+-		(*TaildropSendServerMessage)(nil),         // 63: daemon.TaildropSendServerMessage
+-		(*TaildropSendProgress)(nil),              // 64: daemon.TaildropSendProgress
+-		(*DownloadTaildropFileRequest)(nil),       // 65: daemon.DownloadTaildropFileRequest
+-		(*DownloadTaildropFileChunk)(nil),         // 66: daemon.DownloadTaildropFileChunk
+-		(*DeleteTaildropFileRequest)(nil),         // 67: daemon.DeleteTaildropFileRequest
+-		(*CancelTaildropReceivingRequest)(nil),    // 68: daemon.CancelTaildropReceivingRequest
+-		(*USBProviderMessage)(nil),                // 69: daemon.USBProviderMessage
+-		(*USBServerMessage)(nil),                  // 70: daemon.USBServerMessage
+-		(*USBDeviceDescriptor)(nil),               // 71: daemon.USBDeviceDescriptor
+-		(*USBDeviceAttach)(nil),                   // 72: daemon.USBDeviceAttach
+-		(*USBInterface)(nil),                      // 73: daemon.USBInterface
+-		(*USBDeviceDetach)(nil),                   // 74: daemon.USBDeviceDetach
+-		(*USBDeviceReady)(nil),                    // 75: daemon.USBDeviceReady
+-		(*USBURBRequest)(nil),                     // 76: daemon.USBURBRequest
+-		(*USBURBResponse)(nil),                    // 77: daemon.USBURBResponse
+-		(*USBIsoPacket)(nil),                      // 78: daemon.USBIsoPacket
+-		(*USBEndpointAbort)(nil),                  // 79: daemon.USBEndpointAbort
+-		(*USBError)(nil),                          // 80: daemon.USBError
+-		(*USBIPServerStatusUpdate)(nil),           // 81: daemon.USBIPServerStatusUpdate
+-		(*USBIPServerStatus)(nil),                 // 82: daemon.USBIPServerStatus
+-		(*USBSharedDevice)(nil),                   // 83: daemon.USBSharedDevice
+-		(*OpenConnectStatusUpdate)(nil),           // 84: daemon.OpenConnectStatusUpdate
+-		(*OpenConnectEndpointStatus)(nil),         // 85: daemon.OpenConnectEndpointStatus
+-		(*OpenConnectTunnelInfo)(nil),             // 86: daemon.OpenConnectTunnelInfo
+-		(*OpenConnectAuthChallenge)(nil),          // 87: daemon.OpenConnectAuthChallenge
+-		(*OpenConnectAuthForm)(nil),               // 88: daemon.OpenConnectAuthForm
+-		(*OpenConnectAuthFormField)(nil),          // 89: daemon.OpenConnectAuthFormField
+-		(*OpenConnectAuthFormChoice)(nil),         // 90: daemon.OpenConnectAuthFormChoice
+-		(*OpenConnectBrowserRequest)(nil),         // 91: daemon.OpenConnectBrowserRequest
+-		(*OpenConnectBrowserCookie)(nil),          // 92: daemon.OpenConnectBrowserCookie
+-		(*OpenConnectBrowserHeader)(nil),          // 93: daemon.OpenConnectBrowserHeader
+-		(*OpenConnectAuthFormResponse)(nil),       // 94: daemon.OpenConnectAuthFormResponse
+-		(*OpenConnectBrowserResult)(nil),          // 95: daemon.OpenConnectBrowserResult
+-		(*OpenConnectAuthResponseSubmission)(nil), // 96: daemon.OpenConnectAuthResponseSubmission
+-		(*OpenConnectAuthChallengeCancel)(nil),    // 97: daemon.OpenConnectAuthChallengeCancel
+-		(*OpenVPNStatusUpdate)(nil),               // 98: daemon.OpenVPNStatusUpdate
+-		(*OpenVPNEndpointStatus)(nil),             // 99: daemon.OpenVPNEndpointStatus
+-		(*OpenVPNTunnelInfo)(nil),                 // 100: daemon.OpenVPNTunnelInfo
+-		(*OpenVPNChallenge)(nil),                  // 101: daemon.OpenVPNChallenge
+-		(*OpenVPNChallengeSubmission)(nil),        // 102: daemon.OpenVPNChallengeSubmission
+-		(*OpenVPNChallengeCancel)(nil),            // 103: daemon.OpenVPNChallengeCancel
+-		(*NotificationEvent)(nil),                 // 104: daemon.NotificationEvent
+-		(*Notification)(nil),                      // 105: daemon.Notification
+-		(*NotificationCancel)(nil),                // 106: daemon.NotificationCancel
+-		(*Log_Message)(nil),                       // 107: daemon.Log.Message
+-		nil,                                       // 108: daemon.OpenConnectAuthFormResponse.ValuesEntry
+-		(*emptypb.Empty)(nil),                     // 109: google.protobuf.Empty
+-	}
+-)
+-
++var file_daemon_started_service_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
++var file_daemon_started_service_proto_msgTypes = make([]protoimpl.MessageInfo, 104)
++var file_daemon_started_service_proto_goTypes = []any{
++	(LogLevel)(0),                             // 0: daemon.LogLevel
++	(ConnectionEventType)(0),                  // 1: daemon.ConnectionEventType
++	(USBDeviceState)(0),                       // 2: daemon.USBDeviceState
++	(USBBackend)(0),                           // 3: daemon.USBBackend
++	(ServiceStatus_Type)(0),                   // 4: daemon.ServiceStatus.Type
++	(*Version)(nil),                           // 5: daemon.Version
++	(*ServiceStatus)(nil),                     // 6: daemon.ServiceStatus
++	(*SubscribeStatusRequest)(nil),            // 7: daemon.SubscribeStatusRequest
++	(*Log)(nil),                               // 8: daemon.Log
++	(*DefaultLogLevel)(nil),                   // 9: daemon.DefaultLogLevel
++	(*Status)(nil),                            // 10: daemon.Status
++	(*Groups)(nil),                            // 11: daemon.Groups
++	(*Group)(nil),                             // 12: daemon.Group
++	(*GroupItem)(nil),                         // 13: daemon.GroupItem
++	(*URLTestRequest)(nil),                    // 14: daemon.URLTestRequest
++	(*SelectOutboundRequest)(nil),             // 15: daemon.SelectOutboundRequest
++	(*SetGroupExpandRequest)(nil),             // 16: daemon.SetGroupExpandRequest
++	(*ClashMode)(nil),                         // 17: daemon.ClashMode
++	(*ClashModeStatus)(nil),                   // 18: daemon.ClashModeStatus
++	(*SubscribeConnectionsRequest)(nil),       // 19: daemon.SubscribeConnectionsRequest
++	(*ConnectionEvent)(nil),                   // 20: daemon.ConnectionEvent
++	(*ConnectionEvents)(nil),                  // 21: daemon.ConnectionEvents
++	(*Connection)(nil),                        // 22: daemon.Connection
++	(*ProcessInfo)(nil),                       // 23: daemon.ProcessInfo
++	(*CloseConnectionRequest)(nil),            // 24: daemon.CloseConnectionRequest
++	(*DeprecatedWarnings)(nil),                // 25: daemon.DeprecatedWarnings
++	(*DeprecatedWarning)(nil),                 // 26: daemon.DeprecatedWarning
++	(*StartedAt)(nil),                         // 27: daemon.StartedAt
++	(*OutboundList)(nil),                      // 28: daemon.OutboundList
++	(*NetworkQualityTestRequest)(nil),         // 29: daemon.NetworkQualityTestRequest
++	(*NetworkQualityTestProgress)(nil),        // 30: daemon.NetworkQualityTestProgress
++	(*STUNTestRequest)(nil),                   // 31: daemon.STUNTestRequest
++	(*STUNTestProgress)(nil),                  // 32: daemon.STUNTestProgress
++	(*TailscaleStatusUpdate)(nil),             // 33: daemon.TailscaleStatusUpdate
++	(*TailscaleEndpointStatus)(nil),           // 34: daemon.TailscaleEndpointStatus
++	(*TailscaleUserGroup)(nil),                // 35: daemon.TailscaleUserGroup
++	(*TailscalePeer)(nil),                     // 36: daemon.TailscalePeer
++	(*TailscalePingRequest)(nil),              // 37: daemon.TailscalePingRequest
++	(*TailscalePingResponse)(nil),             // 38: daemon.TailscalePingResponse
++	(*SetTailscaleExitNodeRequest)(nil),       // 39: daemon.SetTailscaleExitNodeRequest
++	(*TailscaleLogoutRequest)(nil),            // 40: daemon.TailscaleLogoutRequest
++	(*TailscaleCertificateRequest)(nil),       // 41: daemon.TailscaleCertificateRequest
++	(*TailscaleCertificate)(nil),              // 42: daemon.TailscaleCertificate
++	(*TailscaleSSHClientMessage)(nil),         // 43: daemon.TailscaleSSHClientMessage
++	(*TailscaleSSHStart)(nil),                 // 44: daemon.TailscaleSSHStart
++	(*TailscaleSSHInput)(nil),                 // 45: daemon.TailscaleSSHInput
++	(*TailscaleSSHResize)(nil),                // 46: daemon.TailscaleSSHResize
++	(*TailscaleSSHServerMessage)(nil),         // 47: daemon.TailscaleSSHServerMessage
++	(*TailscaleSSHAuthBanner)(nil),            // 48: daemon.TailscaleSSHAuthBanner
++	(*TailscaleSSHReady)(nil),                 // 49: daemon.TailscaleSSHReady
++	(*TailscaleSSHOutput)(nil),                // 50: daemon.TailscaleSSHOutput
++	(*TailscaleSSHExit)(nil),                  // 51: daemon.TailscaleSSHExit
++	(*TailscaleSSHError)(nil),                 // 52: daemon.TailscaleSSHError
++	(*SubscribeTaildropInboxRequest)(nil),     // 53: daemon.SubscribeTaildropInboxRequest
++	(*MarkTaildropInboxReadRequest)(nil),      // 54: daemon.MarkTaildropInboxReadRequest
++	(*TaildropInbox)(nil),                     // 55: daemon.TaildropInbox
++	(*TaildropFile)(nil),                      // 56: daemon.TaildropFile
++	(*TaildropReceivingFile)(nil),             // 57: daemon.TaildropReceivingFile
++	(*TaildropSendClientMessage)(nil),         // 58: daemon.TaildropSendClientMessage
++	(*TaildropSendStart)(nil),                 // 59: daemon.TaildropSendStart
++	(*TaildropOutgoingFile)(nil),              // 60: daemon.TaildropOutgoingFile
++	(*TaildropFileChunk)(nil),                 // 61: daemon.TaildropFileChunk
++	(*TaildropFileDone)(nil),                  // 62: daemon.TaildropFileDone
++	(*TaildropSendServerMessage)(nil),         // 63: daemon.TaildropSendServerMessage
++	(*TaildropSendProgress)(nil),              // 64: daemon.TaildropSendProgress
++	(*DownloadTaildropFileRequest)(nil),       // 65: daemon.DownloadTaildropFileRequest
++	(*DownloadTaildropFileChunk)(nil),         // 66: daemon.DownloadTaildropFileChunk
++	(*DeleteTaildropFileRequest)(nil),         // 67: daemon.DeleteTaildropFileRequest
++	(*CancelTaildropReceivingRequest)(nil),    // 68: daemon.CancelTaildropReceivingRequest
++	(*USBProviderMessage)(nil),                // 69: daemon.USBProviderMessage
++	(*USBServerMessage)(nil),                  // 70: daemon.USBServerMessage
++	(*USBDeviceDescriptor)(nil),               // 71: daemon.USBDeviceDescriptor
++	(*USBDeviceAttach)(nil),                   // 72: daemon.USBDeviceAttach
++	(*USBInterface)(nil),                      // 73: daemon.USBInterface
++	(*USBDeviceDetach)(nil),                   // 74: daemon.USBDeviceDetach
++	(*USBDeviceReady)(nil),                    // 75: daemon.USBDeviceReady
++	(*USBURBRequest)(nil),                     // 76: daemon.USBURBRequest
++	(*USBURBResponse)(nil),                    // 77: daemon.USBURBResponse
++	(*USBIsoPacket)(nil),                      // 78: daemon.USBIsoPacket
++	(*USBEndpointAbort)(nil),                  // 79: daemon.USBEndpointAbort
++	(*USBError)(nil),                          // 80: daemon.USBError
++	(*USBIPServerStatusUpdate)(nil),           // 81: daemon.USBIPServerStatusUpdate
++	(*USBIPServerStatus)(nil),                 // 82: daemon.USBIPServerStatus
++	(*USBSharedDevice)(nil),                   // 83: daemon.USBSharedDevice
++	(*OpenConnectStatusUpdate)(nil),           // 84: daemon.OpenConnectStatusUpdate
++	(*OpenConnectEndpointStatus)(nil),         // 85: daemon.OpenConnectEndpointStatus
++	(*OpenConnectTunnelInfo)(nil),             // 86: daemon.OpenConnectTunnelInfo
++	(*OpenConnectAuthChallenge)(nil),          // 87: daemon.OpenConnectAuthChallenge
++	(*OpenConnectAuthForm)(nil),               // 88: daemon.OpenConnectAuthForm
++	(*OpenConnectAuthFormField)(nil),          // 89: daemon.OpenConnectAuthFormField
++	(*OpenConnectAuthFormChoice)(nil),         // 90: daemon.OpenConnectAuthFormChoice
++	(*OpenConnectBrowserRequest)(nil),         // 91: daemon.OpenConnectBrowserRequest
++	(*OpenConnectBrowserCookie)(nil),          // 92: daemon.OpenConnectBrowserCookie
++	(*OpenConnectBrowserHeader)(nil),          // 93: daemon.OpenConnectBrowserHeader
++	(*OpenConnectAuthFormResponse)(nil),       // 94: daemon.OpenConnectAuthFormResponse
++	(*OpenConnectBrowserResult)(nil),          // 95: daemon.OpenConnectBrowserResult
++	(*OpenConnectAuthResponseSubmission)(nil), // 96: daemon.OpenConnectAuthResponseSubmission
++	(*OpenConnectAuthChallengeCancel)(nil),    // 97: daemon.OpenConnectAuthChallengeCancel
++	(*OpenVPNStatusUpdate)(nil),               // 98: daemon.OpenVPNStatusUpdate
++	(*OpenVPNEndpointStatus)(nil),             // 99: daemon.OpenVPNEndpointStatus
++	(*OpenVPNTunnelInfo)(nil),                 // 100: daemon.OpenVPNTunnelInfo
++	(*OpenVPNChallenge)(nil),                  // 101: daemon.OpenVPNChallenge
++	(*OpenVPNChallengeSubmission)(nil),        // 102: daemon.OpenVPNChallengeSubmission
++	(*OpenVPNChallengeCancel)(nil),            // 103: daemon.OpenVPNChallengeCancel
++	(*NotificationEvent)(nil),                 // 104: daemon.NotificationEvent
++	(*Notification)(nil),                      // 105: daemon.Notification
++	(*NotificationCancel)(nil),                // 106: daemon.NotificationCancel
++	(*Log_Message)(nil),                       // 107: daemon.Log.Message
++	nil,                                       // 108: daemon.OpenConnectAuthFormResponse.ValuesEntry
++	(*emptypb.Empty)(nil),                     // 109: google.protobuf.Empty
++}
+ var file_daemon_started_service_proto_depIdxs = []int32{
+ 	4,   // 0: daemon.ServiceStatus.status:type_name -> daemon.ServiceStatus.Type
+ 	107, // 1: daemon.Log.messages:type_name -> daemon.Log.Message
+diff --git a/daemon/started_service.proto b/daemon/started_service.proto
+index 2c27937b6c58e4fae1eb9cd2b231e45841be7838..efd45fabc89f4489baa747bf70ba83b1a2fb457a 100644
+--- a/daemon/started_service.proto
++++ b/daemon/started_service.proto
+@@ -21,7 +21,6 @@ service StartedService {
+   rpc URLTest(URLTestRequest) returns(google.protobuf.Empty) {}
+   rpc SelectOutbound(SelectOutboundRequest) returns (google.protobuf.Empty) {}
+   rpc SetGroupExpand(SetGroupExpandRequest) returns (google.protobuf.Empty) {}
+-
+   rpc SubscribeConnections(SubscribeConnectionsRequest) returns(stream ConnectionEvents) {}
+   rpc CloseConnection(CloseConnectionRequest) returns(google.protobuf.Empty) {}
+   rpc CloseAllConnections(google.protobuf.Empty) returns(google.protobuf.Empty) {}
+@@ -152,7 +151,6 @@ message ClashModeStatus {
+   repeated string modeList = 1;
+   string currentMode = 2;
+ }
+-
+ message SubscribeConnectionsRequest {
+   int64 interval = 1;
+ }
+diff --git a/daemon/started_service_grpc.pb.go b/daemon/started_service_grpc.pb.go
+index ded8d7b42b5f24f506ff0269358ba8648db0c485..25210f2f584867316ee87c57c05e9ee5db581bc0 100644
+--- a/daemon/started_service_grpc.pb.go
++++ b/daemon/started_service_grpc.pb.go
+@@ -2,7 +2,6 @@ package daemon
+ 
+ import (
+ 	context "context"
+-
+ 	grpc "google.golang.org/grpc"
+ 	codes "google.golang.org/grpc/codes"
+ 	status "google.golang.org/grpc/status"
+@@ -756,167 +755,126 @@ type UnimplementedStartedServiceServer struct{}
+ func (UnimplementedStartedServiceServer) GetVersion(context.Context, *emptypb.Empty) (*Version, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method GetVersion not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SubscribeServiceStatus(*emptypb.Empty, grpc.ServerStreamingServer[ServiceStatus]) error {
+ 	return status.Error(codes.Unimplemented, "method SubscribeServiceStatus not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SubscribeLog(*emptypb.Empty, grpc.ServerStreamingServer[Log]) error {
+ 	return status.Error(codes.Unimplemented, "method SubscribeLog not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) GetDefaultLogLevel(context.Context, *emptypb.Empty) (*DefaultLogLevel, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method GetDefaultLogLevel not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) ClearLogs(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method ClearLogs not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SubscribeStatus(*SubscribeStatusRequest, grpc.ServerStreamingServer[Status]) error {
+ 	return status.Error(codes.Unimplemented, "method SubscribeStatus not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SubscribeGroups(*emptypb.Empty, grpc.ServerStreamingServer[Groups]) error {
+ 	return status.Error(codes.Unimplemented, "method SubscribeGroups not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) GetClashModeStatus(context.Context, *emptypb.Empty) (*ClashModeStatus, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method GetClashModeStatus not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SubscribeClashMode(*emptypb.Empty, grpc.ServerStreamingServer[ClashMode]) error {
+ 	return status.Error(codes.Unimplemented, "method SubscribeClashMode not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SetClashMode(context.Context, *ClashMode) (*emptypb.Empty, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method SetClashMode not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) URLTest(context.Context, *URLTestRequest) (*emptypb.Empty, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method URLTest not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SelectOutbound(context.Context, *SelectOutboundRequest) (*emptypb.Empty, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method SelectOutbound not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SetGroupExpand(context.Context, *SetGroupExpandRequest) (*emptypb.Empty, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method SetGroupExpand not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SubscribeConnections(*SubscribeConnectionsRequest, grpc.ServerStreamingServer[ConnectionEvents]) error {
+ 	return status.Error(codes.Unimplemented, "method SubscribeConnections not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) CloseConnection(context.Context, *CloseConnectionRequest) (*emptypb.Empty, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method CloseConnection not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) CloseAllConnections(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method CloseAllConnections not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) GetDeprecatedWarnings(context.Context, *emptypb.Empty) (*DeprecatedWarnings, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method GetDeprecatedWarnings not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) GetStartedAt(context.Context, *emptypb.Empty) (*StartedAt, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method GetStartedAt not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SubscribeOutbounds(*emptypb.Empty, grpc.ServerStreamingServer[OutboundList]) error {
+ 	return status.Error(codes.Unimplemented, "method SubscribeOutbounds not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) StartNetworkQualityTest(*NetworkQualityTestRequest, grpc.ServerStreamingServer[NetworkQualityTestProgress]) error {
+ 	return status.Error(codes.Unimplemented, "method StartNetworkQualityTest not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) StartSTUNTest(*STUNTestRequest, grpc.ServerStreamingServer[STUNTestProgress]) error {
+ 	return status.Error(codes.Unimplemented, "method StartSTUNTest not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SubscribeTailscaleStatus(*emptypb.Empty, grpc.ServerStreamingServer[TailscaleStatusUpdate]) error {
+ 	return status.Error(codes.Unimplemented, "method SubscribeTailscaleStatus not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) StartTailscalePing(*TailscalePingRequest, grpc.ServerStreamingServer[TailscalePingResponse]) error {
+ 	return status.Error(codes.Unimplemented, "method StartTailscalePing not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SetTailscaleExitNode(context.Context, *SetTailscaleExitNodeRequest) (*emptypb.Empty, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method SetTailscaleExitNode not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) TailscaleLogout(context.Context, *TailscaleLogoutRequest) (*emptypb.Empty, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method TailscaleLogout not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) GetTailscaleCertificate(context.Context, *TailscaleCertificateRequest) (*TailscaleCertificate, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method GetTailscaleCertificate not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) StartTailscaleSSHSession(grpc.BidiStreamingServer[TailscaleSSHClientMessage, TailscaleSSHServerMessage]) error {
+ 	return status.Error(codes.Unimplemented, "method StartTailscaleSSHSession not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SubscribeTaildropInbox(*SubscribeTaildropInboxRequest, grpc.ServerStreamingServer[TaildropInbox]) error {
+ 	return status.Error(codes.Unimplemented, "method SubscribeTaildropInbox not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) MarkTaildropInboxRead(context.Context, *MarkTaildropInboxReadRequest) (*emptypb.Empty, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method MarkTaildropInboxRead not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SendTaildropFiles(grpc.BidiStreamingServer[TaildropSendClientMessage, TaildropSendServerMessage]) error {
+ 	return status.Error(codes.Unimplemented, "method SendTaildropFiles not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) DownloadTaildropFile(*DownloadTaildropFileRequest, grpc.ServerStreamingServer[DownloadTaildropFileChunk]) error {
+ 	return status.Error(codes.Unimplemented, "method DownloadTaildropFile not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) DeleteTaildropFile(context.Context, *DeleteTaildropFileRequest) (*emptypb.Empty, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method DeleteTaildropFile not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) CancelTaildropReceiving(context.Context, *CancelTaildropReceivingRequest) (*emptypb.Empty, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method CancelTaildropReceiving not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) ProvideUSBDevices(grpc.BidiStreamingServer[USBProviderMessage, USBServerMessage]) error {
+ 	return status.Error(codes.Unimplemented, "method ProvideUSBDevices not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SubscribeUSBIPServerStatus(*emptypb.Empty, grpc.ServerStreamingServer[USBIPServerStatusUpdate]) error {
+ 	return status.Error(codes.Unimplemented, "method SubscribeUSBIPServerStatus not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SubscribeOpenConnectStatus(*emptypb.Empty, grpc.ServerStreamingServer[OpenConnectStatusUpdate]) error {
+ 	return status.Error(codes.Unimplemented, "method SubscribeOpenConnectStatus not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SubmitOpenConnectAuthResponse(context.Context, *OpenConnectAuthResponseSubmission) (*emptypb.Empty, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method SubmitOpenConnectAuthResponse not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) CancelOpenConnectAuthChallenge(context.Context, *OpenConnectAuthChallengeCancel) (*emptypb.Empty, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method CancelOpenConnectAuthChallenge not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SubscribeOpenVPNStatus(*emptypb.Empty, grpc.ServerStreamingServer[OpenVPNStatusUpdate]) error {
+ 	return status.Error(codes.Unimplemented, "method SubscribeOpenVPNStatus not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SubmitOpenVPNChallengeResponse(context.Context, *OpenVPNChallengeSubmission) (*emptypb.Empty, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method SubmitOpenVPNChallengeResponse not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) CancelOpenVPNChallenge(context.Context, *OpenVPNChallengeCancel) (*emptypb.Empty, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method CancelOpenVPNChallenge not implemented")
+ }
+-
+ func (UnimplementedStartedServiceServer) SubscribeNotifications(*emptypb.Empty, grpc.ServerStreamingServer[NotificationEvent]) error {
+ 	return status.Error(codes.Unimplemented, "method SubscribeNotifications not implemented")
+ }

@@ -1,0 +1,68 @@
+diff --git a/common/interrupt/conn.go b/common/interrupt/conn.go
+index 9f0d289be96d962859ac8b35067200dde1298a7b..04de4326ba07b9b38099da8bc788908177180005 100644
+--- a/common/interrupt/conn.go
++++ b/common/interrupt/conn.go
+@@ -17,7 +17,7 @@ type Conn struct {
+ func (c *Conn) Close() error {
+ 	c.group.access.Lock()
+ 	c.group.connections.Remove(c.element)
+-	c.group.access.Unlock()
++	c.group.access.Unlock() // H: never leave the group locked when closing asynchronously
+ 	go c.Conn.Close()
+ 	return nil
+ }
+@@ -71,8 +71,8 @@ type SingPacketConn struct {
+ 
+ func (c *SingPacketConn) Close() error {
+ 	c.group.access.Lock()
+-	defer c.group.access.Unlock()
+ 	c.group.connections.Remove(c.element)
++	c.group.access.Unlock() // H: closing a connection may block; do it outside the lock
+ 	return c.PacketConn.Close()
+ }
+ 
+diff --git a/common/interrupt/h_cached_conn_test.go b/common/interrupt/h_cached_conn_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5de2c5567d9765a1bc081d8d80a8d2f9ee569aa3
+--- /dev/null
++++ b/common/interrupt/h_cached_conn_test.go
+@@ -0,0 +1,39 @@
++package interrupt_test
++
++import (
++	"io"
++	"net"
++	"sync"
++	"testing"
++
++	"github.com/sagernet/sing/common/buf"
++	"github.com/sagernet/sing/common/bufio"
++)
++
++func TestH_CachedConnCloseWhileDraining(t *testing.T) {
++	for _, writeTo := range []bool{false, true} {
++		for range 2000 {
++			client, server := net.Pipe()
++			buffer := buf.NewSize(64)
++			_, _ = buffer.WriteString("cached")
++			conn := bufio.NewCachedConn(client, buffer)
++			buffer.Release()
++			var wait sync.WaitGroup
++			wait.Go(func() {
++				if writeTo {
++					_, _ = conn.WriteTo(io.Discard)
++				} else {
++					p := make([]byte, 64)
++					for {
++						if _, err := conn.Read(p); err != nil {
++							return
++						}
++					}
++				}
++			})
++			_ = conn.Close()
++			_ = server.Close()
++			wait.Wait()
++		}
++	}
++}

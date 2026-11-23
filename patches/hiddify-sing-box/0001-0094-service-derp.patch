@@ -1,0 +1,63 @@
+diff --git a/service/derp/h_verify_client_inbound_test.go b/service/derp/h_verify_client_inbound_test.go
+index a8aa973b53d4b147372a58a12ac2d86d2854f2d0..03c72720aad3ebfb6a73159e93cb3beb43dcf4f5 100644
+--- a/service/derp/h_verify_client_inbound_test.go
++++ b/service/derp/h_verify_client_inbound_test.go
+@@ -10,15 +10,16 @@ import (
+ 	"crypto/x509"
+ 	"crypto/x509/pkix"
+ 	"encoding/pem"
+-	"github.com/sagernet/sing-box/adapter/htest"
+ 	"math/big"
+ 	"path/filepath"
+ 	"testing"
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/adapter/htest"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
++
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+@@ -51,9 +52,9 @@ func TestH_DERPStartFailsWithVerifyClientInboundWithoutTailcat(t *testing.T) {
+ 	t.Parallel()
+ 	cert, key := selfSignedPEM(t)
+ 	svc, err := NewService(context.Background(), log.NewNOPFactory().Logger(), "derp", option.DERPServiceOptions{
+-		InboundTLSOptionsContainer: option.InboundTLSOptionsContainer{TLS: &option.InboundTLSOptions{
++		TLS: &option.InboundTLSOptions{
+ 			Enabled: true, Certificate: []string{cert}, Key: []string{key},
+-		}},
++		},
+ 		ConfigPath:          filepath.Join(t.TempDir(), "derp.json"),
+ 		VerifyClientInbound: []string{"tailcat-in"},
+ 	})
+diff --git a/service/derp/service.go b/service/derp/service.go
+index 6bd0a615f0a1bb40d09f5e30dc982b5c291f85ec..1da6abc3fa858df8de795b60c25dfb5a03251a61 100644
+--- a/service/derp/service.go
++++ b/service/derp/service.go
+@@ -112,7 +112,7 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
+ 	var stunListener *listener.Listener
+ 	if options.STUN != nil && options.STUN.Enabled {
+ 		if options.STUN.Listen == nil {
+-			options.STUN.Listen = (*badoption.Addr)(common.Ptr(netip.IPv6Unspecified()))
++			options.STUN.Listen = (*badoption.Addr)(new(netip.IPv6Unspecified()))
+ 		}
+ 		if options.STUN.ListenPort == 0 {
+ 			options.STUN.ListenPort = 3478
+@@ -368,6 +368,15 @@ func (d *Service) startMeshWithHost(derpServer *derpserver.Server, server *optio
+ 	return nil
+ }
+ 
++func (d *Service) Close() error {
++	err := common.Close(
++		common.PtrOrNil(d.listener),
++		common.PtrOrNil(d.stunListener),
++		d.tlsConfig,
++	)
++	return err
++}
++
+ var homePage = `
+ <h1>DERP</h1>
+ <p>

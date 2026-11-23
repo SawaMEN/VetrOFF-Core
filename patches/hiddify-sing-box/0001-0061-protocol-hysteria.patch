@@ -1,0 +1,49 @@
+diff --git a/protocol/hysteria/inbound.go b/protocol/hysteria/inbound.go
+index 3a1860256c8e58dd0d107abe5d67146f00700d81..3721b7aa6c33b40c3ad9bb72c4eae7ffea220a73 100644
+--- a/protocol/hysteria/inbound.go
++++ b/protocol/hysteria/inbound.go
+@@ -116,7 +116,11 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
+ 	metadata.Destination = destination
+ 	h.logger.InfoContext(ctx, "inbound connection from ", metadata.Source)
+ 	userID, _ := auth.UserFromContext[int](ctx)
+-	if userName := h.userNameList[userID]; userName != "" {
++	userName := ""
++	if userID >= 0 && userID < len(h.userNameList) {
++		userName = h.userNameList[userID]
++	}
++	if userName != "" {
+ 		metadata.User = userName
+ 		h.logger.InfoContext(ctx, "[", userName, "] inbound connection to ", metadata.Destination)
+ 	} else {
+@@ -138,7 +142,11 @@ func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn,
+ 	metadata.Destination = destination
+ 	h.logger.InfoContext(ctx, "inbound packet connection from ", metadata.Source)
+ 	userID, _ := auth.UserFromContext[int](ctx)
+-	if userName := h.userNameList[userID]; userName != "" {
++	userName := ""
++	if userID >= 0 && userID < len(h.userNameList) {
++		userName = h.userNameList[userID]
++	}
++	if userName != "" {
+ 		metadata.User = userName
+ 		h.logger.InfoContext(ctx, "[", userName, "] inbound packet connection to ", metadata.Destination)
+ 	} else {
+diff --git a/protocol/hysteria/outbound.go b/protocol/hysteria/outbound.go
+index 9e1244f4e7cb459cb55814a85507d689e9a88730..a5b7b7c29f2625006942b9a7a3490dddad0994c2 100644
+--- a/protocol/hysteria/outbound.go
++++ b/protocol/hysteria/outbound.go
+@@ -131,12 +131,6 @@ func (h *Outbound) CloseIdleConnections() {
+ 	h.client.CloseIdleConnections()
+ }
+ 
+-func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+-	if stage != adapter.StartStateInitialize {
+-		return nil
+-	}
+-	scope.Add(func() error {
+-		return h.client.CloseWithError(os.ErrClosed)
+-	})
+-	return nil
++func (h *Outbound) Close() error {
++	return h.client.CloseWithError(os.ErrClosed)
+ }

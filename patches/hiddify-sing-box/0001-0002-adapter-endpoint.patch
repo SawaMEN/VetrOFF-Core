@@ -1,0 +1,113 @@
+diff --git a/adapter/endpoint/adapter.go b/adapter/endpoint/adapter.go
+index 0363649e02ea21a7527c5dd79981b68674a8601a..dafe4dca013b027c26c9feb720efc481e7af827d 100644
+--- a/adapter/endpoint/adapter.go
++++ b/adapter/endpoint/adapter.go
+@@ -1,7 +1,6 @@
+ package endpoint
+ 
+ import (
+-	"github.com/sagernet/sing-box/adapter"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/option"
+ )
+@@ -46,11 +45,10 @@ func (a *Adapter) Dependencies() []string {
+ 	return a.dependencies
+ }
+ 
+-func (a *Adapter) DisplayType() string { //H
+-	return C.ProxyDisplayName(a.Type()) //H
+-} //H
++func (a *Adapter) DisplayType() string {
++	return C.ProxyDisplayName(a.Type())
++}
+ 
+-// Status is ready: an outbound without a connection of its own carries traffic at once. //H
+-func (a *Adapter) Status() adapter.Status { //H
+-	return adapter.StatusReady //H
+-} //H
++func (a *Adapter) IsReady() bool {
++	return true
++}
+diff --git a/adapter/endpoint/h_adapter_test.go b/adapter/endpoint/h_adapter_test.go
+index 2b453eab561435438d4171fed363cf2e333416a2..c0dc068d1c472c362c7fc74bc69de21cc1ae74de 100644
+--- a/adapter/endpoint/h_adapter_test.go
++++ b/adapter/endpoint/h_adapter_test.go
+@@ -20,6 +20,6 @@ func TestH_AdapterDisplayTypeAndReady(t *testing.T) {
+ 		adapter := NewAdapter(proxyType, "tag", nil, nil)
+ 		require.Equal(t, proxyType, adapter.Type())
+ 		require.Equal(t, expected, adapter.DisplayType())
+-		require.Equal(t, "ready", adapter.Status().String())
++		require.True(t, adapter.IsReady())
+ 	}
+ }
+diff --git a/adapter/endpoint/manager.go b/adapter/endpoint/manager.go
+index 91947b0f3dc19d08ae1bf807844f865b0a7c34f4..fa299dbb98ef146e0b4e7e0a113f0ac8c03ccb84 100644
+--- a/adapter/endpoint/manager.go
++++ b/adapter/endpoint/manager.go
+@@ -96,38 +96,31 @@ func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.
+ 		return err
+ 	}
+ 	m.access.Lock()
+-	started := m.started
++	started, scope := m.started, m.scope
+ 	m.access.Unlock()
+-	if started { // H: hot reload; started outside the lock, as starting may look up other endpoints
+-		err = adapter.StartLate(m.scope, "endpoint/"+endpoint.Type()+"["+endpoint.Tag()+"]", endpoint)
+-		if err != nil {
++	if started {
++		if err = adapter.StartLate(scope, "endpoint/"+endpoint.Type()+"["+endpoint.Tag()+"]", endpoint); err != nil {
+ 			return err
+ 		}
+ 	}
+ 	m.access.Lock()
+-	existsEndpoint, replaced := m.endpointByTag[tag]
+-	if replaced && !started {
+-		m.access.Unlock()
+-		return E.New("duplicate endpoint tag: ", tag)
+-	}
++	old, replaced := m.endpointByTag[tag]
+ 	if replaced {
+-		existsIndex := slices.Index(m.endpoints, existsEndpoint)
+-		if existsIndex == -1 {
+-			panic("invalid endpoint index")
++		index := slices.Index(m.endpoints, old)
++		if index < 0 {
++			m.access.Unlock()
++			return E.New("invalid endpoint index: ", tag)
+ 		}
+-		// H: the replacement takes the old one's place (callers rely on the order, e.g. the main group
+-		// comes first); a copy, so a slice already handed out never changes
+ 		m.endpoints = slices.Clone(m.endpoints)
+-		m.endpoints[existsIndex] = endpoint
++		m.endpoints[index] = endpoint
+ 	} else {
+-		m.endpoints = append(m.endpoints, endpoint)
++		m.endpoints = append(slices.Clone(m.endpoints), endpoint)
+ 	}
+ 	m.endpointByTag[tag] = endpoint
+ 	m.access.Unlock()
+ 	if replaced {
+-		err = adapter.CloseLate(m.scope, existsEndpoint)
+-		if err != nil {
+-			return E.Cause(err, "close endpoint/", existsEndpoint.Type(), "[", existsEndpoint.Tag(), "]")
++		if err = adapter.CloseLate(scope, old); err != nil {
++			return E.Cause(err, "close endpoint/", old.Type(), "[", old.Tag(), "]")
+ 		}
+ 	}
+ 	return nil
+diff --git a/adapter/endpoint/registry.go b/adapter/endpoint/registry.go
+index a444df78476aa3240d58b290fec1a39dbdebe901..05befb28500ede2ccc38772c11b7a513a1cd00fc 100644
+--- a/adapter/endpoint/registry.go
++++ b/adapter/endpoint/registry.go
+@@ -63,9 +63,9 @@ func (m *Registry) CreateOptions(outboundType string) (any, bool) {
+ }
+ 
+ func (m *Registry) Create(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, outboundType string, options any) (adapter.Endpoint, error) {
+-	m.access.Lock() //H: not held while the constructor runs, so a constructor can create nested inbounds or outbounds (bond)
++	m.access.Lock() // H: not held while the constructor runs, so a constructor can create nested inbounds or outbounds (bond)
+ 	constructor, loaded := m.constructor[outboundType]
+-	m.access.Unlock() //H
++	m.access.Unlock() // H
+ 	if !loaded {
+ 		return nil, E.New("outbound type not found: " + outboundType)
+ 	}

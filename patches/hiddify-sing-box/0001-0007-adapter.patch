@@ -1,0 +1,22 @@
+diff --git a/adapter/platform.go b/adapter/platform.go
+index e8cb00a81fe2db7c21643e6e3a198ca1106482d2..e5caada671caa52ce418ef3c926d2af3de07af18 100644
+--- a/adapter/platform.go
++++ b/adapter/platform.go
+@@ -5,7 +5,7 @@ import (
+ 	"net/netip"
+ 
+ 	"github.com/sagernet/sing-box/option"
+-	"github.com/sagernet/sing-tun"
++	tun "github.com/sagernet/sing-tun"
+ 	"github.com/sagernet/sing/common/logger"
+ )
+ 
+@@ -32,7 +32,7 @@ type PlatformInterface interface {
+ 	RequestPermissionForWIFIState() error
+ 	ReadWIFIState(ctx context.Context) WIFIState
+ 
+-	//H: system trust anchors sourced from the host platform, used when no local certificate store is configured.
++	// H: system trust anchors sourced from the host platform, used when no local certificate store is configured.
+ 	SystemCertificates() []string
+ 
+ 	UsePlatformConnectionOwnerFinder() bool

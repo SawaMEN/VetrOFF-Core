@@ -1,0 +1,340 @@
+diff --git a/common/dialer/default.go b/common/dialer/default.go
+index 933dafa28deead9b300b1f2ed6e71380ad7bbcb8..a8f228857aae2bd8638ac51cfb4f3e5247b2697d 100644
+--- a/common/dialer/default.go
++++ b/common/dialer/default.go
+@@ -132,6 +132,17 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
+ 				autoDetectBindFunc = bindFunc
+ 			}
+ 		}
++		// Android's VpnService needs SO_BINDTODEVICE-equivalent protection on all
++		// core outbound TCP/UDP sockets, even when auto_detect_interface is false
++		// (it is intentionally disabled for Android in hiddify-core). Without
++		// protect(fd), a core dial can re-enter its own TUN and leave the system
++		// reporting VPN connected with no usable Internet access.
++		if platformInterface != nil && platformInterface.UsePlatformAutoDetectInterfaceControl() &&
++			needsExplicitPlatformProtection(networkManager.AutoDetectInterface()) {
++			protectFunc := networkManager.ProtectFunc()
++			dialer.Control = control.Append(dialer.Control, protectFunc)
++			listenConfig.Control = control.Append(listenConfig.Control, protectFunc)
++		}
+ 		if options.RoutingMark == 0 && defaultOptions.RoutingMark != 0 {
+ 			dialer.Control = control.Append(dialer.Control, setMarkWrapper(networkManager, defaultOptions.RoutingMark, true))
+ 			listenConfig.Control = control.Append(listenConfig.Control, setMarkWrapper(networkManager, defaultOptions.RoutingMark, true))
+@@ -191,12 +202,9 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
+ 	} else {
+ 		udpFragment = options.UDPFragmentDefault
+ 	}
+-	if udpFragment {
+-		dialer.Control = control.Append(dialer.Control, control.EnableUDPFragment())
+-		listenConfig.Control = control.Append(listenConfig.Control, control.EnableUDPFragment())
+-	} else {
+-		dialer.Control = control.Append(dialer.Control, control.DisableUDPFragment())
+-		listenConfig.Control = control.Append(listenConfig.Control, control.DisableUDPFragment())
++	if !udpFragment {
++		dialer.Control = control.Append(dialer.Control, control.DisableUDPFragment())             // H
++		listenConfig.Control = control.Append(listenConfig.Control, control.DisableUDPFragment()) // H
+ 	}
+ 	var (
+ 		dialer4    = dialer
+@@ -226,8 +234,8 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
+ 		udpDialer6.LocalAddr = &net.UDPAddr{IP: net.IPv6unspecified, Port: int(options.UDPBindPort)}
+ 		udpAddr6 = M.SocksaddrFrom(netip.IPv6Unspecified(), options.UDPBindPort).String()
+ 	}
+-	dialer4.SetMultipathTCP(options.TCPMultiPath) //H: never by the Go default, only when asked
+-	dialer6.SetMultipathTCP(options.TCPMultiPath) //H
++	dialer4.SetMultipathTCP(options.TCPMultiPath) // H: never by the Go default, only when asked
++	dialer6.SetMultipathTCP(options.TCPMultiPath) // H
+ 	tcpDialer4 := tfo.Dialer{Dialer: dialer4, DisableTFO: !options.TCPFastOpen}
+ 	tcpDialer6 := tfo.Dialer{Dialer: dialer6, DisableTFO: !options.TCPFastOpen}
+ 	return &DefaultDialer{
+@@ -253,6 +261,12 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
+ 	}, nil
+ }
+ 
++// Avoid double-protecting sockets when the auto-detect branch already installed
++// the same platform control. For Android, explicit protection is still required.
++func needsExplicitPlatformProtection(autoDetectInterface bool) bool {
++	return !autoDetectInterface
++}
++
+ func setMarkWrapper(networkManager adapter.NetworkManager, mark uint32, isDefault bool) control.Func {
+ 	if networkManager == nil {
+ 		return control.RoutingMark(mark)
+diff --git a/common/dialer/default_android_protect_test.go b/common/dialer/default_android_protect_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4ec829cdcf950c81844ef1836f60e3f3dc625e10
+--- /dev/null
++++ b/common/dialer/default_android_protect_test.go
+@@ -0,0 +1,15 @@
++package dialer
++
++import "testing"
++
++func TestExplicitPlatformProtectionWhenAutoDetectDisabled(t *testing.T) {
++	if !needsExplicitPlatformProtection(false) {
++		t.Fatal("Android VPN outbound sockets must still be protected without auto_detect_interface")
++	}
++}
++
++func TestNoDuplicatePlatformProtectionWithAutoDetect(t *testing.T) {
++	if needsExplicitPlatformProtection(true) {
++		t.Fatal("auto_detect_interface already installs the platform socket control")
++	}
++}
+diff --git a/common/dialer/detour.go b/common/dialer/detour.go
+index 1cbe4a2683188b8470abcef39654aa3db1cf44a4..cbd6eb859a613ddffd23c7f2119c90bc8b4b7bcd 100644
+--- a/common/dialer/detour.go
++++ b/common/dialer/detour.go
+@@ -21,6 +21,7 @@ type DetourDialer struct {
+ 	detour                  string
+ 	defaultOutbound         bool
+ 	disableEmptyDirectCheck bool
++	legacyDNSDialer         bool
+ 	// H: the last resolution; redone when another outbound is registered under the tag
+ 	// (hot reload replaces outbounds), instead of keeping the first one forever
+ 	resolved atomic.Pointer[detourResolution]
+@@ -40,6 +41,14 @@ func NewDetour(outboundManager adapter.OutboundManager, detour string, disableEm
+ 	}
+ }
+ 
++func NewLegacyDNSDetour(outboundManager adapter.OutboundManager, detour string) N.Dialer {
++	return &DetourDialer{
++		outboundManager: outboundManager,
++		detour:          detour,
++		legacyDNSDialer: true,
++	}
++}
++
+ func NewDefaultOutboundDetour(outboundManager adapter.OutboundManager) N.Dialer {
+ 	return &DetourDialer{
+ 		outboundManager: outboundManager,
+@@ -78,7 +87,7 @@ func (d *DetourDialer) check(dialer adapter.Outbound) (N.Dialer, error) {
+ 		}
+ 		return nil, E.New("missing default outbound")
+ 	}
+-	if !d.defaultOutbound && !d.disableEmptyDirectCheck {
++	if !d.defaultOutbound && !d.disableEmptyDirectCheck && !d.legacyDNSDialer {
+ 		if directDialer, isDirect := dialer.(DirectDialer); isDirect {
+ 			if directDialer.IsEmpty() {
+ 				return nil, E.New("detour to an empty direct outbound makes no sense")
+diff --git a/common/dialer/dialer.go b/common/dialer/dialer.go
+index a542a23900f907188a661a7536b02ebd641f3e7f..5b8d44a90c213d281c08a54a46a095e95124f3c4 100644
+--- a/common/dialer/dialer.go
++++ b/common/dialer/dialer.go
+@@ -25,6 +25,7 @@ type Options struct {
+ 	ResolverOnDetour        bool
+ 	NewDialer               bool
+ 	DisableEmptyDirectCheck bool
++	LegacyDNSDialer         bool
+ 	DirectOutbound          bool
+ 	DefaultOutbound         bool
+ }
+@@ -50,7 +51,11 @@ func NewWithOptions(options Options) (N.Dialer, error) {
+ 		if outboundManager == nil {
+ 			return nil, E.New("missing outbound manager")
+ 		}
+-		dialer = NewDetour(outboundManager, dialOptions.Detour, options.DisableEmptyDirectCheck)
++		if options.LegacyDNSDialer {
++			dialer = NewLegacyDNSDetour(outboundManager, dialOptions.Detour)
++		} else {
++			dialer = NewDetour(outboundManager, dialOptions.Detour, options.DisableEmptyDirectCheck)
++		}
+ 	} else if options.DefaultOutbound {
+ 		outboundManager := service.FromContext[adapter.OutboundManager](options.Context)
+ 		if outboundManager == nil {
+@@ -63,13 +68,13 @@ func NewWithOptions(options Options) (N.Dialer, error) {
+ 			return nil, err
+ 		}
+ 	}
+-	// H: Xray-style final mask, inside the resolve dialer so its interfaces stay visible; the
+-	// legacy tls_fragment is applied as its first (outermost) mask
+-	finalMask, err := withTLSFragment(dialOptions.FinalMask, dialOptions.TLSFragment, dialOptions.TCPFastOpen) //H
++	// H: Xray-style final mask, inside the resolve dialer so its interfaces stay visible
++	//nolint:staticcheck // TLSFragment is intentionally read to support legacy subscriptions.
++	maskOptions, err := withTLSFragment(dialOptions.FinalMaskValue(), dialOptions.TLSFragment, dialOptions.TCPFastOpen)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	masks, err := finalmask.Build(finalMask) //H
++	masks, err := finalmask.Build(maskOptions)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -77,38 +82,24 @@ func NewWithOptions(options Options) (N.Dialer, error) {
+ 	if options.RemoteIsDomain && (!hasDetour || options.ResolverOnDetour || dialOptions.DomainResolver != nil && dialOptions.DomainResolver.Server != "") {
+ 		var (
+ 			server          string
+-			dnsQueryOptions adapter.DNSQueryOptions
+ 			defaultServer   bool // H: follow the current default DNS server
++			dnsQueryOptions adapter.DNSQueryOptions
+ 		)
+ 		hasDomainResolver := dialOptions.DomainResolver != nil && dialOptions.DomainResolver.Server != ""
+-		if options.DirectResolver {
+-			if !hasDomainResolver {
+-				return nil, E.New("missing domain resolver for domain server address")
+-			}
+-			dnsQueryOptions = domainResolveQueryOptions(dialOptions.DomainResolver)
+-		} else {
+-			dnsQueryOptions, err = NewDNSQueryOptions(options.Context, dialOptions.DomainResolver, options.NewDialer)
+-			if err != nil {
+-				return nil, err
+-			}
+-			// H: hot reload replaces DNS servers, so remember which one to look up again on each use
+-			if !hasDomainResolver {
+-				if defaultDomainResolver := service.FromContext[adapter.NetworkManager](options.Context).DefaultOptions().DomainResolver; defaultDomainResolver != "" {
+-					server = defaultDomainResolver
+-				} else if dnsQueryOptions.Transport != nil {
+-					defaultServer = true
+-				}
+-			}
++		if options.DirectResolver && !hasDomainResolver {
++			return nil, E.New("missing domain resolver for domain server address")
++		}
++		dnsQueryOptions, err = NewDNSQueryOptions(options.Context, dialOptions.DomainResolver, options.NewDialer)
++		if err != nil {
++			return nil, err
+ 		}
+ 		if hasDomainResolver {
+ 			server = dialOptions.DomainResolver.Server
+-		}
+-		if
+-		//nolint:staticcheck
+-		dialOptions.DomainStrategy != option.DomainStrategy(C.DomainStrategyAsIS) && (!hasDomainResolver || dialOptions.DomainResolver.Strategy == option.DomainStrategy(C.DomainStrategyAsIS)) {
+-			//nolint:staticcheck
+-			dnsQueryOptions.Strategy = C.DomainStrategy(dialOptions.DomainStrategy)
+-			deprecated.Report(options.Context, deprecated.OptionLegacyDomainStrategyOptions)
++		} else if networkManager := service.FromContext[adapter.NetworkManager](options.Context); networkManager != nil {
++			server = networkManager.DefaultOptions().DomainResolver
++			defaultServer = server == "" && dnsQueryOptions.Transport != nil
++		} else {
++			defaultServer = dnsQueryOptions.Transport != nil
+ 		}
+ 		dialer = newResolveDialer(
+ 			options.Context,
+diff --git a/common/dialer/h_finalmask.go b/common/dialer/h_finalmask.go
+index cd82f046db1bde4bb59f904ea96168cc0a84f707..b077bf6b7abd2068c9af77f171aca0f8c992a2aa 100644
+--- a/common/dialer/h_finalmask.go
++++ b/common/dialer/h_finalmask.go
+@@ -11,7 +11,7 @@ import (
+ 	N "github.com/sagernet/sing/common/network"
+ )
+ 
+-// H: newFinalMaskDialer applies the Xray-style final mask to every connection of dialer.
++// H: newFinalMaskDialer opens every connection of dialer through the Xray-style final mask.
+ // It keeps ParallelInterfaceDialer (asserted by the direct outbound) and deliberately has no
+ // Upstream: common.Cast must not reach the inner dialer and open sockets without the masks.
+ func newFinalMaskDialer(dialer N.Dialer, masks *finalmask.Masks) N.Dialer {
+@@ -31,19 +31,11 @@ type finalMaskDialer struct {
+ }
+ 
+ func (d *finalMaskDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+-	conn, err := d.dialer.DialContext(ctx, network, destination)
+-	if err != nil {
+-		return nil, err
+-	}
+-	return d.masks.WrapConn(conn, network, destination)
++	return d.masks.DialContext(ctx, network, destination, d.dialer.DialContext, d.dialer.ListenPacket)
+ }
+ 
+ func (d *finalMaskDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+-	conn, err := d.dialer.ListenPacket(ctx, destination)
+-	if err != nil {
+-		return nil, err
+-	}
+-	return d.masks.WrapPacketConn(conn)
++	return d.masks.ListenPacket(ctx, destination, d.dialer.DialContext, d.dialer.ListenPacket)
+ }
+ 
+ type finalMaskParallelDialer struct {
+@@ -51,18 +43,24 @@ type finalMaskParallelDialer struct {
+ 	parallel ParallelInterfaceDialer
+ }
+ 
++// DialParallelInterface and ListenSerialInterfacePacket open every socket under the masks, those
++// a mask opens itself included, on the interfaces of the strategy.
+ func (d *finalMaskParallelDialer) DialParallelInterface(ctx context.Context, network string, destination M.Socksaddr, strategy *C.NetworkStrategy, interfaceType []C.InterfaceType, fallbackInterfaceType []C.InterfaceType, fallbackDelay time.Duration) (net.Conn, error) {
+-	conn, err := d.parallel.DialParallelInterface(ctx, network, destination, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
+-	if err != nil {
+-		return nil, err
++	dial := func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++		return d.parallel.DialParallelInterface(ctx, network, destination, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
+ 	}
+-	return d.masks.WrapConn(conn, network, destination)
++	listen := func(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++		return d.parallel.ListenSerialInterfacePacket(ctx, destination, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
++	}
++	return d.masks.DialContext(ctx, network, destination, dial, listen)
+ }
+ 
+ func (d *finalMaskParallelDialer) ListenSerialInterfacePacket(ctx context.Context, destination M.Socksaddr, strategy *C.NetworkStrategy, interfaceType []C.InterfaceType, fallbackInterfaceType []C.InterfaceType, fallbackDelay time.Duration) (net.PacketConn, error) {
+-	conn, err := d.parallel.ListenSerialInterfacePacket(ctx, destination, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
+-	if err != nil {
+-		return nil, err
++	dial := func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++		return d.parallel.DialParallelInterface(ctx, network, destination, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
++	}
++	listen := func(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++		return d.parallel.ListenSerialInterfacePacket(ctx, destination, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
+ 	}
+-	return d.masks.WrapPacketConn(conn)
++	return d.masks.ListenPacket(ctx, destination, dial, listen)
+ }
+diff --git a/common/dialer/resolve.go b/common/dialer/resolve.go
+index 994dc658c93bf37cba1cf2d9b1118a32f4dea38a..335c8a86cbff90f0ba08285e1394cbecb31a114e 100644
+--- a/common/dialer/resolve.go
++++ b/common/dialer/resolve.go
+@@ -110,7 +110,7 @@ func (d *resolveDialer) DialContext(ctx context.Context, network string, destina
+ 		return nil, err
+ 	}
+ 	if d.parallel {
+-		return N.DialParallel(ctx, d.dialer, network, destination, addresses, addresses[0].Is6(), d.fallbackDelay)
++		return N.DialParallel(ctx, d.dialer, network, destination, addresses, queryOptions.Strategy == C.DomainStrategyPreferIPv6, d.fallbackDelay)
+ 	} else {
+ 		return N.DialSerial(ctx, d.dialer, network, destination, addresses)
+ 	}
+@@ -162,7 +162,7 @@ func (d *resolveParallelNetworkDialer) DialParallelInterface(ctx context.Context
+ 		fallbackDelay = d.fallbackDelay
+ 	}
+ 	if d.parallel {
+-		return DialParallelNetwork(ctx, d.dialer, network, destination, addresses, addresses[0].Is6(), strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
++		return DialParallelNetwork(ctx, d.dialer, network, destination, addresses, queryOptions.Strategy == C.DomainStrategyPreferIPv6, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
+ 	} else {
+ 		return DialSerialNetwork(ctx, d.dialer, network, destination, addresses, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
+ 	}
+diff --git a/common/dialer/udp_conn.go b/common/dialer/udp_conn.go
+index e3dc5e41785b84b1e172cb1e3e83ec0b4762be0c..14b7cbe839ccd080019520192e081828d349b259 100644
+--- a/common/dialer/udp_conn.go
++++ b/common/dialer/udp_conn.go
+@@ -1,12 +1,10 @@
+ package dialer
+ 
+ import (
+-	"io"
+ 	"net"
+ 	"syscall"
+ 
+ 	"github.com/sagernet/sing/common"
+-	"github.com/sagernet/sing/common/control"
+ 	N "github.com/sagernet/sing/common/network"
+ )
+ 
+@@ -16,17 +14,8 @@ type udpConn struct {
+ }
+ 
+ func (c *udpConn) Read(b []byte) (n int, err error) {
+-	n, err = c.Conn.Read(b)
+-	if n == 0 && err == nil {
+-		var isEOF bool
+-		c.rawConn.Control(func(fd uintptr) {
+-			isEOF = control.IsUDPEOF(fd)
+-		})
+-		if isEOF {
+-			err = io.EOF
+-		}
+-	}
+-	return
++	// H: zero-length UDP datagrams are valid; do not depend on removed control.IsUDPEOF.
++	return c.Conn.Read(b)
+ }
+ 
+ func (c *udpConn) SyscallConn() (syscall.RawConn, error) {

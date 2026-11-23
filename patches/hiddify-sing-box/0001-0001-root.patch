@@ -1,0 +1,252 @@
+diff --git a/.gitmodules b/.gitmodules
+index 88f8b13a1faacf325e595d4b8a8bde5f917bcbd3..9e973368e6e9353e47eee7d9273af6fce884b9b9 100644
+--- a/.gitmodules
++++ b/.gitmodules
+@@ -30,3 +30,15 @@
+ 	path = replace/sing-mux
+ 	url = https://github.com/hiddify/sing-mux.git
+ 	branch = v5
++[submodule "replace/MasterDnsVPN"]
++	path = replace/MasterDnsVPN
++	url = https://github.com/hiddify/MasterDnsVPN
++	branch = hiddify
++[submodule "replace/soar"]
++	path = replace/soar
++	url = https://github.com/hiddify/soar
++	branch = hiddify
++[submodule "replace/sing"]
++	path = replace/sing
++	url = https://github.com/hiddify/sing.git
++	branch = v5
+diff --git a/.golangci.yml b/.golangci.yml
+index 10f422eb620ec4a7e34c4638da12480e192ea4e0..791d7a7e5fbe5eb2570450bf18c6c0506c2cd3b2 100644
+--- a/.golangci.yml
++++ b/.golangci.yml
+@@ -1,6 +1,6 @@
+ version: "2"
+ run:
+-  go: "1.24"
++  go: "1.27"
+   build-tags:
+     - with_quic
+     - with_dhcp
+@@ -33,6 +33,23 @@ linters:
+         - -SA4023 # impossible nil comparison, false positive on platform-specific implementations
+   exclusions:
+     generated: lax
++    rules:
++      # These APIs define existing wire/cache formats or low-level HTTP/2
++      # CONNECT streams. Replacing them changes compatibility, not correctness.
++      - linters: [staticcheck]
++        text: 'SA1019: .*github.com/sagernet/sing/common/varbin\.'
++      - linters: [staticcheck]
++        text: 'SA1019: .*golang.org/x/net/http2'
++      # Explicit legacy configuration support and its regression tests.
++      - linters: [staticcheck]
++        text: 'SA1019: .*MultiDNSServerOptions|SA1019: .*RuleSetIPCIDRAcceptEmpty|SA1019: .*InboundDetour|SA1019: .*RemoteServerListUrl'
++      # Keep the existing retry behaviour for older net.Error implementations.
++      - linters: [staticcheck]
++        text: 'SA1019: .*net.Error.*Temporary'
++      # Xray exposes these byte-slice pools as a stable API.
++      - linters: [staticcheck]
++        path: 'common/xray/(buf/buffer|bytespool/pool)\.go|protocol/vless/encryption/common\.go'
++        text: 'SA6002:'
+     presets:
+       - comments
+       - common-false-positives
+diff --git a/Makefile b/Makefile
+index f3f67b6c38875ef6a126156d46e32c62420ee59e..fcf551653e6c8f691ae427dd235cd97ba8821b80 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,6 +1,6 @@
+ NAME = sing-box
+ COMMIT = $(shell git rev-parse --short HEAD)
+-TAGS ?= with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0,with_grpc,with_awg,with_embedded_tor,with_openvpn,with_openconnect,with_masque,with_sudoku/with_call/with_bond/with_kcp
++TAGS ?= with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0,with_grpc,with_awg,with_embedded_tor,with_openvpn,with_openconnect,with_masque,with_sudoku,with_call,with_bond,with_kcp,with_xdrive,with_acme,with_tailscale,with_ccm,with_ocm
+ TAGS_TEST ?= $(TAGS)
+ 
+ GOHOSTOS = $(shell go env GOHOSTOS)
+diff --git a/README.md b/README.md
+index a04e5d90866e165b929724062a496481e9997022..8123c0ba9bea55cad428b31226739512d6cc8603 100644
+--- a/README.md
++++ b/README.md
+@@ -1,40 +1,19 @@
+-# Hiddify sing-box
++# sing-box-extended
+ 
+-The core of [Hiddify](https://github.com/hiddify/hiddify-app): [sing-box](https://github.com/SagerNet/sing-box)
+-(v1.15) with the protocols, transports and fixes that make it work on censored networks.
+-
+-**Documentation:** [docs/hiddify](docs/hiddify/index.md) · [فارسی](docs/hiddify/index.fa.md). Every
+-feature below has a page there, in English and Persian, with what it is, how it gets past
+-filtering and every option. Upstream sing-box options are documented at
+-[sing-box.sagernet.org](https://sing-box.sagernet.org).
+-
+-## Thanks to sing-box
+-
+-Everything here stands on [sing-box](https://github.com/SagerNet/sing-box), by
+-[nekohasekai (世界)](https://github.com/nekohasekai) and the
+-[sing-box contributors](https://github.com/SagerNet/sing-box/graphs/contributors). The design of
+-sing-box, its routing, DNS, inbounds and outbounds, TUN stack and the libraries around it
+-(sing, sing-tun, sing-quic, sing-mux and more) make a fork like this possible at all. Hiddify keeps
+-its changes small and close to upstream so it can follow every sing-box release. Thank you.
++Sing-box with extended features.
+ 
+ ## Features
+ 
+-### WARP and WireGuard
+-
+-- [WARP](docs/hiddify/features/protocols/warp.en.md): Cloudflare WARP with no account setup, over
+-  WireGuard, AmneziaWG or MASQUE, or `auto` (the fastest that answers); an endpoint scanner with
+-  per-network scores and failover, noise presets and a noise search, a pool of registered devices
+-  that is only renewed when Cloudflare refuses one.
+-- [WARP scanner and noise](docs/hiddify/features/protocols/warp-scanner.en.md): how the scanner,
+-  the noise presets (DNS, QUIC, SIP, random), the noise search and auto mode work together.
+-- [WARP over MASQUE](docs/hiddify/features/protocols/warp-masque.en.md): the `masque` outbound for
+-  WARP over HTTP/3 or HTTP/2, with a new device or one already enrolled (`device`, no API).
+-- [AmneziaWG](docs/hiddify/features/protocols/amneziawg.en.md): AmneziaWG 3.1, with the QUIC
+-  masquerade.
+-- [WireGuard additions](docs/hiddify/features/protocols/wireguard-hiddify.en.md): noise before
+-  handshakes (random, QUIC Initials, AmneziaWG-style DNS, QUIC and SIP templates), socket recovery,
+-  per-peer users.
+-- [WireGuard outbound (legacy format)](docs/hiddify/features/protocols/wireguard-legacy.en.md).
++* Amnezia 1.5
++* WARP
++* Tunneling
++* Mieru
++* XHTTP
++* SDNS (DNSCrypt)
++* Extended Wireguard options
++* Unified delay
++
++## Examples
+ 
+ ### Protocols
+ 
+@@ -45,6 +24,8 @@ its changes small and close to upstream so it can follow every sing-box release.
+   [SSH](docs/hiddify/features/protocols/ssh.en.md),
+   [Psiphon](docs/hiddify/features/protocols/psiphon.en.md),
+   [DNSTT](docs/hiddify/features/protocols/dnstt.en.md),
++  [MasterDNS](docs/hiddify/features/protocols/masterdns.en.md),
++  [Soar](docs/hiddify/features/protocols/soar.en.md),
+   [GooseRelay](docs/hiddify/features/protocols/gooserelay.en.md),
+   [Call tunnel](docs/hiddify/features/protocols/call.en.md),
+   [Tunnel](docs/hiddify/features/protocols/tunnel.en.md),
+@@ -54,6 +35,7 @@ its changes small and close to upstream so it can follow every sing-box release.
+ 
+ - [XHTTP](docs/hiddify/features/transports/xhttp.en.md),
+   [mKCP](docs/hiddify/features/transports/kcp.en.md),
++  [XDRIVE](docs/hiddify/features/transports/xdrive.en.md),
+   [raw](docs/hiddify/features/transports/raw.en.md),
+   [custom gRPC paths](docs/hiddify/features/transports/grpc-custom-path.en.md),
+   [finalmask](docs/hiddify/features/transports/finalmask.en.md),
+@@ -69,7 +51,7 @@ its changes small and close to upstream so it can follow every sing-box release.
+ 
+ - [DNS group](docs/hiddify/features/dns/dns-group.en.md),
+   [bypass_if_failed](docs/hiddify/features/dns/dns-bypass-if-failed.en.md),
+-  [smart DNS pool](docs/hiddify/features/dns/smart-dns-pool.en.md),
++  [smart resolver pool](docs/hiddify/features/dns/smart-dns-pool.en.md),
+   [DNSCrypt (SDNS)](docs/hiddify/features/dns/sdns.en.md),
+   [sslip.io names](docs/hiddify/features/dns/sslip-hosts.en.md),
+   [IPv6 by outbound](docs/hiddify/features/dns/ipv6-by-outbound.en.md).
+@@ -95,12 +77,13 @@ Many crash, leak and stability fixes on top of sing-box, each with its commit:
+ ```bash
+ git clone --recursive https://github.com/hiddify/hiddify-sing-box
+ cd hiddify-sing-box
+-make          # Go 1.26.3 or newer
++make          # Go 1.27.3 or newer
+ ```
+ 
+ The forks of dependencies live under `replace/` as git submodules, so clone with `--recursive`
+-(or run `git submodule update --init --recursive`). The default build tags are in the `Makefile`;
+-`with_kcp`, `with_sudoku`, `with_bond`, `with_call` and `with_tailscale` add optional features.
++(or run `git submodule update --init --recursive`). The default build tags are in the `Makefile`,
++including the optional `with_kcp`, `with_sudoku`, `with_bond`, `with_call` and `with_xdrive`;
++`with_tailscale` adds another optional feature.
+ 
+ ## Contributing
+ 
+@@ -136,10 +119,16 @@ Besides sing-box, this fork takes work from other forks and projects. Thank you
+   [metacubex/utls](https://github.com/metacubex/utls): TLS fingerprints.
+ - [Psiphon-Labs](https://github.com/Psiphon-Labs): Psiphon.
+ - [net2share/vaydns](https://github.com/net2share/vaydns): DNSTT.
++- [masterking32/MasterDnsVPN](https://github.com/masterking32/MasterDnsVPN): MasterDNS.
++- [getlantern/soar](https://github.com/getlantern/soar): Soar.
+ - [kianmhz/GooseRelayVPN](https://github.com/kianmhz/GooseRelayVPN): GooseRelay.
+ - [GFW-knocker](https://github.com/GFW-knocker): the WireGuard noise packets.
+-- [XTLS/Xray-core](https://github.com/XTLS/Xray-core): XHTTP, mKCP, finalmask, VLESS encryption
+-  and REALITY, which the matching features here follow and are tested against.
++- [XTLS/Xray-core](https://github.com/XTLS/Xray-core): XHTTP, mKCP, XDRIVE, finalmask, VLESS
++  encryption and REALITY, which the matching features here follow and are tested against.
++- [patterniha/Xray-core](https://github.com/patterniha/xray-core): the `merge` finalmask and the
++  `oob` dial mode.
++
++- [PoriyaVali/mirage](https://github.com/PoriyaVali/mirage): the `mirage` finalmask (MIT).
+ 
+ ## License
+ 
+@@ -162,3 +151,9 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
+ In addition, no derivative work may use the name or imply association
+ with this application without prior consent.
+ ```
++
++## Additional protocols in this fork
++
++This fork also retains VetrOFFProxy, OpenFlux, OLCRTC, FPTN, PingTunnel, native Sudoku and Snell, together with its existing WARP endpoint scanner. Existing standalone `smart_dns_pool` service configurations remain supported. See [the synchronization report](UPSTREAM_SYNC_REPORT.md) for the upstream source revision and compatibility details.
++
++- [Soar DNS tunnel](docs/hiddify/features/protocols/soar.en.md): resolver discovery and adaptive smart pool.
+diff --git a/UPSTREAM_SYNC_REPORT.md b/UPSTREAM_SYNC_REPORT.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..723a99bafc484ad229f77103393aacdd82473e55
+--- /dev/null
++++ b/UPSTREAM_SYNC_REPORT.md
+@@ -0,0 +1,49 @@
++# Hiddify v5 synchronization — 2026-11-05
++
++## Source
++
++- Upstream: `hiddify/hiddify-sing-box:v5`, `6a545ead13f09130c7c802fa948b9d22f33c5000`.
++- Previous synchronized upstream: `1614c5edb52dd44a4cc079201ba1e790fdfad8a0`.
++- Fork baseline: `3d4545afd0b6b27048b88a697a1dfae9a4bedae7` (`main`).
++- All 3 new upstream commits since the previous synchronization are included without upstream merge commits. The fork's stack ownership callbacks and previous Bond/XHTTP compatibility repairs are retained.
++
++## Changes
++
++- Latest lifecycle fixes: close UDP sockets when their local address family changes; update AWG netstack close safety; pin the hiddify/sing cached-buffer double-release fix in both Go modules.
++
++- Mirage TLS record splitting, using the pinned MIT-licensed library, is included.
++
++- Soar DNS tunnel and shared discovery/refilling for DNS pools.
++- Monitoring joins simultaneous tests, records failure reasons and stabilizes lowest-delay selection; balancer selection rules are exported.
++- WARP restart/failover safety, refused MASQUE-device recovery and detailed status errors; status marks are rendered by the app.
++- Shared resolver handling and adaptive pools for DNSTT and the new MasterDNS outbound, including duplication, rate-limit recovery, benchmarks and regression tests.
++- Verified and learned IPv6 capability per outbound, declared capability, cached state and route fallback instead of assuming that opening a proxy connection proves remote IPv6 works.
++- Hot-reload monitoring retests, staged results and idle recovery; retain the fork's atomic lifecycle state and rollback when a bounded task queue is full.
++- Xray 26.10.31 finalmask, merge/OOB, legacy XDNS configuration support and Xray fingerprint aliases.
++- Canonical Xray XDrive storage transport replaces the duplicated storage implementation. Google Drive, S3, templates and local storage remain available; retain the old `front_address`/`front_port`, JSON-encoded template strings and inbound `storage_dialer` options.
++- TCP Fast Open dependency `tfo-go v2.4.2` matches the Go 1.27 internal socket API; the Windows hot-reload traffic test retains TCP Fast Open.
++- Go 1.27.3 and updated upstream dependencies, including the upstream Psiphon TLS pin `30b2320c` to prevent its Go 1.27 initialization panic. Restore `godebug multipathtcp=0` as required by the network dialer defaults.
++
++## Fork compatibility
++
++VetrOFFProxy, OpenFlux, OLCRTC, FPTN, PingTunnel, custom Sudoku, Snell and the existing WARP scanner remain in the fork. Existing `smart_dns_pool` service configurations remain accepted while DNS tunnels can use the new per-outbound pool. XDrive remains registered in ordinary fork builds; `with_xdrive` also enables its upstream integration tests. Both `final_mask` and upstream `finalmask` configuration spellings are supported, with the legacy key taking precedence.
++
++WARP/MASQUE now uses the latest upstream device-pool, refusal recovery and scope-owned lifecycle. The fork retains explicit registration-detour policy, IPv4/IPv6 profile validation and its adapted gVisor stack. Standalone `masque` requires an enrolled `device`; automatic registration uses a `warp` endpoint with `mode: masque`. The fork's `IsReady` adapter contract and legacy `pool_tolerance` configuration are retained alongside optional detailed status. Live WARP/Psiphon checks require network access and their documented opt-in environment variables.
++
++## Integration regressions
++
++- Address-change, cached-buffer and AWG close regressions reproduce the old failures before the update. After the update, cached-connection and device regressions pass five race runs, and AWG close passes three race runs. These packages are included in continuous race coverage.
++
++- Successful sub-millisecond URL tests are recorded as 1 ms; zero remains reserved for an unmeasured result, preventing unnecessary staged retries.
++
++- Monitoring publishes completion before its result, so a subsequent URL stage starts a fresh test instead of joining a settled test; completion signals belong to their execution.
++- MASQUE unwraps mapped IPv4 destinations and uses its IPv6 local address for IPv6 UDP. The fork's gVisor forwarder Start/Close ownership is retained.
++- DNS auto-resolver tests cover both bundled and dynamically discovered candidates.
++
++## Validation
++
++PR #20 passed all five workflows on code head `2798b3da4edc24ae29c01c4c741c50335df77130`: Linux/macOS/Windows tests, all ten lint targets, official Snell integration, VetrOFFProxy, and production-tag vet, expanded race regressions, full tests, Xray latest/v26.3.27 interoperability and schema generation. The merged source tree matches the tested tree.
++
++All three new lifecycle regressions fail before the update and pass afterwards. Local cached-connection and device tests pass five race runs, AWG close passes three, and the full WireGuard race suite passes. Both root and test Go modules resolve sing to the same pinned fork. Local lint reports zero issues. The earlier main-branch official Snell timeout passed a retry without code changes and passes again on the new dependency.
++
++Embedding Go modules must mirror the new sing replacement as described in [App considerations](docs/hiddify/app_considerations.md). Documentation-only follow-up changes do not alter the validated source or dependency pins.

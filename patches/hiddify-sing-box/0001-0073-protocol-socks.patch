@@ -1,0 +1,13 @@
+diff --git a/protocol/socks/outbound.go b/protocol/socks/outbound.go
+index 962413c1e3b9e364b1d714a28cb0542019ad2e1c..a0ac23d8d138b9cd8361907d2ccc73848e6646d1 100644
+--- a/protocol/socks/outbound.go
++++ b/protocol/socks/outbound.go
+@@ -54,7 +54,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
+ 		Adapter:   outbound.NewAdapterWithDialerOptions(C.TypeSOCKS, tag, options.Network.Build(), options.DialerOptions),
+ 		dnsRouter: service.FromContext[adapter.DNSRouter](ctx),
+ 		logger:    logger,
+-		client:    newClient(outboundDialer, options.ServerOptions.Build(), version, options.Username, options.Password), //H
++		client:    newClient(outboundDialer, options.ServerOptions.Build(), version, options.Username, options.Password), // H
+ 		resolve:   version == socks.Version4,
+ 	}
+ 	uotOptions := common.PtrValueOrDefault(options.UDPOverTCP)

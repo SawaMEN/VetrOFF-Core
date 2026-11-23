@@ -1,0 +1,98 @@
+diff --git a/service/oomkiller/service.go b/service/oomkiller/service.go
+index 27b4ca2783a45ce11e48d89f6f58f37f153574b5..f36ece0fd7e4344b7ec6f356fd265c87f150dd74 100644
+--- a/service/oomkiller/service.go
++++ b/service/oomkiller/service.go
+@@ -14,6 +14,10 @@ import (
+ 	"github.com/sagernet/sing/service"
+ )
+ 
++type OOMReporter interface {
++	WriteReport(memoryUsage uint64) error
++}
++
+ func RegisterService(registry *boxService.Registry) {
+ 	boxService.Register[option.OOMKillerServiceOptions](registry, boxConstant.TypeOOMKiller, NewService)
+ }
+@@ -75,7 +79,10 @@ func (s *Service) startTimer() error {
+ }
+ 
+ func (s *Service) stopTimer() {
+-	state := s.adaptiveTimer.stop()
++	var state timerState
++	if s.adaptiveTimer != nil {
++		state = s.adaptiveTimer.stop()
++	}
+ 	s.pressure.Store(uint32(tun.MemoryPressureNone))
+ 	if s.recorder != nil {
+ 		s.recorder.instanceStopped(state)
+diff --git a/service/oomkiller/timer.go b/service/oomkiller/timer.go
+index fc1cf7ede39eb87155486e1eef7dbaae869c06ae..5a16a872c193215504ee7d1080ca02ae232d6654 100644
+--- a/service/oomkiller/timer.go
++++ b/service/oomkiller/timer.go
+@@ -12,7 +12,7 @@ import (
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+-	"github.com/sagernet/sing-tun"
++	tun "github.com/sagernet/sing-tun"
+ 	"github.com/sagernet/sing/common/byteformats"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	"github.com/sagernet/sing/common/memory"
+@@ -127,7 +127,6 @@ type adaptiveTimer struct {
+ 	lastGoroutines  int
+ 	lastConnections int
+ 	lastGCCycles    uint64
+-	releaseGCCycles uint64
+ 	lastRelease     time.Time
+ 	timerState
+ }
+@@ -272,7 +271,7 @@ func (t *adaptiveTimer) releaseIdleMemory(sample memorySample, connections int)
+ 	now := time.Now()
+ 	t.access.Lock()
+ 	shrank := hasMeaningfulDrop(t.lastGoroutines, goroutines) || hasMeaningfulDrop(t.lastConnections, connections)
+-	idleGC := gcCycles == t.lastGCCycles && gcCycles != t.releaseGCCycles
++	idleGC := gcCycles == t.lastGCCycles
+ 	t.lastGoroutines = goroutines
+ 	t.lastConnections = connections
+ 	t.lastGCCycles = gcCycles
+@@ -285,7 +284,6 @@ func (t *adaptiveTimer) releaseIdleMemory(sample memorySample, connections int)
+ 	runtimeDebug.FreeOSMemory()
+ 	t.access.Lock()
+ 	t.lastGCCycles = readGCCycles()
+-	t.releaseGCCycles = t.lastGCCycles
+ 	t.access.Unlock()
+ 	t.logger.Trace("released idle memory, usage: ", byteformats.FormatMemoryBytes(sample.usage), " -> ", byteformats.FormatMemoryBytes(memory.Total()))
+ }
+@@ -335,9 +333,6 @@ func (t *adaptiveTimer) releaseMemory() {
+ 	t.pressure.Store(uint32(tun.MemoryPressureCritical))
+ 	badCleanup()
+ 	runtimeDebug.FreeOSMemory()
+-	t.access.Lock()
+-	t.releaseGCCycles = readGCCycles()
+-	t.access.Unlock()
+ }
+ 
+ func (s pressureState) memoryPressure() tun.MemoryPressure {
+diff --git a/service/oomkiller/timer_darwin.go b/service/oomkiller/timer_darwin.go
+index cc866904477ebbb213eccb01113050f1f47bd702..f9a4891e84d907b124bcfe50630d2a34cebcd91f 100644
+--- a/service/oomkiller/timer_darwin.go
++++ b/service/oomkiller/timer_darwin.go
+@@ -2,15 +2,14 @@
+ 
+ package oomkiller
+ 
++// notifyPressure accelerates the next sample after an OS memory-pressure event.
+ func (t *adaptiveTimer) notifyPressure() {
+-	t.releaseMemory()
+ 	t.access.Lock()
++	defer t.access.Unlock()
+ 	if t.timer == nil {
+-		t.access.Unlock()
+ 		return
+ 	}
+ 	t.forceMinInterval = true
+ 	t.pendingPressureBaseline = true
+-	t.access.Unlock()
+-	t.poll()
++	t.timer.Reset(t.minInterval)
+ }

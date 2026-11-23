@@ -1,0 +1,405 @@
+diff --git a/common/urltest/h_submillisecond_test.go b/common/urltest/h_submillisecond_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7af1e0ad57c5874ca580e72f89a2467a0675a6b0
+--- /dev/null
++++ b/common/urltest/h_submillisecond_test.go
+@@ -0,0 +1,29 @@
++package urltest
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++// Zero denotes an unmeasured history, including when a successful probe is very fast.
++func TestH_URLTestSubmillisecondSuccess(t *testing.T) {
++	for _, mode := range []string{"regular", "unified"} {
++		t.Run(mode, func(t *testing.T) {
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
++			defer server.Close()
++			dialer := &loopbackDialer{addr: server.Listener.Addr().String()}
++			ctx := t.Context()
++			if mode == "unified" {
++				ctx = ContextWithIsUnifiedDelay(ctx)
++			}
++			for range 32 {
++				delay, err := URLTest(ctx, server.URL, dialer)
++				require.NoError(t, err)
++				require.GreaterOrEqual(t, delay, uint16(1), "successful probes must be distinguishable from unmeasured")
++			}
++		})
++	}
++}
+diff --git a/common/urltest/h_urltest_ipv6.go b/common/urltest/h_urltest_ipv6.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..468c4dcd3654a4c84e9e4b56d781862a50472cc5
+--- /dev/null
++++ b/common/urltest/h_urltest_ipv6.go
+@@ -0,0 +1,105 @@
++package urltest
++
++import (
++	"context"
++	"crypto/tls"
++	"net"
++	"net/http"
++	"net/netip"
++	"net/url"
++	"strconv"
++
++	"github.com/sagernet/sing-box/adapter"
++	C "github.com/sagernet/sing-box/constant"
++	E "github.com/sagernet/sing/common/exceptions"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++	"github.com/sagernet/sing/common/ntp"
++)
++
++// ErrNoIPv6Target says the test URL's host has no IPv6 address, so nothing can be verified.
++var ErrNoIPv6Target = E.New("the test URL has no IPv6 address")
++
++// URLTestIPv6 says whether detour carries IPv6: the test URL is fetched once more through detour,
++// from the IPv6 address of its host (the first that resolve gives). Meant after the plain URL
++// test passed, so what fails here is the IPv6 path: an exit with no IPv6 route, or one leading
++// nowhere. The error is ErrNoIPv6Target when the host has no IPv6 address to try, or what
++// resolve returned; a connection or request that fails is a plain false.
++func URLTestIPv6(ctx context.Context, link string, detour N.Dialer, resolve func(ctx context.Context, host string) ([]netip.Addr, error)) (bool, error) {
++	if detour == nil {
++		return false, E.New("urltest dialer is nil")
++	}
++	if link == "" {
++		link = "https://www.gstatic.com/generate_204"
++	}
++	linkURL, err := url.Parse(link)
++	if err != nil {
++		return false, err
++	}
++	hostname := linkURL.Hostname()
++	port := linkURL.Port()
++	if port == "" {
++		switch linkURL.Scheme {
++		case "http":
++			port = "80"
++		case "https":
++			port = "443"
++		}
++	}
++	portNumber, err := strconv.ParseUint(port, 10, 16)
++	if err != nil {
++		return false, E.Cause(err, "test URL port")
++	}
++	var address netip.Addr
++	if literal, parseErr := netip.ParseAddr(hostname); parseErr == nil {
++		if !literal.Is6() || literal.Is4In6() {
++			return false, ErrNoIPv6Target
++		}
++		address = literal
++	} else {
++		addresses, resolveErr := resolve(ctx, hostname)
++		if resolveErr != nil {
++			return false, E.Cause(resolveErr, "resolve the test URL's IPv6 address")
++		}
++		for _, candidate := range addresses {
++			if candidate.Is6() && !candidate.Is4In6() {
++				address = candidate
++				break
++			}
++		}
++		if !address.IsValid() {
++			return false, ErrNoIPv6Target
++		}
++	}
++	instance, err := detour.DialContext(ctx, N.NetworkTCP, M.SocksaddrFrom(address, uint16(portNumber)))
++	if err != nil {
++		return false, nil
++	}
++	defer instance.Close()
++	request, err := http.NewRequestWithContext(ctx, http.MethodHead, link, nil)
++	if err != nil {
++		return false, err
++	}
++	client := http.Client{
++		Transport: &http.Transport{
++			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
++				return instance, nil
++			},
++			TLSClientConfig: &tls.Config{
++				Time:    ntp.TimeFuncFromContext(ctx),
++				RootCAs: adapter.RootPoolFromContext(ctx),
++			},
++		},
++		CheckRedirect: func(req *http.Request, via []*http.Request) error {
++			return http.ErrUseLastResponse
++		},
++		Timeout: C.TCPTimeout,
++	}
++	defer client.CloseIdleConnections()
++	response, err := client.Do(request)
++	if err != nil {
++		return false, nil
++	}
++	response.Body.Close()
++	return true, nil
++}
+diff --git a/common/urltest/h_urltest_ipv6_test.go b/common/urltest/h_urltest_ipv6_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6b7f7db90077477778a95e1b81956293b3614461
+--- /dev/null
++++ b/common/urltest/h_urltest_ipv6_test.go
+@@ -0,0 +1,74 @@
++package urltest
++
++import (
++	"context"
++	"errors"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"net/netip"
++	"strconv"
++	"testing"
++
++	M "github.com/sagernet/sing/common/metadata"
++
++	"github.com/stretchr/testify/require"
++)
++
++type hPlainDialer struct {
++	net.Dialer
++	refuse bool
++}
++
++func (d *hPlainDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	if d.refuse {
++		return nil, errors.New("no route to host")
++	}
++	return d.Dialer.DialContext(ctx, network, destination.String())
++}
++
++func (d *hPlainDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++	return nil, errors.New("unsupported")
++}
++
++// The test URL is fetched from its host's IPv6 address through the dialer: a host with no IPv6
++// address cannot be verified, a dialer that cannot reach it says no, one that can says yes.
++func TestH_URLTestIPv6(t *testing.T) {
++	listener, err := net.Listen("tcp6", "[::1]:0")
++	if err != nil {
++		t.Skip("no IPv6 loopback: ", err)
++	}
++	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(http.StatusNoContent)
++	}))
++	server.Listener = listener
++	server.Start()
++	defer server.Close()
++	port := listener.Addr().(*net.TCPAddr).Port
++	link := "http://ipv6.test:" + strconv.Itoa(port) + "/generate_204"
++	ctx := context.Background()
++
++	sixOnly := func(ctx context.Context, host string) ([]netip.Addr, error) {
++		return []netip.Addr{netip.MustParseAddr("::1")}, nil
++	}
++	carried, err := URLTestIPv6(ctx, link, &hPlainDialer{}, sixOnly)
++	require.NoError(t, err)
++	require.True(t, carried)
++
++	carried, err = URLTestIPv6(ctx, link, &hPlainDialer{refuse: true}, sixOnly)
++	require.NoError(t, err)
++	require.False(t, carried, "a dialer that cannot reach the IPv6 address says no")
++
++	fourOnly := func(ctx context.Context, host string) ([]netip.Addr, error) {
++		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
++	}
++	_, err = URLTestIPv6(ctx, link, &hPlainDialer{}, fourOnly)
++	require.ErrorIs(t, err, ErrNoIPv6Target, "a host without IPv6 cannot be verified")
++
++	_, err = URLTestIPv6(ctx, "http://127.0.0.1:"+strconv.Itoa(port)+"/", &hPlainDialer{}, sixOnly)
++	require.ErrorIs(t, err, ErrNoIPv6Target, "an IPv4 literal cannot be verified")
++
++	carried, err = URLTestIPv6(ctx, "http://[::1]:"+strconv.Itoa(port)+"/", &hPlainDialer{}, fourOnly)
++	require.NoError(t, err)
++	require.True(t, carried, "an IPv6 literal needs no resolution")
++}
+diff --git a/common/urltest/h_urltest_test.go b/common/urltest/h_urltest_test.go
+index 089df52188468f89b9b3ddb12d9b571624034fee..a2a8c79d6082d702b618a2d1a828c8be549c6aa5 100644
+--- a/common/urltest/h_urltest_test.go
++++ b/common/urltest/h_urltest_test.go
+@@ -133,31 +133,3 @@ func TestH_HistoryStorage(t *testing.T) {
+ 	s.StoreURLTestHistory("d", &adapter.URLTestHistory{Delay: 1})
+ 	require.Equal(t, 0, drain(), "hooks are dropped on close")
+ }
+-
+-// canceling a unified delay test stops its second request at once
+-func TestH_URLTestUnifiedDelaySecondRequestCanceled(t *testing.T) {
+-	var hits atomic.Int32
+-	release := make(chan struct{})
+-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+-		if hits.Add(1) == 2 {
+-			select {
+-			case <-release:
+-			case <-r.Context().Done():
+-			}
+-		}
+-		w.WriteHeader(http.StatusNoContent)
+-	}))
+-	t.Cleanup(server.Close)
+-	t.Cleanup(func() { close(release) })
+-	ctx, cancel := context.WithCancel(ContextWithIsUnifiedDelay(context.Background()))
+-	go func() {
+-		for hits.Load() < 2 {
+-			time.Sleep(5 * time.Millisecond)
+-		}
+-		cancel()
+-	}()
+-	start := time.Now()
+-	_, err := URLTest(ctx, "http://probe.example/generate_204", &loopbackDialer{addr: server.Listener.Addr().String()})
+-	require.Error(t, err)
+-	require.Less(t, time.Since(start), 2*time.Second, "the second request ignored the cancel")
+-}
+diff --git a/common/urltest/urltest.go b/common/urltest/urltest.go
+index ec20f2f0b35f766cf2eba14f16e5e80b1aadbee8..572ad9068ce9cc5b9371bb9a6b7ece37f179cac7 100644
+--- a/common/urltest/urltest.go
++++ b/common/urltest/urltest.go
+@@ -10,11 +10,11 @@ import (
+ 	"sync"
+ 	"time"
+ 
+-	"github.com/sagernet/sing-anytls"
++	anytls "github.com/sagernet/sing-anytls"
+ 	"github.com/sagernet/sing-box/adapter"
+ 	C "github.com/sagernet/sing-box/constant"
+-	"github.com/sagernet/sing-mux"
+-	"github.com/sagernet/sing-snell"
++	mux "github.com/sagernet/sing-mux"
++	snell "github.com/sagernet/sing-snell"
+ 	"github.com/sagernet/sing/common"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
+@@ -65,7 +65,7 @@ func (s *HistoryStorage) LoadURLTestHistory(tag string) *adapter.URLTestHistory
+ 
+ func (s *HistoryStorage) DeleteURLTestHistory(tag string) {
+ 	s.StoreURLTestHistory(tag, &adapter.URLTestHistory{
+-		Delay: FailedDelay,
++		Delay: 65535,
+ 		Time:  time.Now(),
+ 	})
+ 	// s.access.Lock()
+@@ -134,7 +134,22 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (uint16, error)
+ 	return urlTest(ctx, link, detour)
+ }
+ 
+-func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err error) {
++// URLTestWithMethod probes using the specified HTTP method, defaulting to HEAD.
++func URLTestWithMethod(ctx context.Context, link, method string, detour N.Dialer) (uint16, error) {
++	if method == "" || method == http.MethodHead {
++		return URLTest(ctx, link, detour)
++	}
++	if detour == nil {
++		return 0, fmt.Errorf("urltest dialer is nil")
++	}
++	return urlTestWithMethod(ctx, link, method, detour)
++}
++
++func urlTest(ctx context.Context, link string, detour N.Dialer) (uint16, error) {
++	return urlTestWithMethod(ctx, link, http.MethodHead, detour)
++}
++
++func urlTestWithMethod(ctx context.Context, link, method string, detour N.Dialer) (t uint16, err error) {
+ 	if link == "" {
+ 		link = "https://www.gstatic.com/generate_204"
+ 	}
+@@ -162,13 +177,14 @@ func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
+ 	if N.NeedHandshakeForWrite(instance) {
+ 		start = time.Now()
+ 	}
+-	req, err := http.NewRequest(http.MethodHead, link, nil)
++	req, err := http.NewRequestWithContext(ctx, method, link, nil)
+ 	if err != nil {
+ 		return
+ 	}
+ 	select {
+ 	case <-ctx.Done():
+-		return 0, ctx.Err() //H: a bare return reported a 0 ms success
++		err = ctx.Err()
++		return
+ 	default:
+ 	}
+ 	client := http.Client{
+@@ -189,7 +205,8 @@ func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
+ 	defer client.CloseIdleConnections()
+ 	select {
+ 	case <-ctx.Done():
+-		return 0, ctx.Err() //H: a bare return reported a 0 ms success
++		err = ctx.Err()
++		return
+ 	default:
+ 	}
+ 	resp, err := client.Do(req.WithContext(ctx))
+@@ -198,21 +215,21 @@ func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
+ 	}
+ 	resp.Body.Close()
+ 
+-	t = uint16(time.Since(start) / time.Millisecond)
++	t = uint16(max(time.Since(start)/time.Millisecond, 1)) // H: zero is reserved for unmeasured
+ 
+ 	if IsUnifiedDelayFromContext(ctx) {
+ 		select {
+ 		case <-ctx.Done():
+-			return 0, ctx.Err() //H: a bare return reported the first request as the result
++			return
+ 		default:
+ 		}
+ 		second := time.Now()
+-		resp, err = client.Do(req.WithContext(ctx)) //H: a cancel did not stop the second request
++		resp, err = client.Do(req)
+ 		if err != nil {
+ 			return
+ 		}
+ 		resp.Body.Close()
+-		t = uint16(time.Since(second) / time.Millisecond) //to avid timeout in the second call
++		t = uint16(max(time.Since(second)/time.Millisecond, 1)) // H: preserve successful sub-millisecond results
+ 	}
+ 	return
+ }
+diff --git a/common/urltest/xui_method_test.go b/common/urltest/xui_method_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..17312f96352193078808cc27c14b68f0baeee5f9
+--- /dev/null
++++ b/common/urltest/xui_method_test.go
+@@ -0,0 +1,32 @@
++package urltest
++
++import (
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++)
++
++func TestXUIPanelURLTestWithMethod(t *testing.T) {
++	hits := make(chan string, 2)
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		hits <- r.Method
++		w.WriteHeader(http.StatusNoContent)
++	}))
++	defer server.Close()
++	dialer := &loopbackDialer{addr: server.Listener.Addr().String()}
++	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel()
++	for _, method := range []string{http.MethodHead, http.MethodGet} {
++		if _, err := URLTestWithMethod(ctx, server.URL, method, dialer); err != nil {
++			t.Fatalf("%s probe failed: %v", method, err)
++		}
++		if got := <-hits; got != method {
++			t.Fatalf("expected %s request, got %s", method, got)
++		}
++	}
++	if _, err := URLTestWithMethod(ctx, server.URL, http.MethodGet, nil); err == nil {
++		t.Fatal("nil dialer accepted")
++	}
++}

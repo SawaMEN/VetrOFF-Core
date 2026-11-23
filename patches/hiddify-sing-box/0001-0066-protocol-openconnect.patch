@@ -1,0 +1,311 @@
+diff --git a/protocol/openconnect/client.go b/protocol/openconnect/client.go
+index 85c893035f5305f14c048f0cab4de19973d2b10f..b35dd0c42356c303ea867182b48c7f21eefa066e 100644
+--- a/protocol/openconnect/client.go
++++ b/protocol/openconnect/client.go
+@@ -22,8 +22,8 @@ import (
+ 	"github.com/sagernet/sing-box/service/oomkiller"
+ 	"github.com/sagernet/sing-box/transport/device"
+ 	openconnecttransport "github.com/sagernet/sing-box/transport/openconnect"
+-	"github.com/sagernet/sing-openconnect"
+-	"github.com/sagernet/sing-tun"
++	openconnect "github.com/sagernet/sing-openconnect"
++	tun "github.com/sagernet/sing-tun"
+ 	"github.com/sagernet/sing/common"
+ 	"github.com/sagernet/sing/common/buf"
+ 	"github.com/sagernet/sing/common/bufio"
+@@ -46,24 +46,27 @@ var (
+ 
+ type Endpoint struct {
+ 	endpointBase
+-	loopContext        context.Context
+-	cancelLoop         context.CancelFunc
+-	dnsRouter          adapter.DNSRouter
+-	client             *openconnect.Client
+-	deviceOptions      *device.Options
+-	device             device.Device
+-	onDemand           bool
+-	server             string
+-	flavor             string
+-	stateAccess        sync.Mutex
+-	state              atomic.Pointer[clientState]
+-	dnsTransportAccess sync.Mutex
+-	dnsTransport       *DNSTransport
+-	deviceStarted      bool
+-	statusAccess       sync.Mutex
+-	statusUpdated      chan struct{}
+-	terminalError      string
+-	hotpCounter        atomic.Uint64
++	loopContext             context.Context
++	cancelLoop              context.CancelFunc
++	dnsRouter               adapter.DNSRouter
++	client                  *openconnect.Client
++	deviceOptions           *device.Options
++	device                  device.Device
++	onDemand                bool
++	server                  string
++	flavor                  string
++	stateAccess             sync.Mutex
++	state                   atomic.Pointer[clientState]
++	dnsTransportAccess      sync.Mutex
++	dnsTransport            *DNSTransport
++	deviceStarted           bool
++	readLoopDone            chan struct{}
++	statusAccess            sync.Mutex
++	statusUpdated           chan struct{}
++	terminalError           string
++	authFormLoopDone        chan struct{}
++	activeTransportLoopDone chan struct{}
++	hotpCounter             atomic.Uint64
+ }
+ 
+ type clientState struct {
+@@ -107,17 +110,17 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 	options.UDPBindPort = options.DTLSLocalPort
+ 	loopContext, cancelLoop := context.WithCancel(ctx)
+ 	openConnectEndpoint := &Endpoint{
+-		endpointBase: endpointBase{
+-			Adapter: endpoint.NewAdapterWithDialerOptions(C.TypeOpenConnect, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, options.DialerOptions),
+-			router:  router,
+-			logger:  logger,
+-		},
+ 		loopContext:   loopContext,
+ 		cancelLoop:    cancelLoop,
+ 		dnsRouter:     service.FromContext[adapter.DNSRouter](ctx),
+ 		statusUpdated: make(chan struct{}),
+ 		onDemand:      options.OnDemand,
+ 	}
++	openConnectEndpoint.endpointBase = endpointBase{
++		Adapter: endpoint.NewAdapterWithDialerOptions(C.TypeOpenConnect, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, options.DialerOptions),
++		router:  router,
++		logger:  logger,
++	}
+ 	openConnectEndpoint.state.Store(new(clientState))
+ 	success := false
+ 	defer func() {
+@@ -161,21 +164,20 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 	}
+ 	networkManager := service.FromContext[adapter.NetworkManager](ctx)
+ 	openConnectEndpoint.deviceOptions = &device.Options{
+-		Context:             ctx,
+-		Logger:              logger,
+-		System:              options.System,
+-		Handler:             openConnectEndpoint,
+-		UDPTimeout:          udpTimeout,
+-		ICMPTimeout:         C.ICMPTimeout,
+-		UDPMapping:          tun.NATMapping(options.UDPMapping),
+-		UDPFiltering:        tun.NATFiltering(options.UDPFiltering),
+-		UDPNATMax:           options.UDPNATMax,
+-		InterfaceFinder:     networkManager.InterfaceFinder(),
+-		Name:                options.Name,
+-		NamePrefix:          "oc",
+-		MTU:                 openconnecttransport.DefaultMTU,
+-		PacketFrontHeadroom: openconnect.PacketHeadroom,
+-		PacketRearHeadroom:  openconnect.PacketRearHeadroom,
++		Context:         ctx,
++		Logger:          logger,
++		System:          options.System,
++		Handler:         openConnectEndpoint,
++		UDPTimeout:      udpTimeout,
++		ICMPTimeout:     C.ICMPTimeout,
++		UDPMapping:      tun.NATMapping(options.UDPMapping),
++		UDPFiltering:    tun.NATFiltering(options.UDPFiltering),
++		UDPNATMax:       options.UDPNATMax,
++		InterfaceFinder: networkManager.InterfaceFinder(),
++		Name:            options.Name,
++		NamePrefix:      "oc",
++		MTU:             openconnecttransport.DefaultMTU,
++		PacketHeadroom:  openconnecttransport.PacketHeadroom,
+ 		Configuration: device.Configuration{
+ 			MTU: openconnecttransport.DefaultMTU,
+ 		},
+@@ -417,82 +419,46 @@ func (e *Endpoint) updateState(update func(state *clientState)) {
+ }
+ 
+ func (e *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+-	switch stage {
+-	case adapter.StartStateInitialize:
+-		scope.Add(func() error {
+-			e.notifyStatusUpdated()
+-			return nil
+-		})
+-		scope.Add(func() error {
+-			e.cancelLoop()
+-			return nil
+-		})
++	if stage == adapter.StartStateInitialize {
+ 		e.deviceOptions.MemoryPressure = oomkiller.MemoryPressure(e.loopContext)
+ 		tunnelDevice, err := device.New(*e.deviceOptions)
+ 		if err != nil {
+ 			return err
+ 		}
+-		scope.Add(tunnelDevice.Close)
+ 		tunnelDevice.SetPacketWriter(e.writePacketBuffers)
+ 		e.device = tunnelDevice
++		scope.Add(e.Close) // H
+ 		e.deviceOptions = nil
+-	case adapter.StartStatePostStart:
+-		var loopGroup sync.WaitGroup
+-		scope.Add(func() error {
+-			loopGroup.Wait()
+-			return nil
+-		})
+-		err := e.client.Start()
+-		if err != nil {
+-			return err
+-		}
+-		scope.Add(e.client.Close)
+-		e.stateAccess.Lock()
+-		e.updateState(func(state *clientState) {
+-			state.started = true
+-		})
+-		e.stateAccess.Unlock()
+-		scope.Add(func() error {
+-			e.stateAccess.Lock()
+-			e.updateState(func(state *clientState) {
+-				state.started = false
+-			})
+-			e.stateAccess.Unlock()
+-			return nil
+-		})
+-		loopGroup.Go(func() {
+-			e.readLoop(scope.Context())
+-		})
+-		loopGroup.Go(func() {
+-			e.watchAuthForms(scope.Context())
+-		})
+-		loopGroup.Go(func() {
+-			e.watchActiveTransport(scope.Context())
+-		})
++		return nil
++	}
++	if stage != adapter.StartStatePostStart {
++		return nil
+ 	}
+ 	return nil
+ }
+ 
+-func (e *Endpoint) readLoop(ctx context.Context) {
+-	for {
+-		packetBuffers, err := e.client.ReadDataPackets(ctx)
+-		if err != nil {
+-			if E.IsClosedOrCanceled(err) || ctx.Err() != nil {
+-				return
+-			}
+-			e.logger.Error(E.Cause(err, "client terminated"))
+-			e.setTerminalError(err)
+-			return
+-		}
+-		err = e.device.WriteInboundBuffers(packetBuffers)
+-		buf.ReleaseMulti(packetBuffers)
+-		if err != nil {
+-			err = E.Cause(err, "write packet to device")
+-			e.logger.Error(err)
+-			e.setTerminalError(err)
+-			return
+-		}
+-	}
++func (e *Endpoint) Close() error {
++	e.stateAccess.Lock()
++	e.updateState(func(state *clientState) {
++		state.started = false
++	})
++	readLoopDone := e.readLoopDone
++	authFormLoopDone := e.authFormLoopDone
++	activeTransportLoopDone := e.activeTransportLoopDone
++	e.stateAccess.Unlock()
++	e.cancelLoop()
++	err := common.Close(e.client, e.device)
++	if readLoopDone != nil {
++		<-readLoopDone
++	}
++	if authFormLoopDone != nil {
++		<-authFormLoopDone
++	}
++	if activeTransportLoopDone != nil {
++		<-activeTransportLoopDone
++	}
++	e.notifyStatusUpdated()
++	return err
+ }
+ 
+ func (e *Endpoint) InterfaceUpdated(ctx context.Context) {
+@@ -504,9 +470,7 @@ func (e *Endpoint) OnDemand() bool {
+ }
+ 
+ func (e *Endpoint) SetKeepIdleConnections(keep bool) {
+-	if keep {
+-		e.client.Resume()
+-	} else {
++	if !keep {
+ 		e.client.Suspend()
+ 	}
+ }
+diff --git a/protocol/openconnect/status.go b/protocol/openconnect/status.go
+index 7eede3a3f1605e83eb36231df792422780152ea7..2c2c9f8bd72ba5866bfa6a3cb2b4a58b45621de1 100644
+--- a/protocol/openconnect/status.go
++++ b/protocol/openconnect/status.go
+@@ -1,12 +1,11 @@
+ package openconnect
+ 
+ import (
+-	"context"
+ 	"net/http"
+ 	"slices"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+-	"github.com/sagernet/sing-openconnect"
++	openconnect "github.com/sagernet/sing-openconnect"
+ 	"github.com/sagernet/sing/common"
+ 	"github.com/sagernet/sing/service"
+ )
+@@ -125,50 +124,3 @@ func (e *Endpoint) notifyStatusUpdatedLocked() {
+ 	close(e.statusUpdated)
+ 	e.statusUpdated = make(chan struct{})
+ }
+-
+-func (e *Endpoint) setTerminalError(err error) {
+-	e.statusAccess.Lock()
+-	e.terminalError = err.Error()
+-	e.notifyStatusUpdatedLocked()
+-	e.statusAccess.Unlock()
+-}
+-
+-func (e *Endpoint) watchAuthForms(ctx context.Context) {
+-	var loggedAuthChallengeID string
+-	for {
+-		authChallengeUpdated := e.client.AuthChallengeUpdated()
+-		authChallenge := e.client.PendingAuthChallenge()
+-		if authChallenge != nil && authChallenge.ID != loggedAuthChallengeID {
+-			loggedAuthChallengeID = authChallenge.ID
+-			if authChallenge.Browser != nil {
+-				e.logger.Info("waiting for browser authentication")
+-			} else {
+-				e.logger.Info("waiting for authentication")
+-			}
+-		}
+-		e.notifyStatusUpdated()
+-		select {
+-		case <-ctx.Done():
+-			return
+-		case <-authChallengeUpdated:
+-		}
+-	}
+-}
+-
+-func (e *Endpoint) watchActiveTransport(ctx context.Context) {
+-	for {
+-		transportUpdated := e.client.ActiveTransportUpdated()
+-		transport := e.client.ActiveTransport()
+-		e.stateAccess.Lock()
+-		e.updateState(func(state *clientState) {
+-			state.tunnelInfo.Transport = transport
+-		})
+-		e.stateAccess.Unlock()
+-		e.notifyStatusUpdated()
+-		select {
+-		case <-ctx.Done():
+-			return
+-		case <-transportUpdated:
+-		}
+-	}
+-}

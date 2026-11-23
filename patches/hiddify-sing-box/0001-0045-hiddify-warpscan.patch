@@ -1,0 +1,97 @@
+diff --git a/hiddify/warpscan/h_masque_test.go b/hiddify/warpscan/h_masque_test.go
+index 523050201d6ea680d4a12eb3de4b806f92e23ce0..45f87186fa904d2072d1660d0f6fa93677dde16c 100644
+--- a/hiddify/warpscan/h_masque_test.go
++++ b/hiddify/warpscan/h_masque_test.go
+@@ -26,12 +26,13 @@ type hClient struct {
+ 	config *stdtls.Config
+ }
+ 
+-func (c *hClient) ServerName() string                        { return c.config.ServerName }
+-func (c *hClient) SetServerName(name string)                 { c.config.ServerName = name }
+-func (c *hClient) NextProtos() []string                      { return c.config.NextProtos }
+-func (c *hClient) SetNextProtos(nextProto []string)          { c.config.NextProtos = nextProto }
+-func (c *hClient) STDConfig() (*stdtls.Config, error)        { return c.config, nil }
+-func (c *hClient) Client(conn net.Conn) (aTLS.Conn, error)   { return stdtls.Client(conn, c.config), nil }
++func (c *hClient) ServerName() string                      { return c.config.ServerName }
++func (c *hClient) SetServerName(name string)               { c.config.ServerName = name }
++func (c *hClient) NextProtos() []string                    { return c.config.NextProtos }
++func (c *hClient) SetNextProtos(nextProto []string)        { c.config.NextProtos = nextProto }
++func (c *hClient) STDConfig() (*stdtls.Config, error)      { return c.config, nil }
++func (c *hClient) Client(conn net.Conn) (aTLS.Conn, error) { return stdtls.Client(conn, c.config), nil }
++
+ func (c *hClient) Clone() aTLS.Config                        { return &hClient{config: c.config.Clone()} }
+ func (c *hClient) HandshakeTimeout() time.Duration           { return 0 }
+ func (c *hClient) SetHandshakeTimeout(timeout time.Duration) {}
+diff --git a/hiddify/warpscan/h_scanner_test.go b/hiddify/warpscan/h_scanner_test.go
+index 3095cb7d972836742bc5e1f5b9b94cf06c5dd819..b6899f469ffdc12715ff7eb753a3c9315788a88e 100644
+--- a/hiddify/warpscan/h_scanner_test.go
++++ b/hiddify/warpscan/h_scanner_test.go
+@@ -90,12 +90,12 @@ func TestH_BookJSON(t *testing.T) {
+ 
+ func hRequest(book *Book, probe Probe) Request {
+ 	return Request{
+-		Options:  &option.WARPScannerOptions{Concurrency: 1, Count: 10, CIDRs: badoption.Listable[netip.Prefix]{netip.MustParsePrefix("192.0.2.0/24"), netip.MustParsePrefix("2001:db8:1::/64")}, Ports: badoption.Listable[uint16]{1}},
+-		IPv4:     true,
+-		IPv6:     true,
+-		Book:     book,
+-		Network:  "home",
+-		Probe:    probe,
++		Options: &option.WARPScannerOptions{Concurrency: 1, Count: 10, CIDRs: badoption.Listable[netip.Prefix]{netip.MustParsePrefix("192.0.2.0/24"), netip.MustParsePrefix("2001:db8:1::/64")}, Ports: badoption.Listable[uint16]{1}},
++		IPv4:    true,
++		IPv6:    true,
++		Book:    book,
++		Network: "home",
++		Probe:   probe,
+ 	}
+ }
+ 
+diff --git a/hiddify/warpscan/scanner.go b/hiddify/warpscan/scanner.go
+index 5fcbf86aaaac5baf697729f1429e2c5c1c07566c..53e11750b43d91d85fbac0cf5dc6eff9dc1cceff 100644
+--- a/hiddify/warpscan/scanner.go
++++ b/hiddify/warpscan/scanner.go
+@@ -7,8 +7,8 @@ package warpscan
+ import (
+ 	"cmp"
+ 	"context"
+-	"errors"
+ 	"crypto/rand"
++	"errors"
+ 	"math/big"
+ 	"net/netip"
+ 	"slices"
+@@ -129,9 +129,7 @@ func Scan(ctx context.Context, logger logger.ContextLogger, request Request) ([]
+ 	}
+ 	queue := make(chan netip.AddrPort)
+ 	for range concurrency {
+-		wait.Add(1)
+-		go func() {
+-			defer wait.Done()
++		wait.Go(func() {
+ 			for addrPort := range queue {
+ 				access.Lock()
+ 				skip := unreachable[family(addrPort)]
+@@ -172,7 +170,7 @@ func Scan(ctx context.Context, logger logger.ContextLogger, request Request) ([]
+ 				}
+ 				access.Unlock()
+ 			}
+-		}()
++		})
+ 	}
+ feed:
+ 	for _, candidate := range candidates {
+diff --git a/hiddify/warpscan/wireguard.go b/hiddify/warpscan/wireguard.go
+index 124606ce0aff138596471803c62eff812a728a48..e027835975f9c0654a3b6d64f3ce0e7cf2ec597a 100644
+--- a/hiddify/warpscan/wireguard.go
++++ b/hiddify/warpscan/wireguard.go
+@@ -131,7 +131,10 @@ func wireGuardHandshake(ctx context.Context, dialer N.Dialer, addrPort netip.Add
+ 		if _, _, _, err = state.ReadMessage(nil, response[12:60]); err != nil {
+ 			return 0, E.Cause(err, "invalid handshake response")
+ 		}
+-		return time.Since(start), nil
++		// On some Windows clocks a successful loopback handshake can be
++		// measured as zero. Keep a successful probe distinguishable from
++		// an unset/failed measurement without inventing millisecond latency.
++		return max(time.Since(start), time.Nanosecond), nil
+ 	}
+ }
+ 

@@ -1,0 +1,60 @@
+diff --git a/service/api/web_bridge.go b/service/api/web_bridge.go
+index 39c2568743dd8db425e3197182b6caec5ac70c0f..6a677d65059a75003dca1a5c216614aeb0ab65de 100644
+--- a/service/api/web_bridge.go
++++ b/service/api/web_bridge.go
+@@ -12,7 +12,6 @@ import (
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+ 
+-	"golang.org/x/net/http2"
+ 	"google.golang.org/grpc"
+ )
+ 
+@@ -97,7 +96,7 @@ type bodyReadCloser struct {
+ 
+ // webResponseWriter translates a native gRPC response into a gRPC-Web
+ // response: headers set after the first write, including the gRPC status the
+-// handler transport sets via http2.TrailerPrefix keys, become a trailer
++// handler transport sets via http.TrailerPrefix keys, become a trailer
+ // frame at the end of the body instead of HTTP trailers.
+ type webResponseWriter struct {
+ 	writer       http.ResponseWriter
+@@ -154,7 +153,7 @@ func (w *webResponseWriter) Flush() {
+ func (w *webResponseWriter) prepareHeaders() {
+ 	rawHeader := w.rawWriter.Header()
+ 	for key, values := range w.header {
+-		canonicalKey := http.CanonicalHeaderKey(strings.TrimPrefix(key, http2.TrailerPrefix))
++		canonicalKey := http.CanonicalHeaderKey(strings.TrimPrefix(key, http.TrailerPrefix))
+ 		if canonicalKey == "Trailer" {
+ 			continue
+ 		}
+@@ -185,7 +184,7 @@ func (w *webResponseWriter) writeTrailerFrame() {
+ 	}
+ 	trailerHeader := make(http.Header)
+ 	for key, values := range w.header {
+-		lowerKey := strings.ToLower(strings.TrimPrefix(key, http2.TrailerPrefix))
++		lowerKey := strings.ToLower(strings.TrimPrefix(key, http.TrailerPrefix))
+ 		if lowerKey == "trailer" || flushedKeys[lowerKey] {
+ 			continue
+ 		}
+diff --git a/service/api/web_bridge_websocket.go b/service/api/web_bridge_websocket.go
+index f7d7216b99d0f815aabba1a0daf6b786f0a94050..08fefff7996ba0e5b7f0ec635a86ca8ed79429ea 100644
+--- a/service/api/web_bridge_websocket.go
++++ b/service/api/web_bridge_websocket.go
+@@ -14,7 +14,6 @@ import (
+ 
+ 	"github.com/coder/websocket"
+ 	"golang.org/x/net/http/httpguts"
+-	"golang.org/x/net/http2"
+ )
+ 
+ const (
+@@ -178,7 +177,7 @@ func (w *webSocketResponseWriter) writeTrailerFrame() {
+ 	w.wroteTrailers = true
+ 	trailerHeader := make(http.Header)
+ 	for key, values := range w.header {
+-		lowerKey := strings.ToLower(strings.TrimPrefix(key, http2.TrailerPrefix))
++		lowerKey := strings.ToLower(strings.TrimPrefix(key, http.TrailerPrefix))
+ 		if lowerKey == "trailer" {
+ 			continue
+ 		}

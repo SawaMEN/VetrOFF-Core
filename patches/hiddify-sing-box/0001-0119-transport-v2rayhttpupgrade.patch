@@ -1,0 +1,179 @@
+diff --git a/transport/v2rayhttpupgrade/client.go b/transport/v2rayhttpupgrade/client.go
+index 013cd2325bdc253319df67be5c4fb4c89ba8b17e..97e1e0fba2b8cfdaaa2bf862ba62f4dcdd17ab50 100644
+--- a/transport/v2rayhttpupgrade/client.go
++++ b/transport/v2rayhttpupgrade/client.go
+@@ -69,9 +69,9 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
+ 	for key, value := range options.Headers {
+ 		headers[key] = value
+ 	}
+-	if headers.Get("User-Agent") == "" { //H
+-		headers.Set("User-Agent", C.DefaultBrowserAgent) //H
+-	} //H
++	if headers.Get("User-Agent") == "" { // H
++		headers.Set("User-Agent", C.DefaultBrowserAgent) // H
++	} // H
+ 	return &Client{
+ 		dialer:     dialer,
+ 		serverAddr: serverAddr,
+diff --git a/transport/v2rayhttpupgrade/server.go b/transport/v2rayhttpupgrade/server.go
+index d768c0b615e2b0263a8d7f373d0ead26924289db..22e0dccbe57b4f23d9663e320733e4a2020b0824 100644
+--- a/transport/v2rayhttpupgrade/server.go
++++ b/transport/v2rayhttpupgrade/server.go
+@@ -117,26 +117,20 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+ 		s.invalidRequest(writer, request, http.StatusInternalServerError, E.Cause(err, "hijack failed"))
+ 		return
+ 	}
+-	if cacheLen := reader.Reader.Buffered(); cacheLen > 0 {
+-		cache := buf.NewSize(cacheLen)
+-		_, err = cache.ReadFullFrom(reader.Reader, cacheLen)
+-		if err != nil {
+-			cache.Release()
++	// net/http may already have read the first proxy bytes after the upgrade.
++	// Keep those bytes ahead of the underlying socket stream.
++	if n := reader.Reader.Buffered(); n > 0 {
++		buffer := buf.NewSize(n)
++		if _, err := buffer.ReadFullFrom(reader.Reader, n); err != nil {
++			buffer.Release()
+ 			conn.Close()
+-			s.invalidRequest(writer, request, 0, E.Cause(err, "read cache"))
+ 			return
+ 		}
+-		conn = bufio.NewCachedConn(conn, cache)
++		conn = bufio.NewCachedConn(conn, buffer)
+ 	}
+ 	s.handler.NewConnectionEx(v2rayhttp.DupContext(request.Context()), conn, badhttp.SourceAddress(request), M.Socksaddr{}, nil)
+ }
+ 
+-// secWebSocketAccept computes the Sec-WebSocket-Accept value for key (RFC 6455 section 4.2.2).
+-func secWebSocketAccept(key string) string {
+-	accept := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+-	return base64.StdEncoding.EncodeToString(accept[:])
+-}
+-
+ func (s *Server) invalidRequest(writer http.ResponseWriter, request *http.Request, statusCode int, err error) {
+ 	if statusCode > 0 {
+ 		writer.WriteHeader(statusCode)
+@@ -165,3 +159,11 @@ func (s *Server) ServePacket(listener net.PacketConn) error {
+ func (s *Server) Close() error {
+ 	return common.Close(common.PtrOrNil(s.httpServer))
+ }
++
++const webSocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
++
++// secWebSocketAccept returns the RFC 6455 handshake accept hash. //H
++func secWebSocketAccept(key string) string {
++	sum := sha1.Sum([]byte(key + webSocketGUID))
++	return base64.StdEncoding.EncodeToString(sum[:])
++}
+diff --git a/transport/v2rayhttpupgrade/xui_stream_test.go b/transport/v2rayhttpupgrade/xui_stream_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9c8c599ff0fedc0de130fa612a1ba6dc688957a4
+--- /dev/null
++++ b/transport/v2rayhttpupgrade/xui_stream_test.go
+@@ -0,0 +1,106 @@
++package v2rayhttpupgrade
++
++import (
++	"bufio"
++	"bytes"
++	"context"
++	"io"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/option"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++)
++
++type xuiUpgradeWriter struct {
++	*httptest.ResponseRecorder
++	conn   net.Conn
++	reader *bufio.ReadWriter
++}
++
++func (w *xuiUpgradeWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
++	return w.conn, w.reader, nil
++}
++
++type xuiUpgradeHandler struct {
++	t      *testing.T
++	want   string
++	called bool
++}
++
++func (h *xuiUpgradeHandler) NewConnectionEx(_ context.Context, c net.Conn, _, _ M.Socksaddr, _ N.CloseHandlerFunc) {
++	h.called = true
++	_ = c.SetReadDeadline(time.Now().Add(time.Second))
++	got := make([]byte, len(h.want))
++	_, err := io.ReadFull(c, got)
++	if err != nil || string(got) != h.want {
++		h.t.Fatalf("lost buffered upgrade payload: %q %v", got, err)
++	}
++}
++
++func TestXUIPanelHTTPUpgradePreservesHijackBuffer(t *testing.T) {
++	const payload = "0123456789abcdef-proxy-authentication-header"
++	c, peer := net.Pipe()
++	defer c.Close()
++	defer peer.Close()
++	reader := bufio.NewReader(bytes.NewBufferString(payload))
++	if _, err := reader.Peek(len(payload)); err != nil {
++		t.Fatal(err)
++	}
++	writer := &xuiUpgradeWriter{httptest.NewRecorder(), c, bufio.NewReadWriter(reader, bufio.NewWriter(io.Discard))}
++	handler := &xuiUpgradeHandler{t: t, want: payload}
++	server := &Server{path: "/audit", handler: handler}
++	req := httptest.NewRequest(http.MethodGet, "http://localhost/audit", nil)
++	req.Header.Set("Connection", "upgrade")
++	req.Header.Set("Upgrade", "websocket")
++	server.ServeHTTP(writer, req)
++	if !handler.called {
++		t.Fatal("upgrade handler not called")
++	}
++}
++
++type xuiUpgradeDialer struct{ conn net.Conn }
++
++func (d xuiUpgradeDialer) DialContext(context.Context, string, M.Socksaddr) (net.Conn, error) {
++	return d.conn, nil
++}
++
++func (d xuiUpgradeDialer) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
++	panic("unused")
++}
++
++func TestXUIPanelHTTPUpgradePreservesResponseBuffer(t *testing.T) {
++	const payload = "first-proxy-response"
++	c, peer := net.Pipe()
++	defer c.Close()
++	defer peer.Close()
++	_ = c.SetDeadline(time.Now().Add(time.Second))
++	sent := make(chan error, 1)
++	go func() {
++		_, err := http.ReadRequest(bufio.NewReader(peer))
++		if err == nil {
++			_, err = io.WriteString(peer, "HTTP/1.1 101 Switching Protocols\r\nConnection: upgrade\r\nUpgrade: websocket\r\n\r\n"+payload)
++		}
++		sent <- err
++	}()
++	client, err := NewClient(context.Background(), xuiUpgradeDialer{c}, M.ParseSocksaddr("127.0.0.1:80"), option.V2RayHTTPUpgradeOptions{Path: "/"}, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	conn, err := client.DialContext(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	got := make([]byte, len(payload))
++	_, err = io.ReadFull(conn, got)
++	if err != nil || string(got) != payload {
++		t.Fatalf("lost buffered response: %q %v", got, err)
++	}
++	if err := <-sent; err != nil {
++		t.Fatal(err)
++	}
++}

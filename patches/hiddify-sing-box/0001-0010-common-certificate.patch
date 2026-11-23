@@ -1,0 +1,154 @@
+diff --git a/common/certificate/h_platform_store_test.go b/common/certificate/h_platform_store_test.go
+index e8799c3b69914087b009280c77510b0851c039a0..9918c142aa42e7916d38e5f0b09609acdc4bf8a1 100644
+--- a/common/certificate/h_platform_store_test.go
++++ b/common/certificate/h_platform_store_test.go
+@@ -8,7 +8,6 @@ import (
+ 	"crypto/x509"
+ 	"crypto/x509/pkix"
+ 	"encoding/pem"
+-	"github.com/sagernet/sing-box/adapter/htest"
+ 	"math/big"
+ 	"testing"
+ 	"time"
+@@ -73,7 +72,7 @@ func hNewSystemStore(t *testing.T, platform adapter.PlatformInterface) *Store {
+ 	}
+ 	store, err := NewStore(ctx, logger.NOP(), option.CertificateOptions{Store: C.CertificateStoreSystem})
+ 	require.NoError(t, err)
+-	t.Cleanup(func() { htest.Close(store) })
++	t.Cleanup(func() { store.Close() })
+ 	return store
+ }
+ 
+@@ -135,7 +134,7 @@ func TestH_StorePlatformIgnoredForBundledStores(t *testing.T) {
+ 		require.Nil(t, store.systemPool)
+ 		require.Error(t, hVerify(store.Pool(), leaf))
+ 		require.True(t, store.ExclusiveAnchors())
+-		htest.Close(store)
++		store.Close()
+ 	}
+ 	_, err := NewStore(ctx, logger.NOP(), option.CertificateOptions{Store: "bogus"})
+ 	require.ErrorContains(t, err, "unknown certificate store")
+diff --git a/common/certificate/store.go b/common/certificate/store.go
+index 77df7716258115d7e6c77d7c423ccc96aa2be0c4..ba3c6082677743e78c37304e5a32f0b2179f61ed 100644
+--- a/common/certificate/store.go
++++ b/common/certificate/store.go
+@@ -28,6 +28,7 @@ type Store struct {
+ 	storeType                 string
+ 	systemPool                *x509.CertPool
+ 	currentPool               *x509.CertPool
++	currentPEM                []string
+ 	certificate               string
+ 	certificatePaths          []string
+ 	certificateDirectoryPaths []string
+@@ -48,9 +49,12 @@ func NewStore(ctx context.Context, logger logger.Logger, options option.Certific
+ 		systemPool = x509.NewCertPool()
+ 		platformInterface := service.FromContext[adapter.PlatformInterface](ctx)
+ 		var systemValid bool
+-		for _, certificate := range systemCertificates() {
+-			systemPool.AddCert(certificate)
+-			systemValid = true
++		if platformInterface != nil {
++			for _, cert := range platformInterface.SystemCertificates() {
++				if systemPool.AppendCertsFromPEM([]byte(cert)) {
++					systemValid = true
++				}
++			}
+ 		}
+ 		if platformInterface != nil { // H: certificates the hiddify app hands over
+ 			for _, cert := range platformInterface.SystemCertificates() {
+@@ -151,6 +155,12 @@ func (s *Store) ExclusiveAnchors() bool {
+ 	return s.storeType != C.CertificateStoreSystem
+ }
+ 
++func (s *Store) CurrentPEM() []string {
++	s.access.RLock()
++	defer s.access.RUnlock()
++	return append([]string(nil), s.currentPEM...)
++}
++
+ func (s *Store) update() error {
+ 	currentPool, anchorPEM, err := s.load()
+ 	if err != nil {
+@@ -169,6 +179,7 @@ func (s *Store) load() (*x509.CertPool, []byte, error) {
+ 		return nil, nil, err
+ 	}
+ 	pemBuffer := new(bytes.Buffer)
++	var currentPEM []string
+ 	switch s.storeType {
+ 	case C.CertificateStoreMozilla:
+ 		pemContent := mozillaIncludedPEM()
+@@ -176,18 +187,21 @@ func (s *Store) load() (*x509.CertPool, []byte, error) {
+ 			return nil, nil, E.New("invalid Mozilla included certificate PEM")
+ 		}
+ 		appendPEMBlock(pemBuffer, string(pemContent))
++		currentPEM = append(currentPEM, pemContent)
+ 	case C.CertificateStoreChrome:
+ 		pemContent := chromeIncludedPEM()
+ 		if !currentPool.AppendCertsFromPEM([]byte(pemContent)) {
+ 			return nil, nil, E.New("invalid Chrome included certificate PEM")
+ 		}
+ 		appendPEMBlock(pemBuffer, string(pemContent))
++		currentPEM = append(currentPEM, pemContent)
+ 	}
+ 	if s.certificate != "" {
+ 		if !currentPool.AppendCertsFromPEM([]byte(s.certificate)) {
+ 			return nil, nil, E.New("invalid certificate PEM strings")
+ 		}
+ 		appendPEMBlock(pemBuffer, s.certificate)
++		currentPEM = append(currentPEM, s.certificate)
+ 	}
+ 	for _, path := range s.certificatePaths {
+ 		pemContent, err := filemanager.ReadFile(s.ctx, path)
+@@ -198,6 +212,7 @@ func (s *Store) load() (*x509.CertPool, []byte, error) {
+ 			return nil, nil, E.New("invalid certificate PEM file: ", path)
+ 		}
+ 		appendPEMBlock(pemBuffer, string(pemContent))
++		currentPEM = append(currentPEM, string(pemContent))
+ 	}
+ 	var firstErr error
+ 	for _, directoryPath := range s.certificateDirectoryPaths {
+@@ -212,12 +227,16 @@ func (s *Store) load() (*x509.CertPool, []byte, error) {
+ 			pemContent, err := filemanager.ReadFile(s.ctx, filepath.Join(directoryPath, directoryEntry.Name()))
+ 			if err == nil && currentPool.AppendCertsFromPEM(pemContent) {
+ 				appendPEMBlock(pemBuffer, string(pemContent))
++				currentPEM = append(currentPEM, string(pemContent))
+ 			}
+ 		}
+ 	}
+ 	if firstErr != nil {
+ 		return nil, nil, firstErr
+ 	}
++	s.access.Lock()
++	s.currentPEM = currentPEM
++	s.access.Unlock()
+ 	return currentPool, pemBuffer.Bytes(), nil
+ }
+ 
+@@ -266,3 +285,13 @@ func isSameDirSymlink(f fs.DirEntry, dir string) bool {
+ 	target, err := os.Readlink(filepath.Join(dir, f.Name()))
+ 	return err == nil && !strings.Contains(target, "/")
+ }
++
++// Close releases resources when used without a lifecycle scope. //H
++func (s *Store) Close() error {
++	if s.watcher != nil {
++		if err := s.watcher.Close(); err != nil {
++			return err
++		}
++	}
++	return s.closePlatform()
++}
+diff --git a/common/certificate/system_other.go b/common/certificate/system_other.go
+index 2c57a756d0bfbb023954d325fa2be917897a4b95..2b940b68eb365b19efcbe20fe2f1f74a2f424eeb 100644
+--- a/common/certificate/system_other.go
++++ b/common/certificate/system_other.go
+@@ -1,9 +1,3 @@
+ //go:build !android || !cgo
+ 
+ package certificate
+-
+-import "crypto/x509"
+-
+-func systemCertificates() []*x509.Certificate {
+-	return nil
+-}

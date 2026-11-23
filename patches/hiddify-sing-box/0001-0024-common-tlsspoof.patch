@@ -1,0 +1,199 @@
+diff --git a/common/tlsspoof/client_hello_test.go b/common/tlsspoof/client_hello_test.go
+index 3eb7a2e040918690019d881bd3188cd30111aded..08da0630db0f2c47d569d7e809fbbdce3d5610ca 100644
+--- a/common/tlsspoof/client_hello_test.go
++++ b/common/tlsspoof/client_hello_test.go
+@@ -1,7 +1,6 @@
+ package tlsspoof
+ 
+ import (
+-	"bytes"
+ 	"encoding/binary"
+ 	"strings"
+ 	"testing"
+@@ -57,10 +56,61 @@ func TestBuildFakeClientHello_NoPostQuantumKeyShare(t *testing.T) {
+ 	record, err := buildFakeClientHello("example.com")
+ 	require.NoError(t, err)
+ 
+-	var needle [2]byte
+-	binary.BigEndian.PutUint16(needle[:], x25519MLKEM768)
+-	require.False(t, bytes.Contains(record, needle[:]),
+-		"output must not contain the X25519MLKEM768 code point (0x%04x)", x25519MLKEM768)
++	// Examine the TLS extension structures, not arbitrary random payload
++	// bytes: random and key material can contain 0x11ec by coincidence.
++	require.GreaterOrEqual(t, len(record), 9)
++	require.Equal(t, byte(1), record[5], "handshake must be ClientHello")
++	pos := 9 // TLS record (5) + handshake header (4)
++	take := func(n int) []byte {
++		t.Helper()
++		require.GreaterOrEqual(t, n, 0)
++		require.GreaterOrEqual(t, len(record)-pos, n, "truncated ClientHello")
++		value := record[pos : pos+n]
++		pos += n
++		return value
++	}
++	take(2 + 32)                                // client_version + random
++	take(int(take(1)[0]))                       // legacy_session_id
++	take(int(binary.BigEndian.Uint16(take(2)))) // cipher_suites
++	take(int(take(1)[0]))                       // compression_methods
++	extensions := take(int(binary.BigEndian.Uint16(take(2))))
++	require.Equal(t, len(record), pos, "trailing handshake bytes")
++	foundGroups, foundShare := false, false
++	for len(extensions) > 0 {
++		require.GreaterOrEqual(t, len(extensions), 4, "truncated extension header")
++		kind := binary.BigEndian.Uint16(extensions[:2])
++		length := int(binary.BigEndian.Uint16(extensions[2:4]))
++		extensions = extensions[4:]
++		require.GreaterOrEqual(t, len(extensions), length, "truncated extension body")
++		body := extensions[:length]
++		extensions = extensions[length:]
++		switch kind {
++		case 10: // supported_groups: uint16 length + repeated uint16 group
++			foundGroups = true
++			require.GreaterOrEqual(t, len(body), 2)
++			require.Equal(t, len(body)-2, int(binary.BigEndian.Uint16(body[:2])))
++			require.Zero(t, (len(body)-2)%2)
++			for groups := body[2:]; len(groups) > 0; groups = groups[2:] {
++				require.NotEqual(t, x25519MLKEM768, binary.BigEndian.Uint16(groups[:2]),
++					"hybrid group advertised in supported_groups")
++			}
++		case 51: // key_share: uint16 vector length, then (group, len, key)
++			foundShare = true
++			require.GreaterOrEqual(t, len(body), 2)
++			require.Equal(t, len(body)-2, int(binary.BigEndian.Uint16(body[:2])))
++			for shares := body[2:]; len(shares) > 0; {
++				require.GreaterOrEqual(t, len(shares), 4)
++				require.NotEqual(t, x25519MLKEM768, binary.BigEndian.Uint16(shares[:2]),
++					"hybrid group used in key_share")
++				keyLength := int(binary.BigEndian.Uint16(shares[2:4]))
++				shares = shares[4:]
++				require.GreaterOrEqual(t, len(shares), keyLength)
++				shares = shares[keyLength:]
++			}
++		}
++	}
++	require.True(t, foundGroups, "missing supported_groups extension")
++	require.True(t, foundShare, "missing key_share extension")
+ }
+ 
+ // TestBuildFakeClientHello_RandomizesPerCall ensures crypto/tls generates a
+diff --git a/common/tlsspoof/packet_test.go b/common/tlsspoof/packet_test.go
+index 4dea1d99258e8f67f4607eee955e92901673e588..5a7b693db97e113eea8189ddc4b62d2ac594997c 100644
+--- a/common/tlsspoof/packet_test.go
++++ b/common/tlsspoof/packet_test.go
+@@ -1,3 +1,5 @@
++//go:build linux || darwin || (windows && (amd64 || 386))
++
+ package tlsspoof
+ 
+ import (
+@@ -124,13 +126,14 @@ func TestBuildSpoofFrame_WrongChecksum(t *testing.T) {
+ 		"IPv4 checksum must remain valid so the router forwards the packet")
+ }
+ 
+-func TestBuildSpoofTCPSegment_EncodesWithoutIPHeader(t *testing.T) {
++func TestBuildSpoofFrameIPv6EncodesHeaders(t *testing.T) {
+ 	t.Parallel()
+ 	src := netip.MustParseAddrPort("[fe80::1]:54321")
+ 	dst := netip.MustParseAddrPort("[2606:4700::1]:443")
+ 	payload := []byte("fake-client-hello")
+-	segment, err := buildSpoofTCPSegment(MethodWrongSequence, src, dst, 1000, 2000, 0, payload)
++	frame, err := buildSpoofFrame(MethodWrongSequence, src, dst, 1000, 2000, 0, nil, payload)
+ 	require.NoError(t, err)
+-	require.Equal(t, tcpHeaderLen+len(payload), len(segment),
+-		"segment must be TCP header + payload, no IP header")
++	require.Len(t, frame, header.IPv6MinimumSize+tcpHeaderLen+len(payload))
++	tcp := header.TCP(frame[header.IPv6MinimumSize:])
++	require.Equal(t, uint32(1000)-uint32(len(payload)), tcp.SequenceNumber())
+ }
+diff --git a/common/tlsspoof/raw_windows_test.go b/common/tlsspoof/raw_windows_test.go
+index 58566b875946cd8feecbae7fcaa1987fb2092c4f..423eb3741bd40ec9495034db8d67da3f73f74920 100644
+--- a/common/tlsspoof/raw_windows_test.go
++++ b/common/tlsspoof/raw_windows_test.go
+@@ -16,9 +16,9 @@ func TestParseTCPFieldsIPv4Valid(t *testing.T) {
+ 	src := netip.MustParseAddrPort("10.0.0.1:54321")
+ 	dst := netip.MustParseAddrPort("1.2.3.4:443")
+ 	payload := []byte("hello")
+-	frame := buildTCPSegment(src, dst, 1000, 2000, payload, false)
++	frame := buildTCPSegment(src, dst, spoofPacketInfo{seqNum: 1000, ackNum: 2000}, payload)
+ 
+-	seq, ack, payloadLen, ok := parseTCPFields(frame, false)
++	seq, ack, _, payloadLen, ok := parseTCPPacket(frame, false)
+ 	require.True(t, ok)
+ 	require.Equal(t, uint32(1000), seq)
+ 	require.Equal(t, uint32(2000), ack)
+@@ -29,9 +29,9 @@ func TestParseTCPFieldsIPv4NoPayload(t *testing.T) {
+ 	t.Parallel()
+ 	src := netip.MustParseAddrPort("10.0.0.1:54321")
+ 	dst := netip.MustParseAddrPort("1.2.3.4:443")
+-	frame := buildTCPSegment(src, dst, 42, 100, nil, false)
++	frame := buildTCPSegment(src, dst, spoofPacketInfo{seqNum: 42, ackNum: 100}, nil)
+ 
+-	seq, ack, payloadLen, ok := parseTCPFields(frame, false)
++	seq, ack, _, payloadLen, ok := parseTCPPacket(frame, false)
+ 	require.True(t, ok)
+ 	require.Equal(t, uint32(42), seq)
+ 	require.Equal(t, uint32(100), ack)
+@@ -43,9 +43,9 @@ func TestParseTCPFieldsIPv6Valid(t *testing.T) {
+ 	src := netip.MustParseAddrPort("[fe80::1]:54321")
+ 	dst := netip.MustParseAddrPort("[2606:4700::1]:443")
+ 	payload := []byte("hello-v6")
+-	frame := buildTCPSegment(src, dst, 0xDEADBEEF, 0x12345678, payload, false)
++	frame := buildTCPSegment(src, dst, spoofPacketInfo{seqNum: 0xDEADBEEF, ackNum: 0x12345678}, payload)
+ 
+-	seq, ack, payloadLen, ok := parseTCPFields(frame, true)
++	seq, ack, _, payloadLen, ok := parseTCPPacket(frame, true)
+ 	require.True(t, ok)
+ 	require.Equal(t, uint32(0xDEADBEEF), seq)
+ 	require.Equal(t, uint32(0x12345678), ack)
+@@ -54,17 +54,17 @@ func TestParseTCPFieldsIPv6Valid(t *testing.T) {
+ 
+ func TestParseTCPFieldsIPv4TooShort(t *testing.T) {
+ 	t.Parallel()
+-	_, _, _, ok := parseTCPFields(make([]byte, header.IPv4MinimumSize+header.TCPMinimumSize-1), false)
++	_, _, _, _, ok := parseTCPPacket(make([]byte, header.IPv4MinimumSize+header.TCPMinimumSize-1), false)
+ 	require.False(t, ok)
+ }
+ 
+ func TestParseTCPFieldsIPv6TooShort(t *testing.T) {
+ 	t.Parallel()
+-	_, _, _, ok := parseTCPFields(make([]byte, header.IPv6MinimumSize+header.TCPMinimumSize-1), true)
++	_, _, _, _, ok := parseTCPPacket(make([]byte, header.IPv6MinimumSize+header.TCPMinimumSize-1), true)
+ 	require.False(t, ok)
+ }
+ 
+-// buildTCPSegment only produces TCP; a UDP packet hitting parseTCPFields
++// buildTCPSegment produces TCP; a UDP packet hitting parseTCPPacket
+ // (for example from a mis-specified filter) must be rejected.
+ func TestParseTCPFieldsIPv4WrongProtocol(t *testing.T) {
+ 	t.Parallel()
+@@ -77,7 +77,7 @@ func TestParseTCPFieldsIPv4WrongProtocol(t *testing.T) {
+ 		SrcAddr:     netip.MustParseAddr("10.0.0.1"),
+ 		DstAddr:     netip.MustParseAddr("10.0.0.2"),
+ 	})
+-	_, _, _, ok := parseTCPFields(frame, false)
++	_, _, _, _, ok := parseTCPPacket(frame, false)
+ 	require.False(t, ok)
+ }
+ 
+@@ -92,7 +92,7 @@ func TestParseTCPFieldsIPv6WrongProtocol(t *testing.T) {
+ 		SrcAddr:           netip.MustParseAddr("fe80::1"),
+ 		DstAddr:           netip.MustParseAddr("fe80::2"),
+ 	})
+-	_, _, _, ok := parseTCPFields(frame, true)
++	_, _, _, _, ok := parseTCPPacket(frame, true)
+ 	require.False(t, ok)
+ }
+ 
+@@ -103,10 +103,10 @@ func TestParseTCPFieldsIPv4OptionsOverflow(t *testing.T) {
+ 	// Start with a valid IPv4+TCP frame, then lie about the header length.
+ 	src := netip.MustParseAddrPort("10.0.0.1:1")
+ 	dst := netip.MustParseAddrPort("10.0.0.2:2")
+-	frame := buildTCPSegment(src, dst, 0, 0, []byte("x"), false)
++	frame := buildTCPSegment(src, dst, spoofPacketInfo{}, []byte("x"))
+ 	ip := header.IPv4(frame[:header.IPv4MinimumSize])
+ 	// ihl=15 → 60 bytes of IP header claimed, but buffer only has 20.
+ 	ip.SetHeaderLength(60)
+-	_, _, _, ok := parseTCPFields(frame, false)
++	_, _, _, _, ok := parseTCPPacket(frame, false)
+ 	require.False(t, ok)
+ }

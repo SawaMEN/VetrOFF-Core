@@ -1,0 +1,139 @@
+diff --git a/dns/transport_manager.go b/dns/transport_manager.go
+index 6f5f9b21ccd518df19d8b5e82d9cf82a1d1e1031..1a627ee23daed940a0af3015057f997fde3bbff0 100644
+--- a/dns/transport_manager.go
++++ b/dns/transport_manager.go
+@@ -180,35 +180,42 @@ func (m *TransportManager) remove(tag string, ignoreDependents bool) error {
+ 	}
+ 	if !ignoreDependents {
+ 		var dependBy []string
+-		for _, it := range m.transports {
+-			if common.Contains(it.Dependencies(), tag) {
+-				dependBy = append(dependBy, it.Tag())
++		for _, candidate := range m.transports {
++			if candidate.Tag() != tag && slices.Contains(candidate.Dependencies(), tag) {
++				dependBy = append(dependBy, candidate.Tag())
+ 			}
+ 		}
+-		if len(dependBy) > 0 {
++		if len(dependBy) != 0 {
+ 			m.access.Unlock()
+ 			return E.New("server[", tag, "] is depended by ", strings.Join(dependBy, ", "))
+ 		}
+ 	}
+-	delete(m.transportByTag, tag)
+ 	index := slices.Index(m.transports, transport)
+-	if index == -1 {
+-		panic("invalid transport index")
+-	}
+-	m.transports = slices.Delete(slices.Clone(m.transports), index, index+1) // H: never change a slice already handed out
+-	if m.defaultTransport == transport {
+-		// H: the default server cannot be fakeip
+-		m.defaultTransport = common.Find(m.transports, func(it adapter.DNSTransport) bool {
+-			return it.Type() != C.DNSTypeFakeIP
+-		})
++	if index < 0 {
++		m.access.Unlock()
++		return E.New("invalid DNS transport index: ", tag)
+ 	}
++	m.transports = slices.Delete(slices.Clone(m.transports), index, index+1)
++	delete(m.transportByTag, tag)
+ 	if m.fakeIPTransport != nil && adapter.DNSTransport(m.fakeIPTransport) == transport {
+ 		m.fakeIPTransport = nil
+ 	}
+-	started := m.started
++	if m.defaultTransport == transport {
++		m.defaultTransport = nil
++		for _, candidate := range m.transports {
++			if candidate.Type() != C.DNSTypeFakeIP {
++				m.defaultTransport = candidate
++				break
++			}
++		}
++		if m.defaultTag == tag {
++			m.defaultTag = ""
++		}
++	}
++	started, scope := m.started, m.scope
+ 	m.access.Unlock()
+ 	if started {
+-		return adapter.CloseLate(m.scope, transport)
++		return adapter.CloseLate(scope, transport)
+ 	}
+ 	return nil
+ }
+@@ -221,42 +228,45 @@ func (m *TransportManager) Create(ctx context.Context, logger log.ContextLogger,
+ 	if err != nil {
+ 		return err
+ 	}
+-	m.access.Lock()
+-	started := m.started
+-	m.access.Unlock()
+-	if started { // H: hot reload
+-		err = adapter.StartLate(m.scope, "dns/"+transport.Type()+"["+transport.Tag()+"]", transport)
+-		if err != nil {
++	m.access.RLock()
++	started, scope := m.started, m.scope
++	m.access.RUnlock()
++	if started {
++		if err = adapter.StartLate(scope, "dns/"+transport.Type()+"["+transport.Tag()+"]", transport); err != nil {
+ 			return err
+ 		}
+ 	}
+ 	m.access.Lock()
+-	existsTransport, replaced := m.transportByTag[tag]
+-	if replaced && !started {
++	old, replaced := m.transportByTag[tag]
++	becomesDefault := tag == m.defaultTag || (m.defaultTag == "" && m.defaultTransport == nil) || (replaced && m.defaultTransport == old)
++	if becomesDefault && transport.Type() == C.DNSTypeFakeIP {
+ 		m.access.Unlock()
+-		return E.New("duplicate DNS server tag: ", tag)
++		return E.New("default server cannot be fakeip")
++	}
++	if transport.Type() == C.DNSTypeFakeIP && m.fakeIPTransport != nil && (!replaced || adapter.DNSTransport(m.fakeIPTransport) != old) {
++		m.access.Unlock()
++		return E.New("multiple fakeip servers are not supported")
+ 	}
+ 	if replaced {
+-		existsIndex := slices.Index(m.transports, existsTransport)
+-		if existsIndex == -1 {
+-			panic("invalid transport index")
++		index := slices.Index(m.transports, old)
++		if index < 0 {
++			m.access.Unlock()
++			return E.New("invalid DNS transport index: ", tag)
+ 		}
+-		// H: the replacement takes the old one's place; a copy, so a slice already handed out never changes
+ 		m.transports = slices.Clone(m.transports)
+-		m.transports[existsIndex] = transport
+-		if m.fakeIPTransport != nil && adapter.DNSTransport(m.fakeIPTransport) == existsTransport {
++		m.transports[index] = transport
++		if m.fakeIPTransport != nil && adapter.DNSTransport(m.fakeIPTransport) == old {
+ 			m.fakeIPTransport = nil
+ 		}
+ 	} else {
+-		m.transports = append(m.transports, transport)
++		m.transports = append(slices.Clone(m.transports), transport)
+ 	}
+ 	m.transportByTag[tag] = transport
+-	err = m.setRoles(tag, transport, replaced && m.defaultTransport == existsTransport)
++	err = m.setRoles(tag, transport, replaced && m.defaultTransport == old)
+ 	m.access.Unlock()
+ 	if replaced {
+-		closeErr := adapter.CloseLate(m.scope, existsTransport)
+-		if closeErr != nil {
+-			return E.Cause(closeErr, "close dns/", existsTransport.Type(), "[", existsTransport.Tag(), "]")
++		if closeErr := adapter.CloseLate(scope, old); closeErr != nil {
++			return E.Cause(closeErr, "close dns/", old.Type(), "[", old.Tag(), "]")
+ 		}
+ 	}
+ 	return err
+@@ -294,6 +304,8 @@ func (m *TransportManager) SetDefaultTag(tag string) error {
+ 	if transport.Type() == C.DNSTypeFakeIP {
+ 		return E.New("default server cannot be fakeip")
+ 	}
+-	m.defaultTransport = transport
++	if m.defaultTransport != transport {
++		m.defaultTransport = transport
++	}
+ 	return nil
+ }

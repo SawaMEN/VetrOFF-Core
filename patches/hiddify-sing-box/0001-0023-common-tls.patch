@@ -1,0 +1,1866 @@
+diff --git a/common/tls/acme.go b/common/tls/acme.go
+index 0bf554f43afa96bf446cc71feda9a58a26f7261a..7c50153f06979fae43f517e03cd495c6d70c2fcb 100644
+--- a/common/tls/acme.go
++++ b/common/tls/acme.go
+@@ -126,12 +126,10 @@ func startACME(ctx context.Context, logger logger.Logger, options option.Inbound
+ 		switch dnsOptions.Provider {
+ 		case C.DNSProviderAliDNS:
+ 			solver.DNSProvider = &alidns.Provider{
+-				CredentialInfo: alidns.CredentialInfo{
+-					AccessKeyID:     dnsOptions.AliDNSOptions.AccessKeyID,
+-					AccessKeySecret: dnsOptions.AliDNSOptions.AccessKeySecret,
+-					RegionID:        dnsOptions.AliDNSOptions.RegionID,
+-					SecurityToken:   dnsOptions.AliDNSOptions.SecurityToken,
+-				},
++				AccessKeyID:     dnsOptions.AliDNSOptions.AccessKeyID,
++				AccessKeySecret: dnsOptions.AliDNSOptions.AccessKeySecret,
++				RegionID:        dnsOptions.AliDNSOptions.RegionID,
++				SecurityToken:   dnsOptions.AliDNSOptions.SecurityToken,
+ 			}
+ 		case C.DNSProviderCloudflare:
+ 			solver.DNSProvider = &cloudflare.Provider{
+diff --git a/common/tls/cipher_suites.go b/common/tls/cipher_suites.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..444698bc9780efcddc11c1e7ffcee998a82e8d44
+--- /dev/null
++++ b/common/tls/cipher_suites.go
+@@ -0,0 +1,44 @@
++package tls
++
++import (
++	"crypto/tls"
++	"fmt"
++	"strings"
++)
++
++// resolveCipherSuites resolves an explicit TLS cipher-suite list to the IDs
++// accepted by Go's crypto/tls. The standard tls.CipherSuites enumeration excludes
++// legacy RSA key-exchange, CBC and 3DES suites, even though crypto/tls can still
++// negotiate them when explicitly selected via tls.Config.CipherSuites.
++//
++// Never enable these legacy suites implicitly: a nil cipher_suites list keeps
++// Go's secure defaults. The operator's explicit list is preserved in order,
++// including legacy entries, and unknown names still fail fast.
++func resolveCipherSuites(names []string) (ids []uint16, legacy []string, err error) {
++	known := make(map[string]uint16)
++	unsafe := make(map[string]bool)
++	for _, suite := range tls.CipherSuites() {
++		known[suite.Name] = suite.ID
++	}
++	for _, suite := range tls.InsecureCipherSuites() {
++		known[suite.Name] = suite.ID
++		unsafe[suite.Name] = true
++	}
++	seen := make(map[uint16]bool)
++	for _, name := range names {
++		name = strings.TrimSpace(name)
++		id, found := known[name]
++		if !found {
++			return nil, nil, fmt.Errorf("unknown cipher_suite: %s", name)
++		}
++		if seen[id] {
++			continue
++		}
++		seen[id] = true
++		ids = append(ids, id)
++		if unsafe[name] {
++			legacy = append(legacy, name)
++		}
++	}
++	return ids, legacy, nil
++}
+diff --git a/common/tls/cipher_suites_test.go b/common/tls/cipher_suites_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b86dd97ab351827cf58446c8e5119d8de7fcf5bb
+--- /dev/null
++++ b/common/tls/cipher_suites_test.go
+@@ -0,0 +1,199 @@
++package tls
++
++import (
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/rsa"
++	"crypto/tls"
++	"crypto/x509"
++	"crypto/x509/pkix"
++	"math/big"
++	"net"
++	"reflect"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestResolveCipherSuitesPreservesExplicitLegacy(t *testing.T) {
++	const modern = "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
++	const rsa = "TLS_RSA_WITH_AES_128_GCM_SHA256"
++	ids, legacy, err := resolveCipherSuites([]string{modern, rsa, modern, "TLS_AES_128_GCM_SHA256"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	want := []uint16{
++		tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
++		tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
++		tls.TLS_AES_128_GCM_SHA256,
++	}
++	if !reflect.DeepEqual(ids, want) {
++		t.Fatalf("cipher suite IDs = %#v, want %#v", ids, want)
++	}
++	if !reflect.DeepEqual(legacy, []string{rsa}) {
++		t.Fatalf("legacy warning list = %#v", legacy)
++	}
++}
++
++func TestResolveCipherSuitesLegacyOnly(t *testing.T) {
++	names := []string{
++		"TLS_RSA_WITH_AES_128_GCM_SHA256",
++		"TLS_RSA_WITH_AES_128_CBC_SHA256",
++		"TLS_RSA_WITH_AES_256_CBC_SHA",
++		"TLS_RSA_WITH_3DES_EDE_CBC_SHA",
++		"TLS_RSA_WITH_RC4_128_SHA",
++	}
++	ids, legacy, err := resolveCipherSuites(names)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(ids) != len(names) || !reflect.DeepEqual(legacy, names) {
++		t.Fatalf("explicit legacy ciphers lost: ids=%#v warnings=%#v", ids, legacy)
++	}
++}
++
++func TestResolveCipherSuitesRejectsUnknown(t *testing.T) {
++	_, _, err := resolveCipherSuites([]string{"TLS_NOT_SUPPORTED"})
++	if err == nil || !strings.Contains(err.Error(), "unknown cipher_suite") {
++		t.Fatalf("unexpected error: %v", err)
++	}
++}
++
++// Exercise the actual Go TLS handshake, not just the parser: Go does not offer
++// RSA key exchange by default, but it does negotiate it when selected explicitly
++// on both ends of a TLS 1.2 connection.
++func TestExplicitLegacyRSACipherNegotiatesTLS12(t *testing.T) {
++	ids, _, err := resolveCipherSuites([]string{"TLS_RSA_WITH_AES_128_GCM_SHA256"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	key, err := rsa.GenerateKey(rand.Reader, 2048)
++	if err != nil {
++		t.Fatal(err)
++	}
++	certDER, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
++		SerialNumber: big.NewInt(1),
++		Subject:      pkix.Name{CommonName: "localhost"},
++		DNSNames:     []string{"localhost"},
++		NotBefore:    time.Now().Add(-time.Minute),
++		NotAfter:     time.Now().Add(time.Hour),
++		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
++		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
++	}, &x509.Certificate{
++		SerialNumber: big.NewInt(1),
++		Subject:      pkix.Name{CommonName: "localhost"},
++		DNSNames:     []string{"localhost"},
++		NotBefore:    time.Now().Add(-time.Minute),
++		NotAfter:     time.Now().Add(time.Hour),
++		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
++		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
++	}, &key.PublicKey, key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	srv, cli := net.Pipe()
++	defer srv.Close()
++	defer cli.Close()
++	deadline := time.Now().Add(5 * time.Second)
++	_ = srv.SetDeadline(deadline)
++	_ = cli.SetDeadline(deadline)
++	server := tls.Server(srv, &tls.Config{
++		Certificates: []tls.Certificate{{Certificate: [][]byte{certDER}, PrivateKey: key}},
++		CipherSuites: ids,
++		MinVersion:   tls.VersionTLS12,
++		MaxVersion:   tls.VersionTLS12,
++	})
++	client := tls.Client(cli, &tls.Config{
++		ServerName:         "localhost",
++		InsecureSkipVerify: true, // Test-only certificate: the cipher is under test.
++		CipherSuites:       ids,
++		MinVersion:         tls.VersionTLS12,
++		MaxVersion:         tls.VersionTLS12,
++	})
++	serverResult := make(chan error, 1)
++	go func() { serverResult <- server.Handshake() }()
++	if err := client.Handshake(); err != nil {
++		t.Fatal(err)
++	}
++	if err := <-serverResult; err != nil {
++		t.Fatal(err)
++	}
++	if got := client.ConnectionState().CipherSuite; got != tls.TLS_RSA_WITH_AES_128_GCM_SHA256 {
++		t.Fatalf("negotiated suite = 0x%x", got)
++	}
++}
++
++func TestEveryGoLegacyTLS12SuiteNegotiatesWhenSelected(t *testing.T) {
++	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
++	if err != nil {
++		t.Fatal(err)
++	}
++	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	newCertificate := func(key any, publicKey any) tls.Certificate {
++		t.Helper()
++		template := &x509.Certificate{
++			SerialNumber: big.NewInt(42),
++			Subject:      pkix.Name{CommonName: "localhost"},
++			DNSNames:     []string{"localhost"},
++			NotBefore:    time.Now().Add(-time.Minute),
++			NotAfter:     time.Now().Add(time.Hour),
++			KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
++			ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
++		}
++		der, err := x509.CreateCertificate(rand.Reader, template, template, publicKey, key)
++		if err != nil {
++			t.Fatal(err)
++		}
++		return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
++	}
++	rsaCert := newCertificate(rsaKey, &rsaKey.PublicKey)
++	ecdsaCert := newCertificate(ecKey, &ecKey.PublicKey)
++
++	for _, suite := range tls.InsecureCipherSuites() {
++		t.Run(suite.Name, func(t *testing.T) {
++			ids, legacy, err := resolveCipherSuites([]string{suite.Name})
++			if err != nil || len(ids) != 1 || len(legacy) != 1 {
++				t.Fatalf("explicit legacy suite was rejected: %v, %v, %v", ids, legacy, err)
++			}
++			certificate := rsaCert
++			if strings.Contains(suite.Name, "ECDHE_ECDSA") {
++				certificate = ecdsaCert
++			}
++			serverConn, clientConn := net.Pipe()
++			defer serverConn.Close()
++			defer clientConn.Close()
++			deadline := time.Now().Add(5 * time.Second)
++			_ = serverConn.SetDeadline(deadline)
++			_ = clientConn.SetDeadline(deadline)
++
++			server := tls.Server(serverConn, &tls.Config{
++				Certificates: []tls.Certificate{certificate},
++				CipherSuites: ids,
++				MinVersion:   tls.VersionTLS12,
++				MaxVersion:   tls.VersionTLS12,
++			})
++			client := tls.Client(clientConn, &tls.Config{
++				ServerName:         "localhost",
++				InsecureSkipVerify: true, // The generated test certificate is self-signed.
++				CipherSuites:       ids,
++				MinVersion:         tls.VersionTLS12,
++				MaxVersion:         tls.VersionTLS12,
++			})
++			result := make(chan error, 1)
++			go func() { result <- server.Handshake() }()
++			if err := client.Handshake(); err != nil {
++				t.Fatal(err)
++			}
++			if err := <-result; err != nil {
++				t.Fatal(err)
++			}
++			if got := client.ConnectionState().CipherSuite; got != suite.ID {
++				t.Fatalf("negotiated cipher 0x%x, want 0x%x", got, suite.ID)
++			}
++		})
++	}
++}
+diff --git a/common/tls/ech.go b/common/tls/ech.go
+index 5c7109b89e5145fcd3835f9a57026ace1b1a7699..fb8dfa19e6dc657fcf897268f114bcb593442227 100644
+--- a/common/tls/ech.go
++++ b/common/tls/ech.go
+@@ -136,7 +136,7 @@ func (s *ECHClientConfig) fetchAndHandshake(ctx context.Context, conn net.Conn)
+ 
+ // FetchConfig resolves the ECH config list now. Protocols that hand a cloned *tls.Config to
+ // another stack (MASQUE over http2/quic-go) call Client()/STDConfig() and never reach
+-// ClientHandshake, so waiting for the first handshake would leave ECH unset. //H
++// ClientHandshake, so waiting for the first handshake would leave ECH unset. // H
+ func (s *ECHClientConfig) FetchConfig(ctx context.Context) error {
+ 	s.access.Lock()
+ 	defer s.access.Unlock()
+@@ -163,7 +163,7 @@ func (s *ECHClientConfig) fetchConfigLocked(ctx context.Context) error {
+ 			},
+ 		},
+ 	}
+-	response, err := s.dnsRouter.Exchange(ctx, message, adapter.DNSQueryOptions{})
++	response, err := s.dnsRouter.Exchange(ctx, message, echQueryOptions()) // H
+ 	if err != nil {
+ 		return E.Cause(err, "fetch ECH config list")
+ 	}
+@@ -180,7 +180,7 @@ match:
+ 					if err != nil {
+ 						return E.Cause(err, "decode ECH config")
+ 					}
+-					s.lastTTL = time.Duration(rr.Header().Ttl) * time.Second
++					s.lastTTL = echConfigTTL(rr.Header().Ttl) // H
+ 					s.lastUpdate = time.Now()
+ 					s.SetECHConfigList(echConfigList)
+ 					break match
+@@ -200,6 +200,7 @@ func (s *ECHClientConfig) Clone() Config {
+ 		dnsRouter:        s.dnsRouter,
+ 		queryServerName:  s.queryServerName,
+ 		lastUpdate:       s.lastUpdate,
++		lastTTL:          s.lastTTL, // H the DNS cache is bypassed: a clone keeps the config until it expires
+ 	}
+ }
+ 
+diff --git a/common/tls/h_ech_resolver.go b/common/tls/h_ech_resolver.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..220ef4446bf6ef8ffb253b8b47a10d1953a704fe
+--- /dev/null
++++ b/common/tls/h_ech_resolver.go
+@@ -0,0 +1,24 @@
++package tls
++
++import (
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++)
++
++// echConfigMaxAge is the longest an ECH config fetched by DNS is used before it is fetched again.
++// Servers rotate their ECH keys (Cloudflare every hour or two), and a DNS config may stretch every
++// TTL (Hiddify rewrites them to a day), so a config kept by the record's TTL went stale and every
++// handshake with it failed until the cache expired (hiddify-app#2539).
++const echConfigMaxAge = 10 * time.Minute
++
++// echQueryOptions is the query of an ECH config: through the DNS resolvers by the DNS rules, as
++// any query, but never answered from the DNS cache, so the answer is the server's current one.
++func echQueryOptions() adapter.DNSQueryOptions {
++	return adapter.DNSQueryOptions{DisableCache: true}
++}
++
++// echConfigTTL is how long a fetched ECH config is kept: the record's TTL, at most echConfigMaxAge.
++func echConfigTTL(ttl uint32) time.Duration {
++	return min(time.Duration(ttl)*time.Second, echConfigMaxAge)
++}
+diff --git a/common/tls/h_ech_resolver_test.go b/common/tls/h_ech_resolver_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..81233c91d3ca976db5a24779a60da2e7db9d2105
+--- /dev/null
++++ b/common/tls/h_ech_resolver_test.go
+@@ -0,0 +1,98 @@
++package tls
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/service"
++
++	mDNS "github.com/miekg/dns"
++	"github.com/stretchr/testify/require"
++)
++
++type hECHTestConfig struct {
++	ECHCapableConfig
++	echConfigList []byte
++}
++
++func (c *hECHTestConfig) ServerName() string           { return "example.org" }
++func (c *hECHTestConfig) ECHConfigList() []byte        { return c.echConfigList }
++func (c *hECHTestConfig) SetECHConfigList(list []byte) { c.echConfigList = list }
++func (c *hECHTestConfig) Clone() Config                { return &hECHTestConfig{echConfigList: c.echConfigList} }
++
++// hECHTestRouter answers HTTPS queries with an ECH config and the TTL a DNS rule may rewrite it to.
++type hECHTestRouter struct {
++	adapter.DNSRouter
++	ttl     uint32
++	queries int
++	name    string
++	options adapter.DNSQueryOptions
++}
++
++func (r *hECHTestRouter) Exchange(ctx context.Context, message *mDNS.Msg, options adapter.DNSQueryOptions) (*mDNS.Msg, error) {
++	r.queries++
++	r.name = message.Question[0].Name
++	r.options = options
++	record := &mDNS.HTTPS{
++		Hdr:   mDNS.RR_Header{Name: r.name, Rrtype: mDNS.TypeHTTPS, Class: mDNS.ClassINET, Ttl: r.ttl},
++		Value: []mDNS.SVCBKeyValue{&mDNS.SVCBECHConfig{ECH: []byte("ech-config-list")}},
++	}
++	return &mDNS.Msg{Response: true, Rcode: mDNS.RcodeSuccess, Answer: []mDNS.RR{record}}, nil
++}
++
++func hECHTestClient(t *testing.T, ttl uint32) (*hECHTestRouter, *ECHClientConfig) {
++	t.Helper()
++	router := &hECHTestRouter{ttl: ttl}
++	ctx := service.ContextWith[adapter.DNSRouter](context.Background(), router)
++	config, err := parseECHClientConfig(ctx, &hECHTestConfig{}, option.OutboundTLSOptions{
++		ECH: &option.OutboundECHOptions{Enabled: true, QueryServerName: "cloudflare-ech.com"},
++	})
++	require.NoError(t, err)
++	client := config.(*ECHClientConfig)
++	require.NoError(t, client.FetchConfig(context.Background()))
++	require.Equal(t, "cloudflare-ech.com.", router.name)
++	require.Equal(t, "ech-config-list", string(client.ECHConfigList()))
++	return router, client
++}
++
++// The ECH config is fetched through the DNS resolvers by the rules (no transport is forced), and
++// never from the DNS cache, whose TTLs a config may stretch to a day (hiddify-app#2539).
++func TestH_ECHFetchSkipsDNSCache(t *testing.T) {
++	router, _ := hECHTestClient(t, 300)
++	require.Nil(t, router.options.Transport)
++	require.True(t, router.options.DisableCache)
++}
++
++// A fetched ECH config is kept for the record's TTL, at most 10 minutes, then fetched again.
++func TestH_ECHConfigKeptAtMostTenMinutes(t *testing.T) {
++	for _, test := range []struct {
++		ttl  uint32
++		kept time.Duration
++	}{
++		{ttl: 86400, kept: 10 * time.Minute},
++		{ttl: 601, kept: 10 * time.Minute},
++		{ttl: 300, kept: 5 * time.Minute},
++	} {
++		router, client := hECHTestClient(t, test.ttl)
++		require.Equal(t, test.kept, client.lastTTL, test.ttl)
++
++		require.NoError(t, client.FetchConfig(context.Background()))
++		require.Equal(t, 1, router.queries, "a fresh config is not fetched again")
++
++		client.lastUpdate = time.Now().Add(-test.kept - time.Second)
++		require.NoError(t, client.FetchConfig(context.Background()))
++		require.Equal(t, 2, router.queries, "an expired config is fetched again")
++	}
++}
++
++// A clone keeps the fetched config until it expires, instead of a DNS query per connection.
++func TestH_ECHCloneKeepsConfig(t *testing.T) {
++	router, client := hECHTestClient(t, 86400)
++	clone := client.Clone().(*ECHClientConfig)
++	require.NoError(t, clone.FetchConfig(context.Background()))
++	require.Equal(t, 1, router.queries)
++	require.Equal(t, 10*time.Minute, clone.lastTTL)
++}
+diff --git a/common/tls/h_masque_pin_test.go b/common/tls/h_masque_pin_test.go
+index 6ba76417d8597f9db170f1113e696e13a44816ff..d2ff7d39f205e1a6d8f726db81ab4002bf9ae9db 100644
+--- a/common/tls/h_masque_pin_test.go
++++ b/common/tls/h_masque_pin_test.go
+@@ -16,6 +16,7 @@ import (
+ 
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
++
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+diff --git a/common/tls/h_utls_fingerprint_test.go b/common/tls/h_utls_fingerprint_test.go
+index dc2a93a1b40be1de2fe9128c93cd1d1abea34eca..6e3bc6f61896307f35fa78aa7886627e22ed782b 100644
+--- a/common/tls/h_utls_fingerprint_test.go
++++ b/common/tls/h_utls_fingerprint_test.go
+@@ -9,12 +9,12 @@ import (
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+-// github.com/metacubex/utls is replaced by Leadaxe/utls-lx, which has the Firefox 148 and
+-// Safari 26.3 ClientHellos with the hybrid key share that Xray v26.9.8+ REALITY servers require.
+-// chrome stays at Chrome 133.
++// The native uTLS copy exposes verified browser ClientHello snapshots under
++// stable fingerprint names. Chrome 155 replaced Chrome 133 rather than adding
++// another selectable fingerprint; the other snapshots are Firefox 148 and Safari 26.3.
+ func TestH_UTLSFingerprintVersions(t *testing.T) {
+ 	for name, want := range map[string]utls.ClientHelloID{
+-		"chrome":  utls.HelloChrome_133,
++		"chrome":  utls.HelloChrome_155,
+ 		"firefox": utls.HelloFirefox_148,
+ 		"safari":  utls.HelloSafari_26_3,
+ 	} {
+diff --git a/common/tls/h_utls_hello_id.go b/common/tls/h_utls_hello_id.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e4c63e0c4e7b55dc8678c80e0f046bcdb360947
+--- /dev/null
++++ b/common/tls/h_utls_hello_id.go
+@@ -0,0 +1,13 @@
++//go:build with_utls
++
++package tls
++
++// UTLSHelloID returns the client and version of the uTLS fingerprint of config, for code that
++// hands the fingerprint to another TLS stack (Xray's in XDRIVE); ok is false without uTLS.
++func UTLSHelloID(config Config) (client string, version string, ok bool) {
++	utlsConfig, isUTLS := config.(*UTLSClientConfig)
++	if !isUTLS {
++		return "", "", false
++	}
++	return utlsConfig.id.Client, utlsConfig.id.Version, true
++}
+diff --git a/common/tls/h_utls_hello_id_stub.go b/common/tls/h_utls_hello_id_stub.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..64f5b8a9d727c38f8da521926291537de95707cd
+--- /dev/null
++++ b/common/tls/h_utls_hello_id_stub.go
+@@ -0,0 +1,8 @@
++//go:build !with_utls
++
++package tls
++
++// UTLSHelloID returns ok false: this build has no uTLS.
++func UTLSHelloID(config Config) (client string, version string, ok bool) {
++	return "", "", false
++}
+diff --git a/common/tls/h_utls_xray_names.go b/common/tls/h_utls_xray_names.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..0755cefbb731e38299cf48b86b0489597c7b2823
+--- /dev/null
++++ b/common/tls/h_utls_xray_names.go
+@@ -0,0 +1,72 @@
++//go:build with_utls
++
++package tls
++
++import (
++	"strings"
++
++	utls "github.com/metacubex/utls"
++)
++
++// xrayFingerprints are Xray's fingerprint names for a fixed uTLS ClientHello (its
++// ModernFingerprints and OtherFingerprints), so an Xray link's fp= value works here too. The
++// short names (chrome, firefox, ...) are sing-box's own and are read before these. //H
++var xrayFingerprints = map[string]utls.ClientHelloID{
++	"hellofirefox_120":                 utls.HelloFirefox_120,
++	"hellofirefox_148":                 utls.HelloFirefox_148,
++	"hellochrome_120":                  utls.HelloChrome_120,
++	"hellochrome_131":                  utls.HelloChrome_131,
++	"hellochrome_133":                  utls.HelloChrome_133,
++	"helloios_13":                      utls.HelloIOS_13,
++	"helloios_14":                      utls.HelloIOS_14,
++	"helloedge_106":                    utls.HelloEdge_106,
++	"hellosafari_26_3":                 utls.HelloSafari_26_3,
++	"hello360_11_0":                    utls.Hello360_11_0,
++	"helloqq_11_1":                     utls.HelloQQ_11_1,
++	"hellogolang":                      utls.HelloGolang,
++	"hellorandomized":                  utls.HelloRandomized,
++	"hellorandomizedalpn":              utls.HelloRandomizedALPN,
++	"hellorandomizednoalpn":            utls.HelloRandomizedNoALPN,
++	"hellofirefox_auto":                utls.HelloFirefox_Auto,
++	"hellofirefox_55":                  utls.HelloFirefox_55,
++	"hellofirefox_56":                  utls.HelloFirefox_56,
++	"hellofirefox_63":                  utls.HelloFirefox_63,
++	"hellofirefox_65":                  utls.HelloFirefox_65,
++	"hellofirefox_99":                  utls.HelloFirefox_99,
++	"hellofirefox_102":                 utls.HelloFirefox_102,
++	"hellofirefox_105":                 utls.HelloFirefox_105,
++	"hellochrome_auto":                 utls.HelloChrome_Auto,
++	"hellochrome_58":                   utls.HelloChrome_58,
++	"hellochrome_62":                   utls.HelloChrome_62,
++	"hellochrome_70":                   utls.HelloChrome_70,
++	"hellochrome_72":                   utls.HelloChrome_72,
++	"hellochrome_83":                   utls.HelloChrome_83,
++	"hellochrome_87":                   utls.HelloChrome_87,
++	"hellochrome_96":                   utls.HelloChrome_96,
++	"hellochrome_100":                  utls.HelloChrome_100,
++	"hellochrome_102":                  utls.HelloChrome_102,
++	"hellochrome_106_shuffle":          utls.HelloChrome_106_Shuffle,
++	"helloios_auto":                    utls.HelloIOS_Auto,
++	"helloios_11_1":                    utls.HelloIOS_11_1,
++	"helloios_12_1":                    utls.HelloIOS_12_1,
++	"helloandroid_11_okhttp":           utls.HelloAndroid_11_OkHttp,
++	"helloedge_85":                     utls.HelloEdge_85,
++	"helloedge_auto":                   utls.HelloEdge_Auto,
++	"hellosafari_16_0":                 utls.HelloSafari_16_0,
++	"hellosafari_auto":                 utls.HelloSafari_Auto,
++	"hello360_auto":                    utls.Hello360_Auto,
++	"hello360_7_5":                     utls.Hello360_7_5,
++	"helloqq_auto":                     utls.HelloQQ_Auto,
++	"hellochrome_100_psk":              utls.HelloChrome_100_PSK,
++	"hellochrome_112_psk_shuf":         utls.HelloChrome_112_PSK_Shuf,
++	"hellochrome_114_padding_psk_shuf": utls.HelloChrome_114_Padding_PSK_Shuf,
++	"hellochrome_115_pq":               utls.HelloChrome_115_PQ,
++	"hellochrome_115_pq_psk":           utls.HelloChrome_115_PQ_PSK,
++	"hellochrome_120_pq":               utls.HelloChrome_120_PQ,
++}
++
++// xrayFingerprint is the ClientHello of an Xray fingerprint name, in any case. //H
++func xrayFingerprint(name string) (utls.ClientHelloID, bool) {
++	id, ok := xrayFingerprints[strings.ToLower(name)]
++	return id, ok
++}
+diff --git a/common/tls/h_utls_xray_names_test.go b/common/tls/h_utls_xray_names_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b0f802247b98643ec025213e864d08e69c07aaf9
+--- /dev/null
++++ b/common/tls/h_utls_xray_names_test.go
+@@ -0,0 +1,25 @@
++//go:build with_utls
++
++package tls
++
++import (
++	"testing"
++
++	utls "github.com/metacubex/utls"
++	"github.com/stretchr/testify/require"
++)
++
++// An Xray link's fp=hellochrome_120 used to fail the outbound with "unknown uTLS fingerprint".
++func TestH_UTLSXrayFingerprintNames(t *testing.T) {
++	id, err := uTLSClientHelloID("hellochrome_120")
++	require.NoError(t, err)
++	require.Equal(t, utls.HelloChrome_120, id)
++	id, err = uTLSClientHelloID("HelloFirefox_148")
++	require.NoError(t, err)
++	require.Equal(t, utls.HelloFirefox_148, id)
++	id, err = uTLSClientHelloID("chrome")
++	require.NoError(t, err)
++	require.Equal(t, utls.HelloChrome_Auto, id, "sing-box's own names first")
++	_, err = uTLSClientHelloID("hellochrome_999")
++	require.Error(t, err)
++}
+diff --git a/common/tls/masque_client.go b/common/tls/masque_client.go
+index 24e6df87b906d040f001475ad7da2062dede5886..595320a179587e6b3fd9bb4d7384b0b77fe0c598 100644
+--- a/common/tls/masque_client.go
++++ b/common/tls/masque_client.go
+@@ -43,9 +43,9 @@ func NewMASQUEClient(ctx context.Context, logger logger.ContextLogger, serverNam
+ 	// verifyCertificate pins the peer key: the WARP endpoint presents a certificate signed for a
+ 	// name it never reveals, so the key is the only identity worth checking.
+ 	verifyCertificate := func(cert *x509.Certificate) error {
+-		if len(options.CertificatePublicKeySHA256) > 0 { //H: pinned by hash instead of the profile's key
+-			return verifyPublicKeySHA256(cert, options.CertificatePublicKeySHA256) //H
+-		} //H
++		if len(options.CertificatePublicKeySHA256) != 0 { // H: pinned by hash instead of the profile's key
++			return verifyPublicKeySHA256(cert, options.CertificatePublicKeySHA256)
++		}
+ 		if _, ok := cert.PublicKey.(*ecdsa.PublicKey); !ok {
+ 			return x509.ErrUnsupportedAlgorithm
+ 		}
+@@ -69,7 +69,7 @@ func NewMASQUEClient(ctx context.Context, logger logger.ContextLogger, serverNam
+ 	}
+ 	// Cloudflare's WARP endpoint publishes no ECH config of its own and rejects the public
+ 	// cloudflare-ech.com one, so this is always the fallback path: accept the rejection and let
+-	// Go retry the plain handshake, which the pin above still covers. //H
++	// Go retry the plain handshake, which the pin above still covers. // H
+ 	tlsConfig.EncryptedClientHelloRejectionVerify = func(state tls.ConnectionState) error {
+ 		return nil
+ 	}
+@@ -81,7 +81,7 @@ func NewMASQUEClient(ctx context.Context, logger logger.ContextLogger, serverNam
+ 		fragmentFallbackDelay: time.Duration(options.FragmentFallbackDelay),
+ 		recordFragment:        options.RecordFragment,
+ 	}
+-	if options.ECH != nil && options.ECH.Enabled { //H
++	if options.ECH != nil && options.ECH.Enabled { // H
+ 		// ECH is applied to the underlying client; the tunnel hands this config to http2/quic-go,
+ 		// so the ClientHello carries the encrypted config list.
+ 		echConfig, err := parseECHClientConfig(ctx, config.(ECHCapableConfig), option.OutboundTLSOptions{ECH: options.ECH})
+diff --git a/common/tls/reality_client.go b/common/tls/reality_client.go
+index 5fe0949be2cccfed45d7a65cf0f1f004afc821ca..be24834b13cbc6d5223972c99882e72f29db34cd 100644
+--- a/common/tls/reality_client.go
++++ b/common/tls/reality_client.go
+@@ -28,7 +28,7 @@ import (
+ 	"unsafe"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+-	tf "github.com/sagernet/sing-box/common/tlsfragment" //H
++	tf "github.com/sagernet/sing-box/common/tlsfragment" // H
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/option"
+ 	"github.com/sagernet/sing/common/debug"
+@@ -38,6 +38,7 @@ import (
+ 	"github.com/sagernet/sing/common/ntp"
+ 	aTLS "github.com/sagernet/sing/common/tls"
+ 
++	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
+ 	utls "github.com/metacubex/utls"
+ 	"golang.org/x/crypto/hkdf"
+ 	"golang.org/x/net/http2"
+@@ -46,11 +47,12 @@ import (
+ var _ ConfigCompat = (*RealityClientConfig)(nil)
+ 
+ type RealityClientConfig struct {
+-	ctx       context.Context
+-	uClient   *UTLSClientConfig
+-	publicKey []byte
+-	shortID   [8]byte
+-	classical bool //H: key_share "classical", no X25519MLKEM768
++	ctx           context.Context
++	uClient       *UTLSClientConfig
++	publicKey     []byte
++	shortID       [8]byte
++	classical     bool // H: key_share "classical", no X25519MLKEM768
++	mldsa65Verify *mldsa65.PublicKey
+ }
+ 
+ func NewRealityClient(ctx context.Context, logger logger.ContextLogger, serverAddress string, options option.OutboundTLSOptions) (Config, error) {
+@@ -80,9 +82,9 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
+ 	if len(publicKey) != 32 {
+ 		return nil, E.New("invalid public_key")
+ 	}
+-	if len(options.Reality.ShortID) > 16 { //H: hex.Decode panics when the input does not fit in 8 bytes
+-		return nil, E.New("invalid short_id: longer than 16 hex digits") //H
+-	} //H
++	if len(options.Reality.ShortID) > 16 { // H: hex.Decode panics when the input does not fit in 8 bytes
++		return nil, E.New("invalid short_id: longer than 16 hex digits") // H
++	} // H
+ 	var shortID [8]byte
+ 	decodedLen, err := hex.Decode(shortID[:], []byte(options.Reality.ShortID))
+ 	if err != nil {
+@@ -92,7 +94,7 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
+ 		return nil, E.New("invalid short_id")
+ 	}
+ 
+-	var classical bool //H: key_share
++	var classical bool // H: key_share
+ 	switch options.Reality.KeyShare {
+ 	case "", "hybrid":
+ 	case "classical":
+@@ -100,7 +102,11 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
+ 	default:
+ 		return nil, E.New("unknown reality key_share: ", options.Reality.KeyShare, ` (expected "hybrid" or "classical")`)
+ 	}
+-	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID, classical} //H
++	verify, err := parseRealityMLDSAPublicKey(options.Reality.Mldsa65Verify)
++	if err != nil {
++		return nil, err
++	}
++	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID, classical, verify} // H
+ 	if options.KernelRx || options.KernelTx {
+ 		if !C.IsLinux {
+ 			return nil, E.New("kTLS is only supported on Linux")
+@@ -150,11 +156,12 @@ func (e *RealityClientConfig) Client(conn net.Conn) (Conn, error) {
+ // H: realityClientVersion is the Xray version reported to REALITY servers. Servers compare it
+ // with their minClientVer (Xray v26.7 applied 26.3.27 when unset), so it follows Xray's latest
+ // release instead of sing-box's old 1.8.1, which those servers reject.
+-var realityClientVersion = [3]byte{26, 10, 17}
++var realityClientVersion = [3]byte{26, 11, 9}
+ 
+ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn) (aTLS.Conn, error) {
+ 	verifier := &realityVerifier{
+-		serverName: e.uClient.ServerName(),
++		serverName:    e.uClient.ServerName(),
++		mldsa65Verify: e.mldsa65Verify,
+ 	}
+ 	uConfig := e.uClient.config.Clone()
+ 	uConfig.InsecureSkipVerify = true
+@@ -163,13 +170,13 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
+ 	// H: the fingerprint is changed to pass both older and v26.10+ Xray servers (see
+ 	// realityClientHelloSpec). The auth key comes from the X25519 share (KeyShareKeys.Ecdhe),
+ 	// which REALITY servers check first, as Xray's own client does.
+-	spec, err := realityClientHelloSpec(e.uClient.id, uConfig, e.classical) //H
++	spec, err := realityClientHelloSpec(e.uClient.id, uConfig, e.classical) // H
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	if e.uClient.fragment || e.uClient.recordFragment { //H: fragment and record_fragment were skipped for REALITY
+-		conn = tf.NewConn(conn, e.uClient.ctx, e.uClient.fragment, e.uClient.recordFragment, e.uClient.fragmentFallbackDelay) //H
+-	} //H
++	if e.uClient.fragment || e.uClient.recordFragment { // H: fragment and record_fragment were skipped for REALITY
++		conn = tf.NewConn(conn, e.uClient.ctx, e.uClient.fragment, e.uClient.recordFragment, e.uClient.fragmentFallbackDelay) // H
++	} // H
+ 	uConn := utls.UClient(conn, uConfig, utls.HelloCustom)
+ 	verifier.UConn = uConn
+ 	err = uConn.ApplyPreset(spec)
+@@ -202,8 +209,8 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
+ 	}
+ 	binary.BigEndian.PutUint64(hello.SessionId, uint64(nowTime.Unix()))
+ 
+-	copy(hello.SessionId[:3], realityClientVersion[:]) //H
+-	binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(time.Now().Unix()))
++	copy(hello.SessionId[:3], realityClientVersion[:]) // H
++	binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(nowTime.Unix()))
+ 	copy(hello.SessionId[8:], e.shortID[:])
+ 	if debug.Enabled {
+ 		fmt.Printf("REALITY hello.sessionId[:16]: %v\n", hello.SessionId[:16])
+@@ -296,24 +303,62 @@ func (e *RealityClientConfig) Clone() Config {
+ 		e.uClient.Clone().(*UTLSClientConfig),
+ 		e.publicKey,
+ 		e.shortID,
+-		e.classical, //H
++		e.classical, // H
++		e.mldsa65Verify,
++	}
++}
++
++func parseRealityMLDSAPublicKey(value string) (*mldsa65.PublicKey, error) {
++	if value == "" {
++		return nil, nil
+ 	}
++	data, err := base64.RawURLEncoding.DecodeString(value)
++	if err != nil || len(data) != mldsa65.PublicKeySize {
++		return nil, E.New("invalid mldsa65_verify")
++	}
++	key, err := mldsa65.Scheme().UnmarshalBinaryPublicKey(data)
++	if err != nil {
++		return nil, E.New("invalid mldsa65_verify")
++	}
++	verify, ok := key.(*mldsa65.PublicKey)
++	if !ok {
++		return nil, E.New("invalid mldsa65_verify key type")
++	}
++	return verify, nil
+ }
+ 
+ type realityVerifier struct {
+ 	*utls.UConn
+-	serverName string
+-	authKey    []byte
+-	verified   bool
++	serverName    string
++	authKey       []byte
++	verified      bool
++	mldsa65Verify *mldsa65.PublicKey
+ }
+ 
+ func (c *realityVerifier) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+ 	p, _ := reflect.TypeFor[utls.Conn]().FieldByName("peerCertificates")
+ 	certs := *(*([]*x509.Certificate))(unsafe.Add(unsafe.Pointer(c.Conn), p.Offset))
++	if len(certs) == 0 {
++		return E.New("REALITY: empty certificate chain")
++	}
+ 	if pub, ok := certs[0].PublicKey.(ed25519.PublicKey); ok {
+ 		h := hmac.New(sha512.New, c.authKey)
+ 		h.Write(pub)
+ 		if bytes.Equal(h.Sum(nil), certs[0].Signature) {
++			if c.mldsa65Verify != nil {
++				var signature []byte
++				for _, extension := range certs[0].Extensions {
++					if extension.Id.Equal([]int{0, 0}) {
++						signature = extension.Value
++						break
++					}
++				}
++				h.Write(c.HandshakeState.Hello.Raw)
++				h.Write(c.HandshakeState.ServerHello.Raw)
++				if len(signature) != mldsa65.SignatureSize || !mldsa65.Verify(c.mldsa65Verify, h.Sum(nil), nil, signature) {
++					return E.New("REALITY: ML-DSA-65 verification failed")
++				}
++			}
+ 			c.verified = true
+ 			return nil
+ 		}
+diff --git a/common/tls/reality_server.go b/common/tls/reality_server.go
+index af1e6d7884ff2eec70da7e814ba5f133b86982df..4c63bc9d3c332fb352cc1d0a0d1ca4e15fd219d1 100644
+--- a/common/tls/reality_server.go
++++ b/common/tls/reality_server.go
+@@ -3,12 +3,15 @@
+ package tls
+ 
+ import (
++	"bytes"
+ 	"context"
+ 	"crypto/tls"
+ 	"encoding/base64"
+ 	"encoding/hex"
+ 	"fmt"
+ 	"net"
++	"strconv"
++	"strings"
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/common/dialer"
+@@ -20,6 +23,7 @@ import (
+ 	N "github.com/sagernet/sing/common/network"
+ 	"github.com/sagernet/sing/common/ntp"
+ 
++	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
+ 	utls "github.com/metacubex/utls"
+ )
+ 
+@@ -92,7 +96,16 @@ func NewRealityServer(ctx context.Context, logger log.ContextLogger, options opt
+ 	tlsConfig.Type = N.NetworkTCP
+ 	tlsConfig.Dest = options.Reality.Handshake.ServerOptions.Build().String()
+ 
+-	tlsConfig.ServerNames = map[string]bool{options.ServerName: true}
++	tlsConfig.ServerNames = make(map[string]bool)
++	if options.ServerName != "" {
++		tlsConfig.ServerNames[options.ServerName] = true
++	}
++	for _, name := range options.Reality.ServerNames {
++		if name == "" {
++			return nil, E.New("REALITY server_names cannot contain an empty name")
++		}
++		tlsConfig.ServerNames[name] = true
++	}
+ 	privateKey, err := base64.RawURLEncoding.DecodeString(options.Reality.PrivateKey)
+ 	if err != nil {
+ 		return nil, E.Cause(err, "decode private key")
+@@ -101,6 +114,33 @@ func NewRealityServer(ctx context.Context, logger log.ContextLogger, options opt
+ 		return nil, E.New("invalid private key")
+ 	}
+ 	tlsConfig.PrivateKey = privateKey
++	tlsConfig.Mldsa65Key, err = parseRealityMLDSAServerKey(options.Reality.Mldsa65Seed, privateKey)
++	if err != nil {
++		return nil, err
++	}
++	if options.Reality.Xver > 2 {
++		return nil, E.New("invalid REALITY xver")
++	}
++	tlsConfig.Xver = options.Reality.Xver
++	tlsConfig.MinClientVer, err = parseRealityClientVersion(options.Reality.MinClientVersion)
++	if err != nil {
++		return nil, err
++	}
++	tlsConfig.MaxClientVer, err = parseRealityClientVersion(options.Reality.MaxClientVersion)
++	if err != nil {
++		return nil, err
++	}
++	if len(tlsConfig.MinClientVer) > 0 && len(tlsConfig.MaxClientVer) > 0 && bytes.Compare(tlsConfig.MinClientVer, tlsConfig.MaxClientVer) > 0 {
++		return nil, E.New("REALITY min_client_version exceeds max_client_version")
++	}
++	tlsConfig.LimitFallbackUpload, err = parseRealityFallbackLimit(options.Reality.LimitFallbackUpload)
++	if err != nil {
++		return nil, err
++	}
++	tlsConfig.LimitFallbackDownload, err = parseRealityFallbackLimit(options.Reality.LimitFallbackDownload)
++	if err != nil {
++		return nil, err
++	}
+ 	tlsConfig.MaxTimeDiff = time.Duration(options.Reality.MaxTimeDifference)
+ 
+ 	tlsConfig.ShortIds = make(map[[8]byte]bool)
+@@ -108,9 +148,9 @@ func NewRealityServer(ctx context.Context, logger log.ContextLogger, options opt
+ 		tlsConfig.ShortIds[[8]byte{0}] = true
+ 	} else {
+ 		for i, shortIDString := range options.Reality.ShortID {
+-			if len(shortIDString) > 16 { //H: hex.Decode panics when the input does not fit in 8 bytes
+-				return nil, E.New("invalid short_id[", i, "]: ", shortIDString, ": longer than 16 hex digits") //H
+-			} //H
++			if len(shortIDString) > 16 { // H: hex.Decode panics when the input does not fit in 8 bytes
++				return nil, E.New("invalid short_id[", i, "]: ", shortIDString, ": longer than 16 hex digits") // H
++			} // H
+ 			var shortID [8]byte
+ 			decodedLen, err := hex.Decode(shortID[:], []byte(shortIDString))
+ 			if err != nil {
+@@ -259,3 +299,50 @@ func (c *realityConnWrapper) ReaderReplaceable() bool {
+ func (c *realityConnWrapper) WriterReplaceable() bool {
+ 	return false
+ }
++
++func parseRealityClientVersion(value string) ([]byte, error) {
++	if value == "" {
++		return nil, nil
++	}
++	parts := strings.Split(value, ".")
++	if len(parts) != 3 {
++		return nil, E.New("invalid REALITY client version")
++	}
++	result := make([]byte, 3)
++	for i, part := range parts {
++		version, err := strconv.ParseUint(part, 10, 8)
++		if err != nil {
++			return nil, E.New("invalid REALITY client version")
++		}
++		result[i] = byte(version)
++	}
++	return result, nil
++}
++
++func parseRealityFallbackLimit(value option.RealityLimitFallback) (utls.RealityLimitFallback, error) {
++	if value.AfterBytes < 0 || value.BytesPerSec < 0 || value.BurstBytesPerSec < 0 {
++		return utls.RealityLimitFallback{}, E.New("negative REALITY fallback limit")
++	}
++	return utls.RealityLimitFallback{
++		AfterBytes:       uint64(value.AfterBytes),
++		BytesPerSec:      uint64(value.BytesPerSec),
++		BurstBytesPerSec: uint64(value.BurstBytesPerSec),
++	}, nil
++}
++
++// parseRealityMLDSAServerKey derives the independent ML-DSA signing key and
++// refuses malformed or reused REALITY key material before transport startup.
++func parseRealityMLDSAServerKey(encoded string, realityPrivateKey []byte) ([]byte, error) {
++	if encoded == "" {
++		return nil, nil
++	}
++	seed, err := base64.RawURLEncoding.DecodeString(encoded)
++	if err != nil || len(seed) != mldsa65.SeedSize {
++		return nil, E.New("invalid REALITY mldsa65_seed")
++	}
++	if bytes.Equal(seed, realityPrivateKey) {
++		return nil, E.New("REALITY mldsa65_seed must differ from private_key")
++	}
++	_, key := mldsa65.NewKeyFromSeed((*[32]byte)(seed))
++	return key.Bytes(), nil
++}
+diff --git a/common/tls/std_client.go b/common/tls/std_client.go
+index cc805e1d982fdb9f38003127f918fa7fcf6af2d5..a879ca0c6b73f761c99f954c4026b40944d37ec7 100644
+--- a/common/tls/std_client.go
++++ b/common/tls/std_client.go
+@@ -7,19 +7,19 @@ import (
+ 	"crypto/tls"
+ 	"crypto/x509"
+ 	"encoding/base64"
+-	M "github.com/sagernet/sing/common/metadata"
+ 	"net"
+ 	"slices"
+ 	"strings"
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+-	"github.com/sagernet/sing-box/common/tlsfragment"
++	tf "github.com/sagernet/sing-box/common/tlsfragment"
+ 	"github.com/sagernet/sing-box/common/tlsspoof"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/option"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	"github.com/sagernet/sing/common/logger"
++	M "github.com/sagernet/sing/common/metadata"
+ 	"github.com/sagernet/sing/common/ntp"
+ 	"github.com/sagernet/sing/service/filemanager"
+ )
+@@ -36,7 +36,7 @@ type STDClientConfig struct {
+ 	recordFragment        bool
+ 	spoof                 string
+ 	spoofMethod           tlsspoof.Method
+-	tricks                *tlsTricks //H: tls_tricks (mixed-case SNI)
++	tricks                *tlsTricks // H: tls_tricks (mixed-case SNI)
+ }
+ 
+ func (c *STDClientConfig) ServerName() string {
+@@ -85,11 +85,11 @@ func (c *STDClientConfig) Client(conn net.Conn) (Conn, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	if c.tricks != nil && c.config.ServerName != "" { //H: a new case for each connection
+-		config := c.config.Clone()                                 //H
+-		config.ServerName = c.tricks.serverName(config.ServerName) //H
+-		return tls.Client(conn, config), nil                       //H
+-	} //H
++	if c.tricks != nil && c.config.ServerName != "" { // H: a new case for each connection
++		config := c.config.Clone()                                 // H
++		config.ServerName = c.tricks.serverName(config.ServerName) // H
++		return tls.Client(conn, config), nil                       // H
++	} // H
+ 	return tls.Client(conn, c.config), nil
+ }
+ 
+@@ -106,7 +106,7 @@ func (c *STDClientConfig) Clone() Config {
+ 		recordFragment:        c.recordFragment,
+ 		spoof:                 c.spoof,
+ 		spoofMethod:           c.spoofMethod,
+-		tricks:                c.tricks, //H
++		tricks:                c.tricks, // H
+ 	}
+ 	cloned.SetServerName(cloned.serverName)
+ 	return cloned
+@@ -176,15 +176,13 @@ func newSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
+ 		tlsConfig.MaxVersion = maxVersion
+ 	}
+ 	if options.CipherSuites != nil {
+-	find:
+-		for _, cipherSuite := range options.CipherSuites {
+-			for _, tlsCipherSuite := range tls.CipherSuites() {
+-				if cipherSuite == tlsCipherSuite.Name {
+-					tlsConfig.CipherSuites = append(tlsConfig.CipherSuites, tlsCipherSuite.ID)
+-					continue find
+-				}
+-			}
+-			return nil, E.New("unknown cipher_suite: ", cipherSuite)
++		ids, legacy, err := resolveCipherSuites(options.CipherSuites)
++		if err != nil {
++			return nil, err
++		}
++		tlsConfig.CipherSuites = ids
++		if len(legacy) > 0 {
++			logger.Warn("Explicitly enabled legacy TLS cipher suites (weaker security): ", strings.Join(legacy, ", "))
+ 		}
+ 	}
+ 	for _, curve := range options.CurvePreferences {
+@@ -246,10 +244,10 @@ func newSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	tricks, err := parseTLSTricks(logger, options.TLSTricks, false) //H
+-	if err != nil {                                                 //H
+-		return nil, err //H
+-	} //H
++	tricks, err := parseTLSTricks(logger, options.TLSTricks, false) // H
++	if err != nil {                                                 // H
++		return nil, err // H
++	} // H
+ 	var config Config = &STDClientConfig{
+ 		ctx:                   ctx,
+ 		config:                &tlsConfig,
+@@ -262,7 +260,7 @@ func newSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
+ 		recordFragment:        options.RecordFragment,
+ 		spoof:                 spoof,
+ 		spoofMethod:           spoofMethod,
+-		tricks:                tricks, //H
++		tricks:                tricks, // H
+ 	}
+ 	config.SetServerName(serverName)
+ 	if options.ECH != nil && options.ECH.Enabled {
+@@ -318,3 +316,22 @@ func VerifyPinnedCertificate(certificateHashes [][]byte, publicKeyHashes [][]byt
+ 	return E.New("unrecognized peer certificate: sha256 ", base64.StdEncoding.EncodeToString(certificateHash[:]),
+ 		", public key sha256 ", base64.StdEncoding.EncodeToString(publicKeyHash[:]))
+ }
++
++func VerifyPublicKeySHA256(knownHashValues [][]byte, rawCerts [][]byte) error {
++	if len(rawCerts) == 0 {
++		return E.New("missing peer certificate")
++	}
++	leafCertificate, err := x509.ParseCertificate(rawCerts[0])
++	if err != nil {
++		return E.Cause(err, "parse leaf certificate")
++	}
++	publicKeyBytes, err := x509.MarshalPKIXPublicKey(leafCertificate.PublicKey)
++	if err != nil {
++		return E.Cause(err, "marshal public key")
++	}
++	publicKeyHash := sha256.Sum256(publicKeyBytes)
++	if slices.ContainsFunc(knownHashValues, func(value []byte) bool { return bytes.Equal(value, publicKeyHash[:]) }) {
++		return nil
++	}
++	return E.New("unrecognized peer certificate: public key sha256 ", base64.StdEncoding.EncodeToString(publicKeyHash[:]))
++}
+diff --git a/common/tls/std_server.go b/common/tls/std_server.go
+index bc156d2780b3fccb9f83dd44a42100917c4fda95..befbfe9550a5185b00de2750cdd38bcf640d1fc2 100644
+--- a/common/tls/std_server.go
++++ b/common/tls/std_server.go
+@@ -388,15 +388,13 @@ func NewSTDServer(ctx context.Context, logger log.ContextLogger, options option.
+ 		tlsConfig.MaxVersion = maxVersion
+ 	}
+ 	if options.CipherSuites != nil {
+-	find:
+-		for _, cipherSuite := range options.CipherSuites {
+-			for _, tlsCipherSuite := range tls.CipherSuites() {
+-				if cipherSuite == tlsCipherSuite.Name {
+-					tlsConfig.CipherSuites = append(tlsConfig.CipherSuites, tlsCipherSuite.ID)
+-					continue find
+-				}
+-			}
+-			return nil, E.New("unknown cipher_suite: ", cipherSuite)
++		ids, legacy, err := resolveCipherSuites(options.CipherSuites)
++		if err != nil {
++			return nil, err
++		}
++		tlsConfig.CipherSuites = ids
++		if len(legacy) > 0 {
++			logger.Warn("Explicitly enabled legacy TLS cipher suites (weaker security): ", strings.Join(legacy, ", "))
+ 		}
+ 	}
+ 	for _, curveID := range options.CurvePreferences {
+diff --git a/common/tls/utls_client.go b/common/tls/utls_client.go
+index 94f31726853dcafdb4e4af9d0165865920b9a730..b71ae6c8ccd658dabbae5a418fdc5a09e919f039 100644
+--- a/common/tls/utls_client.go
++++ b/common/tls/utls_client.go
+@@ -12,7 +12,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+-	"github.com/sagernet/sing-box/common/tlsfragment"
++	tf "github.com/sagernet/sing-box/common/tlsfragment"
+ 	"github.com/sagernet/sing-box/common/tlsspoof"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/option"
+@@ -39,7 +39,7 @@ type UTLSClientConfig struct {
+ 	recordFragment        bool
+ 	spoof                 string
+ 	spoofMethod           tlsspoof.Method
+-	tricks                *tlsTricks //H: tls_tricks
++	tricks                *tlsTricks // H: tls_tricks
+ }
+ 
+ func (c *UTLSClientConfig) ServerName() string {
+@@ -91,22 +91,22 @@ func (c *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	config := c.config.Clone()                      //H
+-	if c.tricks != nil && config.ServerName != "" { //H
+-		config.ServerName = c.tricks.serverName(config.ServerName) //H
+-	} //H
+-	id := c.id                               //H
+-	if c.tricks != nil && c.tricks.padding { //H: the spec is applied to a custom hello
+-		id = utls.HelloCustom //H
+-	} //H
+-	uConn := utls.UClient(conn, config, id)  //H
+-	if c.tricks != nil && c.tricks.padding { //H
+-		err = applyTLSTricksPadding(uConn, c.id, c.tricks) //H
+-		if err != nil {                                    //H
+-			return nil, err //H
+-		} //H
+-	} //H
+-	return &utlsALPNWrapper{utlsConnWrapper{uConn}, c.config.NextProtos}, nil //H
++	config := c.config.Clone()                      // H
++	if c.tricks != nil && config.ServerName != "" { // H
++		config.ServerName = c.tricks.serverName(config.ServerName) // H
++	} // H
++	id := c.id                               // H
++	if c.tricks != nil && c.tricks.padding { // H: the spec is applied to a custom hello
++		id = utls.HelloCustom // H
++	} // H
++	uConn := utls.UClient(conn, config, id)  // H
++	if c.tricks != nil && c.tricks.padding { // H
++		err = applyTLSTricksPadding(uConn, c.id, c.tricks) // H
++		if err != nil {                                    // H
++			return nil, err // H
++		} // H
++	} // H
++	return &utlsALPNWrapper{utlsConnWrapper{uConn}, c.config.NextProtos}, nil // H
+ }
+ 
+ func (c *UTLSClientConfig) SetSessionIDGenerator(generator func(clientHello []byte, sessionID []byte) error) {
+@@ -127,7 +127,7 @@ func (c *UTLSClientConfig) Clone() Config {
+ 		recordFragment:        c.recordFragment,
+ 		spoof:                 c.spoof,
+ 		spoofMethod:           c.spoofMethod,
+-		tricks:                c.tricks, //H
++		tricks:                c.tricks, // H
+ 	}
+ 	cloned.SetServerName(cloned.serverName)
+ 	return cloned
+@@ -253,15 +253,13 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
+ 		tlsConfig.MaxVersion = maxVersion
+ 	}
+ 	if options.CipherSuites != nil {
+-	find:
+-		for _, cipherSuite := range options.CipherSuites {
+-			for _, tlsCipherSuite := range tls.CipherSuites() {
+-				if cipherSuite == tlsCipherSuite.Name {
+-					tlsConfig.CipherSuites = append(tlsConfig.CipherSuites, tlsCipherSuite.ID)
+-					continue find
+-				}
+-			}
+-			return nil, E.New("unknown cipher_suite: ", cipherSuite)
++		ids, legacy, err := resolveCipherSuites(options.CipherSuites)
++		if err != nil {
++			return nil, err
++		}
++		tlsConfig.CipherSuites = ids
++		if len(legacy) > 0 {
++			logger.Warn("Explicitly enabled legacy TLS cipher suites (weaker security): ", strings.Join(legacy, ", "))
+ 		}
+ 	}
+ 	var certificate []byte
+@@ -324,15 +322,15 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	tricks, err := parseTLSTricks(logger, options.TLSTricks, true) //H
+-	if err != nil {                                                //H
+-		return nil, err //H
+-	} //H
+-	if tricks != nil && tricks.padding { //H: the padding edits the fingerprint's spec
+-		if _, err = utls.UTLSIdToSpec(id); err != nil { //H
+-			return nil, E.Cause(err, "tls_tricks padding needs a fixed uTLS fingerprint") //H
+-		} //H
+-	} //H
++	tricks, err := parseTLSTricks(logger, options.TLSTricks, true) // H
++	if err != nil {                                                // H
++		return nil, err // H
++	} // H
++	if tricks != nil && tricks.padding { // H: the padding edits the fingerprint's spec
++		if _, err = utls.UTLSIdToSpec(id); err != nil { // H
++			return nil, E.Cause(err, "tls_tricks padding needs a fixed uTLS fingerprint") // H
++		} // H
++	} // H
+ 	var config Config = &UTLSClientConfig{
+ 		ctx:                   ctx,
+ 		config:                &tlsConfig,
+@@ -346,7 +344,7 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
+ 		recordFragment:        options.RecordFragment,
+ 		spoof:                 spoof,
+ 		spoofMethod:           spoofMethod,
+-		tricks:                tricks, //H
++		tricks:                tricks, // H
+ 	}
+ 	config.SetServerName(serverName)
+ 	if options.ECH != nil && options.ECH.Enabled {
+@@ -378,12 +376,12 @@ var (
+ )
+ 
+ func init() {
++	// Only include independently captured, current-enough browser templates.
++	// The legacy Edge/iOS defaults predate hybrid X25519+ML-KEM support.
+ 	modernFingerprints := []utls.ClientHelloID{
+ 		utls.HelloChrome_Auto,
+ 		utls.HelloFirefox_Auto,
+-		utls.HelloEdge_Auto,
+ 		utls.HelloSafari_Auto,
+-		utls.HelloIOS_Auto,
+ 	}
+ 	randomFingerprint = modernFingerprints[rand.Intn(len(modernFingerprints))]
+ 
+@@ -397,15 +395,17 @@ func init() {
+ 
+ func uTLSClientHelloID(name string) (utls.ClientHelloID, error) {
+ 	switch name {
+-	case "chrome_psk", "chrome_psk_shuffle", "chrome_padding_psk_shuffle", "chrome_pq", "chrome_pq_psk":
+-		fallthrough
+-	case "chrome", "":
++	// Existing configurations may contain historical names. They all
++	// resolve to the canonical new profile; no old ClientHello is emitted.
++	case "chrome", "", "chrome_psk", "chrome_psk_shuffle",
++		"chrome_padding_psk_shuffle", "chrome_pq", "chrome_pq_psk",
++		"chrome_155", "hellochrome_155", "chrome_133", "hellochrome_133":
+ 		return utls.HelloChrome_Auto, nil
+-	case "firefox":
++	case "firefox", "firefox_148", "hellofirefox_148":
+ 		return utls.HelloFirefox_Auto, nil
+ 	case "edge":
+ 		return utls.HelloEdge_Auto, nil
+-	case "safari":
++	case "safari", "safari_26_3", "hellosafari_26_3":
+ 		return utls.HelloSafari_Auto, nil
+ 	case "360":
+ 		return utls.Hello360_Auto, nil
+@@ -419,7 +419,12 @@ func uTLSClientHelloID(name string) (utls.ClientHelloID, error) {
+ 		return randomFingerprint, nil
+ 	case "randomized":
+ 		return randomizedFingerprint, nil
++	case "randomizednoalpn":
++		return utls.HelloRandomizedNoALPN, nil
+ 	default:
++		if id, ok := xrayFingerprint(name); ok { // H: Xray's names, hellochrome_120 and the like
++			return id, nil // H
++		} // H
+ 		return utls.ClientHelloID{}, E.New("unknown uTLS fingerprint: ", name)
+ 	}
+ }
+diff --git a/common/tls/xui_browser_fingerprint_profiles_test.go b/common/tls/xui_browser_fingerprint_profiles_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a78822ed040ac4bcf26601ce51eecd37a934197c
+--- /dev/null
++++ b/common/tls/xui_browser_fingerprint_profiles_test.go
+@@ -0,0 +1,118 @@
++//go:build with_utls
++
++package tls
++
++import (
++	"net"
++	"testing"
++
++	utls "github.com/metacubex/utls"
++)
++
++// These mappings must match the ClientHello implementations in
++// replace/utls-native, not just the names offered by the web panel.
++func TestXUIPanelBrowserFingerprintProfiles(t *testing.T) {
++	tests := []struct {
++		name string
++		want utls.ClientHelloID
++	}{
++		{"", utls.HelloChrome_155},
++		{"chrome", utls.HelloChrome_155},
++		{"firefox", utls.HelloFirefox_148},
++		{"safari", utls.HelloSafari_26_3},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			got, err := uTLSClientHelloID(tt.name)
++			if err != nil {
++				t.Fatalf("resolve fingerprint: %v", err)
++			}
++			if got.Client != tt.want.Client || got.Version != tt.want.Version {
++				t.Fatalf("fingerprint %q resolves to %s/%s, want %s/%s",
++					tt.name, got.Client, got.Version, tt.want.Client, tt.want.Version)
++			}
++			if _, err := utls.UTLSIdToSpec(got); err != nil {
++				t.Fatalf("fingerprint %q cannot build a ClientHelloSpec: %v", tt.name, err)
++			}
++		})
++	}
++}
++
++func TestXUIPanelBrowserFingerprintLegacyAliasesMigrate(t *testing.T) {
++	for _, tc := range []struct {
++		name string
++		want utls.ClientHelloID
++	}{
++		{"chrome_psk", utls.HelloChrome_155},
++		{"chrome_psk_shuffle", utls.HelloChrome_155},
++		{"chrome_padding_psk_shuffle", utls.HelloChrome_155},
++		{"chrome_pq", utls.HelloChrome_155},
++		{"chrome_pq_psk", utls.HelloChrome_155},
++		{"chrome_133", utls.HelloChrome_155},
++		{"hellochrome_133", utls.HelloChrome_155},
++		{"hellochrome_155", utls.HelloChrome_155},
++		{"hellofirefox_148", utls.HelloFirefox_148},
++		{"hellosafari_26_3", utls.HelloSafari_26_3},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			got, err := uTLSClientHelloID(tc.name)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if got.Client != tc.want.Client || got.Version != tc.want.Version {
++				t.Fatalf("legacy alias %q returned %s/%s, want modern %s/%s", tc.name,
++					got.Client, got.Version, tc.want.Client, tc.want.Version)
++			}
++		})
++	}
++}
++
++func TestXUIPanelBrowserFingerprintRandomUsesVerifiedBrowser(t *testing.T) {
++	got, err := uTLSClientHelloID("random")
++	if err != nil {
++		t.Fatal(err)
++	}
++	supported := []utls.ClientHelloID{utls.HelloChrome_155, utls.HelloFirefox_148, utls.HelloSafari_26_3}
++	for _, fingerprint := range supported {
++		if got.Client == fingerprint.Client && got.Version == fingerprint.Version {
++			return
++		}
++	}
++	t.Fatalf("random fingerprint selected an obsolete or unknown template: %s/%s", got.Client, got.Version)
++}
++
++func TestXUIPanelBrowserFingerprintRandomizedNoALPN(t *testing.T) {
++	got, err := uTLSClientHelloID("randomizednoalpn")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got.Client != utls.HelloRandomizedNoALPN.Client || got.Version != utls.HelloRandomizedNoALPN.Version {
++		t.Fatalf("unexpected randomized no-ALPN fingerprint: %s/%s", got.Client, got.Version)
++	}
++}
++
++func TestXUIPanelBrowserFingerprintCanonicalClientHello(t *testing.T) {
++	// Test every selectable uTLS profile as a real ClientHello generator.
++	// No external server is required: BuildHandshakeState stays local.
++	for _, name := range []string{
++		"chrome", "firefox", "safari", "edge", "ios", "android",
++		"360", "qq", "random", "randomized", "randomizednoalpn",
++	} {
++		t.Run(name, func(t *testing.T) {
++			id, err := uTLSClientHelloID(name)
++			if err != nil {
++				t.Fatalf("fingerprint is not supported: %v", err)
++			}
++			conn := utls.UClient(&net.TCPConn{}, &utls.Config{
++				ServerName: "example.com",
++				NextProtos: []string{"h2", "http/1.1"},
++			}, id)
++			if err := conn.BuildHandshakeState(); err != nil {
++				t.Fatalf("cannot construct ClientHello for %q: %v", name, err)
++			}
++			if len(conn.HandshakeState.Hello.Raw) == 0 {
++				t.Fatalf("no ClientHello for %q", name)
++			}
++		})
++	}
++}
+diff --git a/common/tls/xui_explicit_ciphers_test.go b/common/tls/xui_explicit_ciphers_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..163b6f50136f1d2f617ec09ca1c562ad51fb49f7
+--- /dev/null
++++ b/common/tls/xui_explicit_ciphers_test.go
+@@ -0,0 +1,75 @@
++//go:build with_utls
++
++package tls
++
++import (
++	"context"
++	"crypto/tls"
++	"reflect"
++	"testing"
++
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/logger"
++)
++
++func TestXUIPanelExplicitCipherSuites(t *testing.T) {
++	modern := "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
++	legacy := "TLS_RSA_WITH_AES_128_GCM_SHA256"
++	for _, tc := range []struct {
++		name   string
++		names  []string
++		want   []uint16
++		unsafe []string
++		bad    bool
++	}{
++		{name: "default"},
++		{name: "empty", names: []string{}},
++		{name: "modern", names: []string{modern}, want: []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256}},
++		{name: "explicit legacy", names: []string{legacy}, want: []uint16{tls.TLS_RSA_WITH_AES_128_GCM_SHA256}, unsafe: []string{legacy}},
++		{name: "mixed order with duplicate", names: []string{legacy, modern, legacy}, want: []uint16{tls.TLS_RSA_WITH_AES_128_GCM_SHA256, tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256}, unsafe: []string{legacy}},
++		{name: "unknown after valid", names: []string{modern, "TLS_AUDIT_UNKNOWN"}, bad: true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			got, unsafe, err := resolveCipherSuites(tc.names)
++			if (err != nil) != tc.bad {
++				t.Fatalf("cipher lookup error = %v, expected bad=%v", err, tc.bad)
++			}
++			if !tc.bad && (!reflect.DeepEqual(got, tc.want) || !reflect.DeepEqual(unsafe, tc.unsafe)) {
++				t.Fatalf("resolved ciphers = %v, unsafe %v; expected %v, %v", got, unsafe, tc.want, tc.unsafe)
++			}
++		})
++	}
++	for _, list := range [][]*tls.CipherSuite{tls.CipherSuites(), tls.InsecureCipherSuites()} {
++		for _, suite := range list {
++			got, _, err := resolveCipherSuites([]string{suite.Name})
++			if err != nil || len(got) != 1 || got[0] != suite.ID {
++				t.Fatalf("TLS suite %s lost: %v %v", suite.Name, got, err)
++			}
++		}
++	}
++}
++
++func TestXUIPanelExplicitCipherClientConstructors(t *testing.T) {
++	for _, names := range [][]string{nil, {}, {"TLS_RSA_WITH_AES_128_GCM_SHA256"}, {"TLS_AUDIT_UNKNOWN"}} {
++		options := option.OutboundTLSOptions{Enabled: true, ServerName: "example.invalid", CipherSuites: names}
++		standard, err := NewSTDClient(context.Background(), logger.NOP(), "example.invalid", options)
++		want, _, lookupErr := resolveCipherSuites(names)
++		if (err != nil) != (lookupErr != nil) {
++			t.Fatalf("STD client cipher acceptance differs: %v", err)
++		}
++		if err == nil {
++			config, configErr := standard.STDConfig()
++			if configErr != nil || !reflect.DeepEqual(config.CipherSuites, want) {
++				t.Fatalf("STD client lost explicit policy: %v, %v", config, configErr)
++			}
++		}
++		options.UTLS = &option.OutboundUTLSOptions{Enabled: true, Fingerprint: "chrome"}
++		fingerprinted, err := NewUTLSClient(context.Background(), logger.NOP(), "example.invalid", options)
++		if (err != nil) != (lookupErr != nil) {
++			t.Fatalf("uTLS client cipher acceptance differs: %v", err)
++		}
++		if err == nil && !reflect.DeepEqual(fingerprinted.(*UTLSClientConfig).config.CipherSuites, want) {
++			t.Fatal("uTLS client lost explicit cipher policy")
++		}
++	}
++}
+diff --git a/common/tls/xui_reality_mldsa_handshake_test.go b/common/tls/xui_reality_mldsa_handshake_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b32d4069c7536dcc4a77822e061d8d6a5ef1dae5
+--- /dev/null
++++ b/common/tls/xui_reality_mldsa_handshake_test.go
+@@ -0,0 +1,169 @@
++//go:build with_utls
++
++package tls
++
++import (
++	"bytes"
++	"context"
++	"crypto/ecdh"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/tls"
++	"crypto/x509"
++	"crypto/x509/pkix"
++	"encoding/base64"
++	"errors"
++	"io"
++	"math/big"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/option"
++
++	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
++	utls "github.com/metacubex/utls"
++)
++
++// This is a wire-level test of the actual uTLS REALITY server and sing-box
++// client handshake, not merely a standalone ML-DSA Sign/Verify round trip.
++// An unrelated local TLS origin provides the plausible ServerHello that the
++// REALITY server reuses as camouflage.
++func TestXUIPanelRealityMLDSAAuthenticatedHandshake(t *testing.T) {
++	// REALITY must fit its ML-DSA-65 signed certificate inside the
++	// camouflage TLS origin's certificate record. The small default test
++	// certificate is not large enough for a 3.3 KB ML-DSA signature, and
++	// causes a negative padding error before verification can be tested.
++	origin := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		w.WriteHeader(http.StatusNoContent)
++	}))
++	originKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	originCert := x509.Certificate{
++		SerialNumber: big.NewInt(1),
++		NotBefore:    time.Now().Add(-time.Hour),
++		NotAfter:     time.Now().Add(time.Hour),
++		DNSNames:     []string{"example.com"},
++		KeyUsage:     x509.KeyUsageDigitalSignature,
++		ExtraExtensions: []pkix.Extension{{
++			Id:    []int{1, 2, 3, 4},
++			Value: make([]byte, 6000),
++		}},
++	}
++	originDER, err := x509.CreateCertificate(rand.Reader, &originCert, &originCert, &originKey.PublicKey, originKey)
++	if err != nil {
++		t.Fatal(err)
++	}
++	origin.TLS = &tls.Config{
++		MinVersion: tls.VersionTLS13,
++		Certificates: []tls.Certificate{{
++			Certificate: [][]byte{originDER},
++			PrivateKey:  originKey,
++		}},
++	}
++	origin.StartTLS()
++	defer origin.Close()
++
++	x25519, err := ecdh.X25519().GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	seed := [32]byte{4, 8, 15, 16, 23, 42}
++	public, private := mldsa65.NewKeyFromSeed(&seed)
++	originAddr := strings.TrimPrefix(origin.URL, "https://")
++
++	for _, fingerprint := range []string{"chrome", "firefox", "safari"} {
++		for _, tc := range []struct {
++			name       string
++			verifyKey  []byte
++			wantReject bool
++		}{
++			{name: "valid-transcript", verifyKey: public.Bytes()},
++			{name: "wrong-MLDSA-verification-key", verifyKey: func() []byte {
++				wrongSeed := [32]byte{42, 23, 16, 15, 8, 4}
++				wrongPublic, _ := mldsa65.NewKeyFromSeed(&wrongSeed)
++				return wrongPublic.Bytes()
++			}(), wantReject: true},
++		} {
++			t.Run(fingerprint+"/"+tc.name, func(t *testing.T) {
++				ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
++				defer cancel()
++				serverConfig := &utls.RealityConfig{
++					// REALITY's internal logging may outlive the subtest. Never call
++					// t.Logf from that detached goroutine; it races with test teardown.
++					// Also avoid printing handshake secrets into CI logs.
++					Log:         func(string, ...any) {},
++					Type:        "tcp",
++					Dest:        originAddr,
++					PrivateKey:  x25519.Bytes(),
++					Mldsa65Key:  private.Bytes(),
++					ServerNames: map[string]bool{"example.com": true},
++					ShortIds:    map[[8]byte]bool{{}: true},
++					DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
++				}
++				client, err := NewRealityClient(ctx, nil, "example.com", option.OutboundTLSOptions{
++					Enabled:    true,
++					ServerName: "example.com",
++					UTLS:       &option.OutboundUTLSOptions{Enabled: true, Fingerprint: fingerprint},
++					Reality: &option.OutboundRealityOptions{
++						Enabled:       true,
++						PublicKey:     base64.RawURLEncoding.EncodeToString(x25519.PublicKey().Bytes()),
++						Mldsa65Verify: base64.RawURLEncoding.EncodeToString(tc.verifyKey),
++					},
++				})
++				if err != nil {
++					t.Fatal(err)
++				}
++				clientConn, serverConn := net.Pipe()
++				deadline := time.Now().Add(25 * time.Second)
++				if err := clientConn.SetDeadline(deadline); err != nil {
++					t.Fatal(err)
++				}
++				if err := serverConn.SetDeadline(deadline); err != nil {
++					t.Fatal(err)
++				}
++				serverDone := make(chan error, 1)
++				go func() {
++					_, handshakeErr := utls.RealityServer(ctx, serverConn, serverConfig)
++					serverDone <- handshakeErr
++				}()
++				verified, err := client.(*RealityClientConfig).ClientHandshake(ctx, clientConn)
++				if tc.wantReject {
++					if err == nil {
++						_ = verified.Close()
++						t.Error("REALITY accepted a server signed by the wrong ML-DSA key")
++					}
++				} else if err != nil {
++					t.Errorf("REALITY rejected a valid ML-DSA server handshake: %v", err)
++				}
++				if verified != nil {
++					_ = verified.Close()
++				}
++				_ = clientConn.Close()
++				_ = serverConn.Close()
++				origin.CloseClientConnections()
++				select {
++				case serverErr := <-serverDone:
++					if serverErr != nil && !errors.Is(serverErr, io.EOF) {
++						t.Logf("REALITY server result: %v", serverErr)
++					}
++				case <-time.After(5 * time.Second):
++					t.Error("REALITY server goroutines did not exit after disconnect")
++				}
++			})
++		}
++	}
++}
++
++func TestXUIPanelRealityMLDSASigningKeyDiffers(t *testing.T) {
++	privateKey := bytes.Repeat([]byte{3}, 32)
++	if _, err := parseRealityMLDSAServerKey(base64.RawURLEncoding.EncodeToString(privateKey), privateKey); err == nil {
++		t.Fatal("accepting a reused REALITY X25519 private key weakens key separation")
++	}
++}
+diff --git a/common/tls/xui_reality_mldsa_test.go b/common/tls/xui_reality_mldsa_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..362d4acf6a800d900504e42d071f362a3be42ac0
+--- /dev/null
++++ b/common/tls/xui_reality_mldsa_test.go
+@@ -0,0 +1,102 @@
++//go:build with_utls
++
++package tls
++
++import (
++	"bytes"
++	"context"
++	"crypto/hmac"
++	"crypto/sha512"
++	"encoding/base64"
++	"strings"
++	"testing"
++
++	"github.com/sagernet/sing-box/option"
++
++	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
++)
++
++func TestXUIPanelRealityMLDSAKeyValidation(t *testing.T) {
++	if key, err := parseRealityMLDSAPublicKey(""); key != nil || err != nil {
++		t.Fatalf("optional key: %v %v", key, err)
++	}
++	for _, value := range []string{"not/base64", base64.RawURLEncoding.EncodeToString([]byte("short"))} {
++		if _, err := parseRealityMLDSAPublicKey(value); err == nil {
++			t.Fatalf("accepted invalid mldsa65_verify: %q", value)
++		}
++	}
++	seed := [32]byte{1, 2, 3}
++	public, _ := mldsa65.NewKeyFromSeed(&seed)
++	encoded := base64.RawURLEncoding.EncodeToString(public.Bytes())
++	decoded, err := parseRealityMLDSAPublicKey(encoded)
++	if err != nil || !bytes.Equal(public.Bytes(), decoded.Bytes()) {
++		t.Fatalf("valid ML-DSA public key was rejected: %v", err)
++	}
++}
++
++func TestXUIPanelRealityMLDSASignatureBinding(t *testing.T) {
++	seed := [32]byte{6, 7, 8}
++	public, private := mldsa65.NewKeyFromSeed(&seed)
++	authKey := []byte("test-reality-shared-secret")
++	pub := []byte("test-reality-ed25519-public-key")
++	hello := []byte("client hello")
++	serverHello := []byte("server hello")
++	mac := hmac.New(sha512.New, authKey)
++	mac.Write(pub)
++	certSignature := mac.Sum(nil)
++	mac.Write(hello)
++	mac.Write(serverHello)
++	signature := make([]byte, mldsa65.SignatureSize)
++	if err := mldsa65.SignTo(private, mac.Sum(nil), nil, false, signature); err != nil {
++		t.Fatal(err)
++	}
++	if !mldsa65.Verify(public, mac.Sum(nil), nil, signature) {
++		t.Fatal("valid REALITY transcript signature was rejected")
++	}
++	macBad := hmac.New(sha512.New, authKey)
++	macBad.Write(pub)
++	macBad.Write([]byte("different client hello"))
++	macBad.Write(serverHello)
++	if mldsa65.Verify(public, macBad.Sum(nil), nil, signature) {
++		t.Fatal("ML-DSA signature accepted a modified handshake")
++	}
++	if len(certSignature) != sha512.Size {
++		t.Fatal("unexpected REALITY authentication MAC size")
++	}
++}
++
++func TestXUIPanelRealityMLDSAServerRejectsInvalidSeed(t *testing.T) {
++	_, err := NewRealityServer(context.Background(), nil, option.InboundTLSOptions{
++		Reality: &option.InboundRealityOptions{
++			PrivateKey:  base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)),
++			Mldsa65Seed: "configured-but-unsupported",
++		},
++	})
++	if err == nil || !strings.Contains(err.Error(), "invalid REALITY mldsa65_seed") {
++		t.Fatalf("malformed ML-DSA seed was silently accepted: %v", err)
++	}
++}
++
++func TestXUIPanelRealityMLDSAServerKeyDerivation(t *testing.T) {
++	privateKey := bytes.Repeat([]byte{1}, mldsa65.SeedSize)
++	if key, err := parseRealityMLDSAServerKey("", privateKey); err != nil || key != nil {
++		t.Fatalf("empty ML-DSA seed should keep classical REALITY: %v, %v", key, err)
++	}
++	for _, invalid := range []string{"invalid/base64", base64.RawURLEncoding.EncodeToString([]byte("too short"))} {
++		if _, err := parseRealityMLDSAServerKey(invalid, privateKey); err == nil {
++			t.Fatalf("invalid ML-DSA seed accepted: %q", invalid)
++		}
++	}
++	if _, err := parseRealityMLDSAServerKey(base64.RawURLEncoding.EncodeToString(privateKey), privateKey); err == nil || !strings.Contains(err.Error(), "must differ") {
++		t.Fatalf("reused REALITY private key accepted as ML-DSA seed: %v", err)
++	}
++	seed := [32]byte{4, 5, 6}
++	_, expectedPrivate := mldsa65.NewKeyFromSeed(&seed)
++	key, err := parseRealityMLDSAServerKey(base64.RawURLEncoding.EncodeToString(seed[:]), privateKey)
++	if err != nil || !bytes.Equal(key, expectedPrivate.Bytes()) {
++		t.Fatalf("valid ML-DSA seed derived incorrect private key: %v", err)
++	}
++	if _, err := mldsa65.Scheme().UnmarshalBinaryPrivateKey(key); err != nil {
++		t.Fatalf("derived REALITY ML-DSA key rejected by signer: %v", err)
++	}
++}
+diff --git a/common/tls/xui_reality_options_test.go b/common/tls/xui_reality_options_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..fd39cf1843ddb1807499501bde2cc8fd6bcfdde1
+--- /dev/null
++++ b/common/tls/xui_reality_options_test.go
+@@ -0,0 +1,48 @@
++//go:build with_utls
++
++package tls
++
++import (
++	"reflect"
++	"testing"
++
++	"github.com/sagernet/sing-box/option"
++)
++
++func TestXUIPanelRealityClientVersionValidation(t *testing.T) {
++	for _, value := range []struct {
++		text string
++		want []byte
++		ok   bool
++	}{
++		{text: "", ok: true},
++		{text: "26.10.31", want: []byte{26, 10, 31}, ok: true},
++		{text: "0.0.0", want: []byte{0, 0, 0}, ok: true},
++		{text: "256.1.1"},
++		{text: "1.2"},
++		{text: "1.2.3.4"},
++		{text: "1.-1.2"},
++		{text: "1.abc.2"},
++	} {
++		got, err := parseRealityClientVersion(value.text)
++		if (err == nil) != value.ok || (value.ok && !reflect.DeepEqual(got, value.want)) {
++			t.Fatalf("version %q => %v, %v; want %v, valid=%v", value.text, got, err, value.want, value.ok)
++		}
++	}
++}
++
++func TestXUIPanelRealityFallbackLimitValidation(t *testing.T) {
++	got, err := parseRealityFallbackLimit(option.RealityLimitFallback{AfterBytes: 100, BytesPerSec: 1000, BurstBytesPerSec: 4000})
++	if err != nil || got.AfterBytes != 100 || got.BytesPerSec != 1000 || got.BurstBytesPerSec != 4000 {
++		t.Fatalf("valid fallback limit lost: %+v, %v", got, err)
++	}
++	for _, invalid := range []option.RealityLimitFallback{
++		{AfterBytes: -1},
++		{BytesPerSec: -1},
++		{BurstBytesPerSec: -1},
++	} {
++		if _, err := parseRealityFallbackLimit(invalid); err == nil {
++			t.Fatalf("negative fallback value accepted: %+v", invalid)
++		}
++	}
++}

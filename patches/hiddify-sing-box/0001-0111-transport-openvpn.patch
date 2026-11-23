@@ -1,0 +1,16 @@
+diff --git a/transport/openvpn/configuration.go b/transport/openvpn/configuration.go
+index 7181a4a1ba29ca6606d9315d9cf4c35c29d1b3f6..e3b3aa6306e6a204d11d6e342058b06d2a03ac6f 100644
+--- a/transport/openvpn/configuration.go
++++ b/transport/openvpn/configuration.go
+@@ -2,7 +2,10 @@ package openvpn
+ 
+ import "net/netip"
+ 
+-const DefaultMTU = 1500
++const (
++	DefaultMTU     = 1500
++	PacketHeadroom = 4096
++)
+ 
+ type Configuration struct {
+ 	MTU            uint32
