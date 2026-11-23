@@ -675,4 +675,72 @@ candidate = replace_once(candidate, b"\t}}\n\treturn &mDNS.Msg{MsgHdr: mDNS.MsgH
                          b"\t}\n\treturn &mDNS.Msg{Response: true, Rcode: mDNS.RcodeSuccess,")
 assert candidate == own
 resolutions[path] = own
+# The DNS router retains direct Close support and the fork's DNS message
+# layout. Incorporate upstream timeout propagation and cache invalidation.
+path = "dns/router.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("11d7655a358f499cf19b5701969a2a788ba4a2ca",
+     "456cdd63dcc601186354d9cdb71c178ae67b5826",
+     "97e777025d636bbbd2011b02d49ef070dbd78e0a")))
+candidate = own
+needle = b"\t\tDisableCache:      options.DNSClientOptions.DisableCache,"
+addition = b"\t\tTimeout:           time.Duration(options.DNSClientOptions.Timeout),\n"
+assert addition + needle in new
+candidate = replace_once(candidate, needle, addition + needle)
+needle = b"\t\t\t\tif action.ClientSubnet.IsValid() {"
+addition = b"\t\t\t\tif action.Timeout > 0 {\n\t\t\t\t\toptions.Timeout = action.Timeout\n\t\t\t\t}\n"
+assert candidate.count(needle) == 2 and new.count(addition + needle) == 2
+candidate = candidate.replace(needle, addition + needle)
+needle = b"\tif routeOptions.ClientSubnet.IsValid() {"
+addition = b"\tif routeOptions.Timeout > 0 {\n\t\toptions.Timeout = routeOptions.Timeout\n\t}\n"
+assert addition + needle in new
+candidate = replace_once(candidate, needle, addition + needle)
+needle = b'\t\t\t} else if R.IsRejected(err) {\n\t\t\t\tr.logger.DebugContext(ctx, "lookup rejected for ", domain)\n'
+addition = b'\t\t\t} else if errors.Is(err, ErrNotCached) {\n\t\t\t\tr.logger.DebugContext(ctx, "cache-only lookup missed for ", domain)\n'
+assert needle + addition in new
+candidate = replace_once(candidate, needle, needle + addition)
+signature = b"func (r *Router) ClearCache()"
+cache = function_blob(new, signature)
+assert b"r.dnsReverseMapping.Purge()" in cache
+cache = replace_once(cache,
+    b"\tservice.FromContext[adapter.NetworkManager](r.ctx).FlushSystemDNSCache()",
+    b"\tif networkManager := service.FromContext[adapter.NetworkManager](r.ctx); networkManager != nil {\n\t\tnetworkManager.FlushSystemDNSCache()\n\t}")
+candidate = replace_once(candidate, function_blob(own, signature), cache)
+assert b"scope.Add(r.Close)" in candidate
+assert b"func (r *Router) Close() error" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Keep every fork protocol and the legacy smart DNS service registration.
+# Register upstream lazy placeholders and fallback groups additively, with
+# the existing Sudoku registration unchanged to avoid duplicate registration.
+path = "include/registry.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("47686ce6075f5139b1c6af02938ed2bb4e03065b",
+     "f66c35b8cef673df1ee898e7baf2d7d9eee0d8f6",
+     "c2158fecd9de07edaa4e94c0dc1a16cdf360c985")))
+candidate = own
+for anchor, addition in (
+    (b"\thinvalid.RegisterOutbound(registry)\n", b"\toutbound.RegisterLazy(registry)"),
+    (b"\tbalancer.RegisterLoadBalance(registry)\n", b"\tgroup.RegisterFallback(registry)"),
+    (b"\tregisterBondOutbound(registry) // H\n", b"\tregisterCallOutbound(registry)"),
+    (b"\thinvalid.RegisterEndpoint(registry)\n", b"\tendpoint.Register[option.HLazyOptions](registry, C.TypeHLazy, outbound.NewLazyEndpoint)"),
+):
+    assert addition in new and addition not in candidate
+    candidate = replace_once(candidate, anchor, anchor + addition + b"\n")
+for name in (b"sudoku", b"openflux", b"olcrtc", b"vetroff", b"fptn", b"pingtunnel"):
+    assert candidate.count(name + b".RegisterOutbound(registry)") == 1
+assert candidate.count(b"smartdnspool.RegisterService(registry)") == 1
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Identical logic on both sides: only the spacing of H marker comments differs.
+for path, hashes in (
+    ("option/route.go", ("2d7c732e6910ae114a7c288a378e83d6255158c6", "7c8e53e7727ec9ec94811e6b5209fcf0eda2d37f", "3b0fbbdf54232dfb1e99985dc5e8e5984cd71f2d")),
+    ("common/tls/ech.go", ("5c7109b89e5145fcd3835f9a57026ace1b1a7699", "fb8dfa19e6dc657fcf897268f114bcb593442227", "4c2890c6a9b8bf5fe3254fa6d5ec9331138508c3")),
+):
+    old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+        ("base", "patched_tree", "upstream"), hashes))
+    assert new.replace(b"//H", b"// H") == own
+    resolutions[path] = own
 apply_reviewed(data, resolutions)
