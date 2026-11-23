@@ -279,4 +279,63 @@ start = own.index(b"// A v5 outbound only needs")
 end = own.index(b"type hNamedOutbound", start)
 assert own[:start] + own[end:] == new
 resolutions[path] = own
+# Extend the fork's URL test history with upstream's LastGood field.
+path = "adapter/experimental.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("43289e266137dfcf7b384a8b86bf0842ee6c473f",
+     "e54ef007aabe87a709266c8bc601fe410d7058c1",
+     "b53dffb2afa2fe9bd2ef2a7a5c69df59876e460b")))
+marker = b"\t// LastGood: the last delay"
+start = new.index(marker)
+end = new.index(b"\n}", start)
+addition = new[start:end]
+assert b'LastGood uint16' in addition
+assert (new[:start] + new[end+1:]).replace(b"//H", b"// H") == own.replace(b"//H", b"// H")
+needle = b'\tError string '
+assert own.count(needle) == 1
+end = own.index(b"\n}", own.index(needle))
+resolutions[path] = subprocess.check_output(["gofmt"], input=own[:end] + b"\n" + addition + own[end:])
+
+# Keep the legacy pool_tolerance JSON key alongside current options.
+path = "option/balancer.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("ea2ddd4e3fa83b09d0b6af299a99199c8bb75d41",
+     "d12654d85b7c9fb6f75b2aa83b66e36a27bcac71",
+     "fc79821dd9b8c86c5782a36ccef8c0bce81cb6fe")))
+assert b'PoolTolerance uint16' in own and b'PoolTolerance' not in new
+needle = b'\tPool int '
+assert new.count(needle) == 1
+end = new.index(b"\n", new.index(needle))
+candidate = new[:end] + b'\n\tPoolTolerance uint16 \x60json:"pool_tolerance,omitempty"\x60 // H: legacy alias when tolerance is unset' + new[end:]
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Preserve fork configuration field as well as the new upstream field.
+path = "option/psiphon.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("309d106fdb5b7ee4bb4bfd3202c45bfce50e158f",
+     "ac2f3f6eb4a5f153933a80867b2ca30633f45093",
+     "d8c9d14a1ebb3ad0c32c4eee2d76d8045c6bf0d3")))
+assert b'ConduitPairingID' in own and b'ConduitPairingID' not in new
+needle = b'\tPropagationChannelID'
+assert new.count(needle) == 1
+candidate = new.replace(needle, b'\tConduitPairingID string \x60json:"conduit_pairing_id,omitempty"\x60\n' + needle, 1)
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Keep the fork test fixture shape and lower bounds on asynchronous counts.
+path = "common/monitoring/h_selected_test.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("be56f71f407cf274f2591d6d4a903df8442d0030",
+     "8d93973415da80e08bef81d5b18db7a7c6605282",
+     "377e1435d3637d586ecd5827143856d6fe3588b3")))
+candidate = new.replace(
+    b'&fakeGroup{fakeOutbound: fakeOutbound{tag: "select"},',
+    b'&fakeGroup{tag: "select",',
+).replace(b"dials.Load() == 1", b"dials.Load() >= 1").replace(
+    b"dials.Load() == 2", b"dials.Load() >= 2")
+assert candidate == own
+resolutions[path] = own
 apply_reviewed(data, resolutions)
