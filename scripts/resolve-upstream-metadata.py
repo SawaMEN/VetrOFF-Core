@@ -149,13 +149,43 @@ assert own.split(b"func DeferPanicToError")[0] == new.split(b"// DeferPanicToErr
 resolutions[path] = new.replace(b"%s panic: %s", b"%s panic: %v", 1)
 formatted = subprocess.check_output(["gofmt"], input=resolutions[path])
 assert formatted == resolutions[path], "Unexpected formatting in debug.go"
+# Core state listeners: retain upstream's last-error replay and burst buffer,
+# but keep the fork's explicit handling of stream.Send errors.
+path = "v2/hcore/coreinfo.go"
+old = checked_blob(base, path, "97031cc888d544491ca0ba44b7b5fea28665f0b4")
+own = checked_blob(patched, path, "c05dd5ee805e3ce9b6d73d573065e743c7375a8f")
+new = checked_blob(upstream, path, "cb2a67987817098d8c267af821baf156cd5c032e")
+assert b"Subscribe(1)" in own and b"Subscribe(32)" in new
+assert b"lastCoreInfo.Store(&info)" in new and b"func currentCoreInfo()" in new
+assert own.count(b"if err := stream.Send(") == 3  # includes commented example
+assert new.count(b"\tstream.Send(currentCoreInfo())") == 1
+assert new.count(b"\t\t\tstream.Send(info)") == 1
+resolutions[path] = new.replace(
+    b"\tstream.Send(currentCoreInfo())",
+    b"\tif err := stream.Send(currentCoreInfo()); err != nil {\n\t\treturn err\n\t}",
+).replace(
+    b"\t\t\tstream.Send(info)",
+    b"\t\t\tif err := stream.Send(info); err != nil {\n\t\t\t\treturn err\n\t\t\t}",
+)
+assert subprocess.check_output(["gofmt"], input=resolutions[path]) == resolutions[path]
+
+path = "platform/docker/docker-compose.yml"
+old = checked_blob(base, path, "9a59c45885041a8b0d9a3af3d8d35fe813bc5985")
+own = checked_blob(patched, path, "fb5f690f20acf1d8c4f8789936066ad0985a1811")
+new = checked_blob(upstream, path, "1e98059fc2340f33e8ff19c24b77890b8778f7f3")
+old, own, new = (blob.replace(b"\r\n", b"\n") for blob in (old, own, new))
+assert old.replace(b'    command: ["/opt/hiddify.sh"]\n', b"") == own
+assert b'command: ["/opt/hiddify.sh"]' not in new
+seq = iter(new.splitlines())
+assert all(any(candidate == line for candidate in seq) for line in own.splitlines())
+resolutions[path] = new
 apply_reviewed(data, resolutions)
 
 repo = repo / "hiddify-sing-box"
 data = json.loads((report / "hiddify-sing-box.json").read_text())
 assert data["base"] == "004371d6be2395ee4379054a8cf113f339dbe231"
 assert data["upstream"] == "a26e58b376987a3305b201ec87fbc8918f620ad3"
-apply_reviewed(data, {"go.sum": checksum_union(data, (
+resolutions = {"go.sum": checksum_union(data, (
     "82eb63f703d7d2a94cae5ad2cfda749e206edadf",
     "46d0ed1b661edf3e8fd4eb3442a4452f77617bf4",
     "2d48f0a740e05e60a6fbb008c0a75526a4e5ea78",
@@ -163,4 +193,40 @@ apply_reviewed(data, {"go.sum": checksum_union(data, (
     "481125699ae1e1752bb28ba2c7dd198d97da936d",
     "40c5123068c74a41e075116d7f685ef0c3a0af64",
     "40a4cd2213f5ac3ee3866d319baa2c7c426de329",
-), "test/go.sum")})
+), "test/go.sum")}
+
+
+# These two constants have identical code on both sides; only marker-comment
+# spacing differs. Keep the fork's gofmt-style comments.
+for path, hashes in (
+    ("constant/err.go", (
+        "4f070c4d6fc270a0c062438c82df13c6c1f050e9",
+        "82a7f8cd2ebf5b371542f473579976380052426e",
+        "dff7f341798df7637cc39211b3a9344d83c53845",
+    )),
+    ("constant/v2ray.go", (
+        "89d9d7736d6b7db87f3595bf5d11a76cfafbf372",
+        "7e87b35d07ec4318080e1fec2810090893e89b28",
+        "235b72e4e6416be83e2995f354a5557038dc0e32",
+    )),
+):
+    old, own, new = (checked_blob(data[rev], path, sha)
+                     for rev, sha in zip(("base", "patched_tree", "upstream"), hashes))
+    assert new.replace(b"//H", b"// H") == own
+    resolutions[path] = own
+
+# The desktop D-Bus discovery implementations differ only in the two loops.
+# Preserve SplitSeq to avoid allocating intermediate slices.
+path = "common/settings/proxy_linux.go"
+old = checked_blob(data["base"], path, "b37148720b80c3cc24239c80b7339a97eead254d")
+own = checked_blob(data["patched_tree"], path, "96a5ad1732c18e4d0d8b03b4dbb8fe66e24aa446")
+new = checked_blob(data["upstream"], path, "28b06aa6de91917492b8fe594061280a12e55e53")
+assert new.replace(
+    b'for _, line := range strings.Split(string(content), "\\n") {',
+    b'for line := range strings.SplitSeq(string(content), "\\n") {',
+).replace(
+    b'for _, variable := range strings.Split(string(content), "\\x00") {',
+    b'for variable := range strings.SplitSeq(string(content), "\\x00") {',
+) == own
+resolutions[path] = own
+apply_reviewed(data, resolutions)
