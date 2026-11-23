@@ -1,0 +1,443 @@
+diff --git a/protocol/openvpn/client.go b/protocol/openvpn/client.go
+index b07ad149f4620cffe3afe2348a2c35c213d93a01..33cf53e17aec944b1e60ccc495d42701fbdd4d9a 100644
+--- a/protocol/openvpn/client.go
++++ b/protocol/openvpn/client.go
+@@ -21,7 +21,7 @@ import (
+ 	"github.com/sagernet/sing-box/transport/device"
+ 	ovpntransport "github.com/sagernet/sing-box/transport/openvpn"
+ 	ovpn "github.com/sagernet/sing-openvpn"
+-	"github.com/sagernet/sing-tun"
++	tun "github.com/sagernet/sing-tun"
+ 	"github.com/sagernet/sing-tun/gtcpip/header"
+ 	"github.com/sagernet/sing/common"
+ 	"github.com/sagernet/sing/common/buf"
+@@ -45,23 +45,25 @@ var (
+ 
+ type ClientEndpoint struct {
+ 	endpointBase
+-	ctx            context.Context
+-	loopContext    context.Context
+-	cancelLoop     context.CancelFunc
+-	dnsRouter      adapter.DNSRouter
+-	outboundDialer N.Dialer
+-	queryOptions   adapter.DNSQueryOptions
+-	client         *ovpn.Client
+-	deviceOptions  *device.Options
+-	device         device.Device
+-	onDemand       bool
+-	stateAccess    sync.Mutex
+-	state          atomic.Pointer[clientState]
+-	dnsTransport   *DNSTransport
+-	deviceStarted  bool
+-	statusAccess   sync.Mutex
+-	statusUpdated  chan struct{}
+-	terminalError  string
++	ctx               context.Context
++	loopContext       context.Context
++	cancelLoop        context.CancelFunc
++	dnsRouter         adapter.DNSRouter
++	outboundDialer    N.Dialer
++	queryOptions      adapter.DNSQueryOptions
++	client            *ovpn.Client
++	deviceOptions     *device.Options
++	device            device.Device
++	onDemand          bool
++	stateAccess       sync.Mutex
++	state             atomic.Pointer[clientState]
++	dnsTransport      *DNSTransport
++	deviceStarted     bool
++	readLoopDone      chan struct{}
++	statusAccess      sync.Mutex
++	statusUpdated     chan struct{}
++	terminalError     string
++	challengeLoopDone chan struct{}
+ }
+ 
+ type clientState struct {
+@@ -78,11 +80,6 @@ type clientState struct {
+ func NewClientEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.OpenVPNClientEndpointOptions) (adapter.Endpoint, error) {
+ 	loopContext, cancelLoop := context.WithCancel(ctx)
+ 	clientEndpoint := &ClientEndpoint{
+-		endpointBase: endpointBase{
+-			Adapter: endpoint.NewAdapterWithDialerOptions(C.TypeOpenVPNClient, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, options.DialerOptions),
+-			router:  router,
+-			logger:  logger,
+-		},
+ 		ctx:           ctx,
+ 		loopContext:   loopContext,
+ 		cancelLoop:    cancelLoop,
+@@ -90,6 +87,11 @@ func NewClientEndpoint(ctx context.Context, router adapter.Router, logger log.Co
+ 		statusUpdated: make(chan struct{}),
+ 		onDemand:      options.OnDemand,
+ 	}
++	clientEndpoint.endpointBase = endpointBase{
++		Adapter: endpoint.NewAdapterWithDialerOptions(C.TypeOpenVPNClient, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, options.DialerOptions),
++		router:  router,
++		logger:  logger,
++	}
+ 	success := false
+ 	defer func() {
+ 		if success {
+@@ -127,31 +129,26 @@ func NewClientEndpoint(ctx context.Context, router adapter.Router, logger log.Co
+ 	if deviceMTU == 0 {
+ 		deviceMTU = ovpntransport.DefaultMTU
+ 	}
+-	packetFrontHeadroom, packetRearHeadroom := clientOptions.DataPacketHeadroom()
+ 	clientEndpoint.deviceOptions = &device.Options{
+-		Context:             ctx,
+-		Logger:              logger,
+-		System:              options.System,
+-		Handler:             clientEndpoint,
+-		UDPTimeout:          udpTimeout,
+-		ICMPTimeout:         C.ICMPTimeout,
+-		UDPMapping:          tun.NATMapping(options.UDPMapping),
+-		UDPFiltering:        tun.NATFiltering(options.UDPFiltering),
+-		UDPNATMax:           options.UDPNATMax,
+-		InterfaceFinder:     service.FromContext[adapter.NetworkManager](ctx).InterfaceFinder(),
+-		Name:                options.Name,
+-		NamePrefix:          "ovpn",
+-		MTU:                 deviceMTU,
+-		PacketFrontHeadroom: packetFrontHeadroom,
+-		PacketRearHeadroom:  packetRearHeadroom,
++		Context:         ctx,
++		Logger:          logger,
++		System:          options.System,
++		Handler:         clientEndpoint,
++		UDPTimeout:      udpTimeout,
++		ICMPTimeout:     C.ICMPTimeout,
++		UDPMapping:      tun.NATMapping(options.UDPMapping),
++		UDPFiltering:    tun.NATFiltering(options.UDPFiltering),
++		UDPNATMax:       options.UDPNATMax,
++		InterfaceFinder: service.FromContext[adapter.NetworkManager](ctx).InterfaceFinder(),
++		Name:            options.Name,
++		NamePrefix:      "ovpn",
++		MTU:             deviceMTU,
++		PacketHeadroom:  ovpntransport.PacketHeadroom,
+ 		Configuration: device.Configuration{
+ 			MTU:     deviceMTU,
+ 			Address: clientOptions.Tunnel.LocalAddress,
+ 		},
+ 	}
+-	clientOptions.IncomingPacketHeadroom = func() int {
+-		return clientEndpoint.device.FrontHeadroom()
+-	}
+ 	client, err := ovpn.NewClient(clientOptions)
+ 	if err != nil {
+ 		return nil, err
+@@ -603,79 +600,42 @@ func (c *ClientEndpoint) uninstallDNSTransport(dnsTransport *DNSTransport) {
+ }
+ 
+ func (c *ClientEndpoint) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+-	switch stage {
+-	case adapter.StartStateInitialize:
+-		scope.Add(func() error {
+-			c.notifyStatusUpdated()
+-			return nil
+-		})
+-		scope.Add(func() error {
+-			c.cancelLoop()
+-			return nil
+-		})
++	if stage == adapter.StartStateInitialize {
+ 		c.deviceOptions.MemoryPressure = oomkiller.MemoryPressure(c.ctx)
+ 		tunnelDevice, err := device.New(*c.deviceOptions)
+ 		if err != nil {
+ 			return err
+ 		}
+-		scope.Add(tunnelDevice.Close)
+ 		tunnelDevice.SetPacketWriter(c.writePacketBuffers)
+ 		c.device = tunnelDevice
++		scope.Add(c.Close) // H
+ 		c.deviceOptions = nil
+-	case adapter.StartStatePostStart:
+-		var loopGroup sync.WaitGroup
+-		scope.Add(func() error {
+-			loopGroup.Wait()
+-			return nil
+-		})
+-		err := c.client.Start()
+-		if err != nil {
+-			return err
+-		}
+-		scope.Add(c.client.Close)
+-		c.stateAccess.Lock()
+-		c.updateState(func(state *clientState) {
+-			state.started = true
+-		})
+-		c.stateAccess.Unlock()
+-		scope.Add(func() error {
+-			c.stateAccess.Lock()
+-			c.updateState(func(state *clientState) {
+-				state.started = false
+-			})
+-			c.stateAccess.Unlock()
+-			return nil
+-		})
+-		loopGroup.Go(func() {
+-			c.readLoop(scope.Context())
+-		})
+-		loopGroup.Go(func() {
+-			c.watchChallenges(scope.Context())
+-		})
++		return nil
++	}
++	if stage != adapter.StartStatePostStart {
++		return nil
+ 	}
+ 	return nil
+ }
+ 
+-func (c *ClientEndpoint) readLoop(ctx context.Context) {
+-	for {
+-		packetBuffers, err := c.client.ReadDataPackets(ctx)
+-		if err != nil {
+-			if E.IsClosedOrCanceled(err) || ctx.Err() != nil {
+-				return
+-			}
+-			c.logger.Error(E.Cause(err, "client terminated"))
+-			c.setTerminalError(err)
+-			return
+-		}
+-		err = c.device.WriteInboundBuffers(packetBuffers)
+-		buf.ReleaseMulti(packetBuffers)
+-		if err != nil {
+-			err = E.Cause(err, "write packet to device")
+-			c.logger.Error(err)
+-			c.setTerminalError(err)
+-			return
+-		}
++func (c *ClientEndpoint) Close() error {
++	c.stateAccess.Lock()
++	c.updateState(func(state *clientState) {
++		state.started = false
++	})
++	readLoopDone := c.readLoopDone
++	challengeLoopDone := c.challengeLoopDone
++	c.stateAccess.Unlock()
++	c.cancelLoop()
++	err := common.Close(c.client, c.device)
++	if readLoopDone != nil {
++		<-readLoopDone
++	}
++	if challengeLoopDone != nil {
++		<-challengeLoopDone
+ 	}
++	c.notifyStatusUpdated()
++	return err
+ }
+ 
+ func (c *ClientEndpoint) InterfaceUpdated(ctx context.Context) {
+@@ -687,9 +647,7 @@ func (c *ClientEndpoint) OnDemand() bool {
+ }
+ 
+ func (c *ClientEndpoint) SetKeepIdleConnections(keep bool) {
+-	if keep {
+-		c.client.Resume()
+-	} else {
++	if !keep {
+ 		c.client.Suspend()
+ 	}
+ }
+diff --git a/protocol/openvpn/server.go b/protocol/openvpn/server.go
+index 1026579f567a34dbcb21f0ba99dfc4e34983a27c..5b7ab4e3df9750da1c9409c6523ecd2ecf77eb3e 100644
+--- a/protocol/openvpn/server.go
++++ b/protocol/openvpn/server.go
+@@ -22,7 +22,7 @@ import (
+ 	"github.com/sagernet/sing-box/transport/device"
+ 	ovpntransport "github.com/sagernet/sing-box/transport/openvpn"
+ 	ovpn "github.com/sagernet/sing-openvpn"
+-	"github.com/sagernet/sing-tun"
++	tun "github.com/sagernet/sing-tun"
+ 	"github.com/sagernet/sing/common/buf"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	M "github.com/sagernet/sing/common/metadata"
+@@ -76,17 +76,17 @@ func NewServerEndpoint(ctx context.Context, router adapter.Router, logger log.Co
+ 	}
+ 	loopContext, cancelLoop := context.WithCancel(ctx)
+ 	serverEndpoint := &ServerEndpoint{
+-		endpointBase: endpointBase{
+-			Adapter: endpoint.NewAdapter(C.TypeOpenVPNServer, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, nil),
+-			router:  router,
+-			logger:  logger,
+-		},
+ 		ctx:            ctx,
+ 		cancelLoop:     cancelLoop,
+ 		options:        options,
+ 		dnsRouter:      service.FromContext[adapter.DNSRouter](ctx),
+ 		localAddresses: options.Address,
+ 	}
++	serverEndpoint.endpointBase = endpointBase{
++		Adapter: endpoint.NewAdapter(C.TypeOpenVPNServer, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, nil),
++		router:  router,
++		logger:  logger,
++	}
+ 	serverOptions, err := buildServerOptions(options)
+ 	if err != nil {
+ 		cancelLoop()
+@@ -103,24 +103,21 @@ func NewServerEndpoint(ctx context.Context, router adapter.Router, logger log.Co
+ 	if options.UDPTimeout != 0 {
+ 		udpTimeout = time.Duration(options.UDPTimeout)
+ 	}
+-	packetFrontHeadroom, packetRearHeadroom := serverOptions.DataPacketHeadroom()
+ 	serverEndpoint.deviceOptions = &device.Options{
+-		Context:             ctx,
+-		Logger:              logger,
+-		System:              options.System,
+-		Handler:             serverEndpoint,
+-		UDPTimeout:          udpTimeout,
+-		ICMPTimeout:         C.ICMPTimeout,
+-		UDPMapping:          tun.NATMapping(options.UDPMapping),
+-		UDPFiltering:        tun.NATFiltering(options.UDPFiltering),
+-		UDPNATMax:           options.UDPNATMax,
+-		InterfaceFinder:     service.FromContext[adapter.NetworkManager](ctx).InterfaceFinder(),
+-		Name:                options.Name,
+-		NamePrefix:          "ovpn",
+-		MTU:                 options.MTU,
+-		PacketFrontHeadroom: packetFrontHeadroom,
+-		PacketRearHeadroom:  packetRearHeadroom,
+-		Route:               serverEndpoint.routeOutbound,
++		Context:         ctx,
++		Logger:          logger,
++		System:          options.System,
++		Handler:         serverEndpoint,
++		UDPTimeout:      udpTimeout,
++		ICMPTimeout:     C.ICMPTimeout,
++		UDPMapping:      tun.NATMapping(options.UDPMapping),
++		UDPFiltering:    tun.NATFiltering(options.UDPFiltering),
++		UDPNATMax:       options.UDPNATMax,
++		InterfaceFinder: service.FromContext[adapter.NetworkManager](ctx).InterfaceFinder(),
++		Name:            options.Name,
++		NamePrefix:      "ovpn",
++		MTU:             options.MTU,
++		PacketHeadroom:  ovpntransport.PacketHeadroom,
+ 		Configuration: device.Configuration{
+ 			MTU:     options.MTU,
+ 			Address: options.Address,
+@@ -162,18 +159,14 @@ func validateServerTopology(topology string) error {
+ 
+ func (s *ServerEndpoint) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 	if stage == adapter.StartStateInitialize {
+-		scope.Add(func() error {
+-			s.cancelLoop()
+-			return nil
+-		})
+ 		s.deviceOptions.MemoryPressure = oomkiller.MemoryPressure(s.ctx)
+ 		tunnelDevice, err := device.New(*s.deviceOptions)
+ 		if err != nil {
+ 			return err
+ 		}
+-		scope.Add(tunnelDevice.Close)
+ 		tunnelDevice.SetPacketWriter(s.writePacketBuffersByDestination)
+ 		s.device = tunnelDevice
++		scope.Add(s.Close) // H
+ 		s.deviceOptions = nil
+ 		return nil
+ 	}
+@@ -200,11 +193,9 @@ func (s *ServerEndpoint) Start(stage adapter.StartStage, scope *adapter.Scope) e
+ 		listenAddress := s.options.Listen.Build(netip.AddrFrom4([4]byte{127, 0, 0, 1}))
+ 		if listenAddress.IsUnspecified() && s.options.BindInterface == "" && s.options.RoutingMark == 0 && s.options.NetNs == "" {
+ 			udpDialer, dialerErr := dialer.NewDefault(s.ctx, option.DialerOptions{
+-				AbstractDialerOptions: option.AbstractDialerOptions{
+-					ReuseAddr:          s.options.ReuseAddr,
+-					UDPFragment:        s.options.UDPFragment,
+-					UDPFragmentDefault: s.options.UDPFragmentDefault,
+-				},
++				ReuseAddr:          s.options.ReuseAddr,
++				UDPFragment:        s.options.UDPFragment,
++				UDPFragmentDefault: s.options.UDPFragmentDefault,
+ 			})
+ 			if dialerErr != nil {
+ 				return dialerErr
+@@ -248,10 +239,7 @@ func (s *ServerEndpoint) Start(stage adapter.StartStage, scope *adapter.Scope) e
+ 	}
+ 	serverOptions.Transport.Listener = streamListener
+ 	serverOptions.Transport.PacketConn = packetConn
+-	serverOptions.NewOutboundQueue = func(write func(buffers []*buf.Buffer)) ovpn.OutboundQueue {
+-		return s.device.NewOutboundQueue(write)
+-	}
+-	serverOptions.IncomingPacketHeadroom = s.device.FrontHeadroom
++	serverOptions.DataChannel.PacketHeadroom = s.device.FrontHeadroom() // H: supported by sing-openvpn v5
+ 	server, err := ovpn.NewServer(serverOptions)
+ 	if err != nil {
+ 		if packetConn != nil {
+@@ -686,11 +674,6 @@ func (s *ServerEndpoint) WritePackets(packets [][]byte) error {
+ 	return err
+ }
+ 
+-func (s *ServerEndpoint) routeOutbound(packet []byte) *tun.OutboundQueue {
+-	outboundQueue, _ := s.server.RouteOutbound(packet).(*tun.OutboundQueue)
+-	return outboundQueue
+-}
+-
+ func (s *ServerEndpoint) writePacketBuffersByDestination(packetBuffers []*buf.Buffer) error {
+ 	routeMisses, err := s.server.WriteDataPacketBuffersByDestination(packetBuffers)
+ 	if len(routeMisses) > 0 {
+@@ -783,3 +766,14 @@ func (s *ServerEndpoint) ListenPacket(ctx context.Context, destination M.Socksad
+ 	packetConn, _, err := s.ListenPacketWithDestination(ctx, destination)
+ 	return packetConn, err
+ }
++
++// Close releases the server device and the endpoint's background loop.
++// The scoped server and listeners are closed by their own lifecycle cleanups.
++func (s *ServerEndpoint) Close() error {
++	s.cancelLoop()
++	s.started.Store(false)
++	if s.device != nil {
++		return s.device.Close()
++	}
++	return nil
++}
+diff --git a/protocol/openvpn/status.go b/protocol/openvpn/status.go
+index 6e4032efc2e9dd64b7ddfd3eb325a73781050322..665472ca0f8477a22389292a829b2870a5b395d2 100644
+--- a/protocol/openvpn/status.go
++++ b/protocol/openvpn/status.go
+@@ -1,7 +1,6 @@
+ package openvpn
+ 
+ import (
+-	"context"
+ 	"slices"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+@@ -74,41 +73,3 @@ func (c *ClientEndpoint) notifyStatusUpdatedLocked() {
+ 	close(c.statusUpdated)
+ 	c.statusUpdated = make(chan struct{})
+ }
+-
+-func (c *ClientEndpoint) setTerminalError(err error) {
+-	c.statusAccess.Lock()
+-	c.terminalError = err.Error()
+-	c.notifyStatusUpdatedLocked()
+-	c.statusAccess.Unlock()
+-}
+-
+-func (c *ClientEndpoint) watchChallenges(ctx context.Context) {
+-	var loggedChallengeID string
+-	for {
+-		challengeUpdated := c.client.ChallengeUpdated()
+-		challenge := c.client.PendingChallenge()
+-		if challenge != nil && challenge.ID != loggedChallengeID {
+-			loggedChallengeID = challenge.ID
+-			c.logChallenge(challenge)
+-		}
+-		c.notifyStatusUpdated()
+-		select {
+-		case <-ctx.Done():
+-			return
+-		case <-challengeUpdated:
+-		}
+-	}
+-}
+-
+-func (c *ClientEndpoint) logChallenge(challenge *ovpn.Challenge) {
+-	switch challenge.Kind {
+-	case ovpn.ChallengeCredentials:
+-		c.logger.Info("waiting for credentials")
+-	case ovpn.ChallengeSecret:
+-		c.logger.Info("waiting for challenge response: ", challenge.Message)
+-	case ovpn.ChallengeMessage:
+-		c.logger.Info("authentication message: ", challenge.Message)
+-	case ovpn.ChallengeOpenURL:
+-		c.logger.Info("waiting for authentication: ", challenge.URL)
+-	}
+-}

@@ -10,7 +10,7 @@ The three original projects appear at the root as Git submodules. Each submodule
 | [`hiddify-sing-box`](hiddify-sing-box) | [`patches/hiddify-sing-box`](patches/hiddify-sing-box/) | `45814844d5b80af5b43ac5c17d45c0ed3a42bcd0` |
 | [`ray2sing`](ray2sing) | [`patches/ray2sing`](patches/ray2sing/) | `7aac8dcf42b6284cf6993c992db8dcf259a4b98f` |
 
-The stable sing-box commit matches the original Core gitlink. The ray2sing submodule is pinned independently to the official revision `a722bf1`, which incorporates the two upstream AmneziaVPN / AmneziaWG fixes. Its patch recreates the verified three-way merge of the previously audited fork tree and the new original revision. The build reads all three pins from the VetrOFF-Core Git checkout, stages the upstream sources in `.build/`, and checks each patched Git tree against its `expected-tree` file. The audited trees preserve the forks' tracked runtime sources, tests, build definitions and dependency changes. The original workflows and contributor instructions are retained, and Core keeps the original submodule definitions and pointers. The fork's checked-in Core archive is omitted and the VetrOFF CLI version patch is applied.
+The stable sing-box commit matches the original Core gitlink. The ray2sing submodule is pinned independently to the official revision `a722bf1`, incorporating two upstream AmneziaVPN / AmneziaWG changes. Its patch recreates the verified three-way merge of the previously audited fork tree and the new original revision. The build reads all three pins from the VetrOFF-Core Git checkout, stages the upstream sources in `.build/`, and checks each patched Git tree against its `expected-tree` file. The audited trees preserve the forks' tracked runtime sources, tests, build definitions and dependency changes. The original workflows and contributor instructions are retained, and Core keeps the original submodule definitions and pointers. The fork's checked-in Core archive is omitted and the VetrOFF CLI version patch is applied.
 
 ## Builds
 
@@ -32,7 +32,7 @@ The workflow now performs a single patch preflight before scheduling platform bu
 
 ## Checking personal fork updates
 
-`patches/fork-snapshots.lock` records the three **personal fork revisions that were audited when the patch series were generated**. These revisions are distinct from the three original-project Git submodule SHA pins. On scheduled and manually dispatched workflows, `scripts/audit-forks.sh --strict` checks the latest `main` of each personal fork against its audited snapshot and fails the independent audit job if new work needs to be ported.
+`patches/fork-snapshots.lock` records the three **personal fork revisions that were audited when the patch series were generated**. These revisions are distinct from the three original-project Git submodule SHA pins. On pull requests, scheduled and manually dispatched workflows, `scripts/audit-forks.sh --strict` checks the latest `main` of each personal fork against its audited snapshot and fails the independent audit job if new work needs to be ported.
 
 Run locally with:
 
@@ -41,6 +41,12 @@ bash scripts/audit-forks.sh --strict
 ```
 
 When a personal fork advances, review its new commits, regenerate the affected patches, update the corresponding expected source tree, verify all targeted tests and platforms, and only then advance the audited revision in `fork-snapshots.lock`. Do **not** replace the official Git submodules with the forks or update the snapshot SHA without incorporating and verifying its changes.
+
+### Ordered subsystem patches
+
+The original Core and sing-box baseline diffs are split into 16 and 126 ordered subsystem patches respectively. The four later Core patches were preserved during the split; ray2sing remains a separate single-patch series. Each `series` file specifies the application order; the numbered pieces preserve complete Git diff sections, including binary changes. Do not sort or reorder these files independently of `series`: related changes may span more than one subsystem.
+
+The initial split was verified against the original byte streams and all three existing `expected-tree` values. When regenerating an unsplit baseline, `python3 scripts/split-baseline-patches.py` performs the same lossless subdivision (Python 3 is only needed for maintenance). Always run `bash scripts/prepare.sh` and the compatibility tests before accepting a changed patch series. A structural split is not itself a rebase; source pin upgrades are reviewed separately.
 
 Patch files use Git binary diff format with full blob IDs for three-way application. After resolving a candidate conflict against the newer original sources, regenerate the affected patch and update the submodule pointers and corresponding `expected-tree` files.
 

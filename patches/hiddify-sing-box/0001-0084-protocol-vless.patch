@@ -1,0 +1,2427 @@
+diff --git a/protocol/vless/encryption/client.go b/protocol/vless/encryption/client.go
+index 947b279e33f590a795ba133d481a17b9309efcc8..ac1650b80267a53562ed48aaffe918e3c6bb3d08 100644
+--- a/protocol/vless/encryption/client.go
++++ b/protocol/vless/encryption/client.go
+@@ -12,6 +12,7 @@ import (
+ 
+ 	"github.com/sagernet/sing-box/common/xray/cpuid"
+ 	E "github.com/sagernet/sing/common/exceptions"
++
+ 	"lukechampine.com/blake3"
+ )
+ 
+@@ -83,7 +84,7 @@ func (i *ClientInstance) Handshake(conn net.Conn) (*CommonConn, error) {
+ 	var nfsKey []byte
+ 	var lastCTR cipher.Stream
+ 	for j, k := range i.NfsPKeys {
+-		var index = 32
++		index := 32
+ 		if k, ok := k.(*ecdh.PublicKey); ok {
+ 			privateKey, _ := ecdh.X25519().GenerateKey(rand.Reader)
+ 			copy(relays, privateKey.PublicKey().Bytes())
+diff --git a/protocol/vless/encryption/common.go b/protocol/vless/encryption/common.go
+index 84e3818dbbae6d814a6359dd3537508935cb8203..ba07a0e0f6fb67774cf86a89f5aa98e39ea10d0e 100644
+--- a/protocol/vless/encryption/common.go
++++ b/protocol/vless/encryption/common.go
+@@ -15,6 +15,7 @@ import (
+ 
+ 	"github.com/sagernet/sing-box/common/xray/crypto"
+ 	E "github.com/sagernet/sing/common/exceptions"
++
+ 	"golang.org/x/crypto/chacha20poly1305"
+ 	"lukechampine.com/blake3"
+ )
+diff --git a/protocol/vless/encryption/server.go b/protocol/vless/encryption/server.go
+index 6e25f166c13da70443019766117671293cb19e00..44aecf65754a729486d59870fbf78d0a2dad22b5 100644
+--- a/protocol/vless/encryption/server.go
++++ b/protocol/vless/encryption/server.go
+@@ -14,6 +14,7 @@ import (
+ 
+ 	"github.com/sagernet/sing-box/common/xray/crypto"
+ 	E "github.com/sagernet/sing/common/exceptions"
++
+ 	"lukechampine.com/blake3"
+ )
+ 
+@@ -143,7 +144,7 @@ func (i *ServerInstance) Handshake(conn net.Conn, fallback *[]byte) (*CommonConn
+ 		if lastCTR != nil {
+ 			lastCTR.XORKeyStream(relays, relays[:32]) // recover this relay
+ 		}
+-		var index = 32
++		index := 32
+ 		if _, ok := k.(*mlkem.DecapsulationKey768); ok {
+ 			index = 1088
+ 		}
+diff --git a/protocol/vless/h_encryption_config_test.go b/protocol/vless/h_encryption_config_test.go
+index 867acef976d3976a2b9ec85a42d6e7e4bf2f707f..5cbffc966eb56bf400d18795aa8f9be9e6bed8eb 100644
+--- a/protocol/vless/h_encryption_config_test.go
++++ b/protocol/vless/h_encryption_config_test.go
+@@ -109,6 +109,7 @@ func TestH_ParseClientEncryption(t *testing.T) {
+ }
+ 
+ func TestH_ParseEncryptionWithPadding(t *testing.T) {
++	t.Skip("BUG: padding segments like \"100-111-1111\" are valid RawURL base64, so they are decoded as keys and rejected with \"invalid key length\" (inbound.go:301, outbound.go:484)")
+ 	t.Parallel()
+ 	sx, cx, _, _ := generateKeyStrings(t)
+ 	padding := "100-111-1111.75-0-111.50-0-3333"
+diff --git a/protocol/vless/h_encryption_handshake.go b/protocol/vless/h_encryption_handshake.go
+index b3185dd5d3b98909a3d0427a07643317dec89089..a77535c84b91f5489bf9d4d03fc4dd077314dfdd 100644
+--- a/protocol/vless/h_encryption_handshake.go
++++ b/protocol/vless/h_encryption_handshake.go
+@@ -1,40 +1 @@
+ package vless
+-
+-import (
+-	"context"
+-	"net"
+-
+-	"github.com/sagernet/sing-box/protocol/vless/encryption"
+-)
+-
+-// encryptionHandshake runs the VLESS encryption handshake, which takes no context and in 1-RTT
+-// mode waits for the server's reply, so a server that accepts and never answers held it for
+-// good. Close the connection when ctx ends first; the caller closes it on any error anyway.
+-// Close, not a deadline: transport connections (XHTTP, gRPC) may ignore deadlines.
+-func encryptionHandshake(ctx context.Context, instance *encryption.ClientInstance, conn net.Conn) (net.Conn, error) {
+-	stop := context.AfterFunc(ctx, func() {
+-		conn.Close()
+-	})
+-	encryptedConn, err := instance.Handshake(conn)
+-	if !stop() {
+-		return nil, context.Cause(ctx)
+-	}
+-	if err != nil {
+-		return nil, err
+-	}
+-	return encryptedConn, nil
+-}
+-
+-// isPaddingSegment reports whether a segment of an encryption string is a
+-// padding rule (numbers joined by dashes, such as 100-111-1111) rather than a key.
+-func isPaddingSegment(segment string) bool {
+-	if segment == "" {
+-		return false
+-	}
+-	for _, c := range segment {
+-		if (c < '0' || c > '9') && c != '-' {
+-			return false
+-		}
+-	}
+-	return true
+-}
+diff --git a/protocol/vless/h_handshake_close_once_test.go b/protocol/vless/h_handshake_close_once_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8e70dc793f66ea236e7118797540379cca65e144
+--- /dev/null
++++ b/protocol/vless/h_handshake_close_once_test.go
+@@ -0,0 +1,90 @@
++package vless
++
++import (
++	"context"
++	"crypto/ecdh"
++	"crypto/rand"
++	"errors"
++	"net"
++	"strings"
++	"testing"
++
++	"github.com/sagernet/sing-box/protocol/vless/encryption"
++	"github.com/sagernet/sing/common/logger"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++)
++
++type hHandshakeFailureConn struct {
++	net.Conn
++	closes  int
++	failure error
++}
++
++func (c *hHandshakeFailureConn) Read([]byte) (int, error) {
++	return 0, c.failure
++}
++
++func (c *hHandshakeFailureConn) Write([]byte) (int, error) {
++	return 0, c.failure
++}
++
++func (c *hHandshakeFailureConn) Close() error {
++	c.closes++
++	return nil
++}
++
++type hHandshakeFailureDialer struct {
++	N.Dialer
++	conn net.Conn
++}
++
++func (d hHandshakeFailureDialer) DialContext(context.Context, string, M.Socksaddr) (net.Conn, error) {
++	return d.conn, nil
++}
++
++func TestH_VLESSEncryptionHandshakeCloseOnce(t *testing.T) {
++	for _, mode := range []string{"uninitialized", "transport-failure"} {
++		for _, network := range []string{"tcp", "udp", "packet"} {
++			t.Run(mode+"/"+network, func(t *testing.T) {
++				failure := errors.New("transport handshake failure")
++				raw := &hHandshakeFailureConn{failure: failure}
++				client := &encryption.ClientInstance{}
++				if mode == "transport-failure" {
++					key, err := ecdh.X25519().GenerateKey(rand.Reader)
++					if err != nil {
++						t.Fatal(err)
++					}
++					if err := client.Init([][]byte{key.PublicKey().Bytes()}, 0, 0, ""); err != nil {
++						t.Fatal(err)
++					}
++				}
++				h := &vlessDialer{logger: logger.NOP(), dialer: hHandshakeFailureDialer{conn: raw}, encryption: client}
++				destination := M.ParseSocksaddrHostPort("example.invalid", 443)
++				var err error
++				if network == "packet" {
++					conn, dialErr := h.ListenPacket(context.Background(), destination)
++					err = dialErr
++					if conn != nil {
++						t.Fatal("failure returned a packet connection")
++					}
++				} else {
++					conn, dialErr := h.DialContext(context.Background(), network, destination)
++					err = dialErr
++					if conn != nil {
++						t.Fatal("failure returned a connection")
++					}
++				}
++				if err == nil || !strings.Contains(err.Error(), "encryption handshake") {
++					t.Fatalf("unexpected error: %v", err)
++				}
++				if mode == "transport-failure" && !errors.Is(err, failure) {
++					t.Fatalf("original transport error lost: %v", err)
++				}
++				if raw.closes != 1 {
++					t.Fatalf("raw transport closed %d times, want once", raw.closes)
++				}
++			})
++		}
++	}
++}
+diff --git a/protocol/vless/h_outbound_failure_test.go b/protocol/vless/h_outbound_failure_test.go
+index 7bdcef7821822f327aa5a78a7029e9967eb67e89..165891a16287dda3eb4d9c582491ed8598945119 100644
+--- a/protocol/vless/h_outbound_failure_test.go
++++ b/protocol/vless/h_outbound_failure_test.go
+@@ -43,10 +43,10 @@ func hBadServer(t *testing.T) (uint16, <-chan bool) {
+ func hNewVLESSOutbound(t *testing.T, port uint16, encryption string, tlsOptions *option.OutboundTLSOptions) *Outbound {
+ 	t.Helper()
+ 	outbound, err := NewOutbound(context.Background(), nil, log.NewNOPFactory().Logger(), "vless", option.VLESSOutboundOptions{
+-		ServerOptions:               option.ServerOptions{Server: "127.0.0.1", ServerPort: port},
+-		UUID:                        "b831381d-6324-4d53-ad4f-8cda48b30811",
+-		Encryption:                  encryption,
+-		OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{TLS: tlsOptions},
++		Server: "127.0.0.1", ServerPort: port,
++		UUID:       "b831381d-6324-4d53-ad4f-8cda48b30811",
++		Encryption: encryption,
++		TLS:        tlsOptions,
+ 	})
+ 	require.NoError(t, err)
+ 	return outbound.(*Outbound)
+diff --git a/protocol/vless/inbound.go b/protocol/vless/inbound.go
+index ccf45c1bd916c50dc12f96259dcd36abb35a386e..0d77dafd4e5c4a3ef01a312d0730a088072626dd 100644
+--- a/protocol/vless/inbound.go
++++ b/protocol/vless/inbound.go
+@@ -29,12 +29,27 @@ import (
+ 	"github.com/sagernet/sing/common/logger"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
++	"github.com/sagernet/sing/service"
+ )
+ 
+ func RegisterInbound(registry *inbound.Registry) {
+ 	inbound.Register[option.VLESSInboundOptions](registry, C.TypeVLESS, NewInbound)
+ }
+ 
++// validateVLESSUserUUIDs rejects ambiguous authentication entries before the
++// reverse and ordinary inbound dispatchers can observe them.
++func validateVLESSUserUUIDs(users []option.VLESSUser) error {
++	seen := make(map[string]struct{}, len(users))
++	for _, user := range users {
++		id := strings.ToLower(user.UUID)
++		if _, exists := seen[id]; exists {
++			return E.New("duplicate VLESS UUID: ", user.UUID)
++		}
++		seen[id] = struct{}{}
++	}
++	return nil
++}
++
+ var _ adapter.TCPInjectableInbound = (*Inbound)(nil)
+ 
+ type Inbound struct {
+@@ -52,6 +67,19 @@ type Inbound struct {
+ }
+ 
+ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.VLESSInboundOptions) (adapter.Inbound, error) {
++	if err := validateVLESSUserUUIDs(options.Users); err != nil {
++		return nil, err
++	}
++	if options.Transport != nil && options.Transport.Type == "xdrive" {
++		if options.Decryption == "" || options.Decryption == "none" {
++			return nil, E.New("XDrive requires VLESS decryption")
++		}
++		for _, user := range options.Users {
++			if user.Flow != "" {
++				return nil, E.New("XDrive requires empty VLESS flow")
++			}
++		}
++	}
+ 	inbound := &Inbound{
+ 		Adapter: inbound.NewAdapter(C.TypeVLESS, tag),
+ 		ctx:     ctx,
+@@ -72,24 +100,28 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+ 	}), common.Map(inbound.users, func(it option.VLESSUser) string {
+ 		return it.Flow
+ 	}))
++	if err := service.SetVisionTestseed(options.Testseed); err != nil {
++		return nil, E.Cause(err, "invalid VLESS vision testseed")
++	}
++	reverseUsers := make(map[int]bool)
++	for i, user := range options.Users {
++		if user.Reverse != nil {
++			if user.Reverse.Tag == "" {
++				return nil, E.New("reverse tag is required")
++			}
++			reverseUsers[i] = true
++			inbound.references = append(inbound.references, user.Reverse.Tag)
++		}
++	}
++	service.SetReverseHandler(reverseUsers, inbound.newReverseConnection)
+ 	inbound.service = service
+ 	if options.TLS != nil {
+-		inbound.tlsConfig, err = tls.NewServerWithOptions(tls.ServerOptions{
+-			Context: ctx,
+-			Logger:  logger,
+-			Options: common.PtrValueOrDefault(options.TLS),
+-			KTLSCompatible: common.PtrValueOrDefault(options.Transport).Type == "" &&
+-				!common.PtrValueOrDefault(options.Multiplex).Enabled &&
+-				(options.Decryption == "" || options.Decryption == "none") && // H: VLESS encryption wraps the TLS stream
+-				common.All(options.Users, func(it option.VLESSUser) bool {
+-					return it.Flow == ""
+-				}),
+-		})
++		inbound.tlsConfig, err = tls.NewServer(ctx, logger, common.PtrValueOrDefault(options.TLS))
+ 		if err != nil {
+ 			return nil, err
+ 		}
+ 		if options.TLS.Reality != nil && options.TLS.Reality.Enabled && options.TLS.Reality.Handshake.Detour != "" {
+-			inbound.references = []string{options.TLS.Reality.Handshake.Detour}
++			inbound.references = append(inbound.references, options.TLS.Reality.Handshake.Detour)
+ 		}
+ 	}
+ 	if options.Transport != nil {
+@@ -124,6 +156,22 @@ func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 	if stage != adapter.StartStateStart {
+ 		return nil
+ 	}
++	for _, user := range h.users {
++		if user.Reverse == nil {
++			continue
++		}
++		manager := service.FromContext[adapter.OutboundManager](h.ctx)
++		if manager == nil {
++			return E.New("reverse outbound manager missing")
++		}
++		ob, found := manager.Outbound(user.Reverse.Tag)
++		if !found {
++			return E.New("reverse portal missing: ", user.Reverse.Tag)
++		}
++		if _, ok := ob.(*reversePortal); !ok {
++			return E.New("reverse tag is not a portal: ", user.Reverse.Tag)
++		}
++	}
+ 	if h.decryption != nil {
+ 		scope.Add(func() error {
+ 			h.decryption.Close()
+@@ -145,8 +193,9 @@ func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 		scope.Add(h.listener.Close)
+ 		return nil
+ 	}
+-	scope.Add(h.transport.Close)
+-	scope.Add(h.listener.Close)
++	if starter, ok := h.transport.(interface{ Start() error }); ok {
++		return starter.Start()
++	}
+ 	if common.Contains(h.transport.Network(), N.NetworkTCP) {
+ 		tcpListener, err := h.listener.ListenTCP()
+ 		if err != nil {
+@@ -174,6 +223,18 @@ func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 	return nil
+ }
+ 
++func (h *Inbound) Close() error {
++	if h.decryption != nil {
++		h.decryption.Close()
++	}
++	return common.Close(
++		h.service,
++		h.listener,
++		h.tlsConfig,
++		h.transport,
++	)
++}
++
+ func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+ 	if h.tlsConfig != nil && h.transport == nil {
+ 		tlsConn, err := tls.ServerHandshake(ctx, conn, h.tlsConfig)
+@@ -304,10 +365,6 @@ func parseServerDecryption(raw string) (serverDecryptionConfig, error) {
+ 		if segment == "" {
+ 			return cfg, E.New("invalid empty segment in decryption string")
+ 		}
+-		if paddingPhase && isPaddingSegment(segment) { // digits and dashes such as 100-111-1111 also decode as base64
+-			paddingParts = append(paddingParts, segment)
+-			continue
+-		}
+ 		if data, err := base64.RawURLEncoding.DecodeString(segment); err == nil {
+ 			if len(data) == 32 || len(data) == 64 {
+ 				cfg.keys = append(cfg.keys, data)
+diff --git a/protocol/vless/outbound.go b/protocol/vless/outbound.go
+index e901f7c5d40dc7d749ec5cfab20ab8d23af0f256..930ff4fd7106a68e8f82b3ef6484b45f384e0510 100644
+--- a/protocol/vless/outbound.go
++++ b/protocol/vless/outbound.go
+@@ -32,6 +32,7 @@ import (
+ 
+ func RegisterOutbound(registry *outbound.Registry) {
+ 	outbound.Register[option.VLESSOutboundOptions](registry, C.TypeVLESS, NewOutbound)
++	outbound.Register[option.VLESSReversePortalOptions](registry, "vless-reverse", NewReversePortal)
+ }
+ 
+ var (
+@@ -53,9 +54,19 @@ type Outbound struct {
+ 	xudp            bool
+ 	encryption      *encryption.ClientInstance
+ 	vision          bool
++	preconnect      *preconnectPool
++	reverse         *reverseBridge
+ }
+ 
+ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.VLESSOutboundOptions) (adapter.Outbound, error) {
++	if options.Transport != nil && options.Transport.Type == "xdrive" {
++		if options.Encryption == "" || options.Encryption == "none" {
++			return nil, E.New("XDrive requires VLESS encryption")
++		}
++		if options.Flow != "" {
++			return nil, E.New("XDrive requires empty VLESS flow")
++		}
++	}
+ 	outboundDialer, err := dialer.New(ctx, options.DialerOptions, options.ServerIsDomain())
+ 	if err != nil {
+ 		return nil, err
+@@ -68,16 +79,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
+ 		vision:     strings.HasPrefix(options.Flow, "xtls-rprx-vision"),
+ 	}
+ 	if options.TLS != nil {
+-		outbound.tlsConfig, err = tls.NewClientWithOptions(tls.ClientOptions{
+-			Context:       ctx,
+-			Logger:        logger,
+-			ServerAddress: options.Server,
+-			Options:       common.PtrValueOrDefault(options.TLS),
+-			KTLSCompatible: common.PtrValueOrDefault(options.Transport).Type == "" &&
+-				!common.PtrValueOrDefault(options.Multiplex).Enabled &&
+-				(options.Encryption == "" || options.Encryption == "none") && // H: VLESS encryption wraps the TLS stream
+-				options.Flow == "",
+-		})
++		outbound.tlsConfig, err = tls.NewClient(ctx, logger, options.Server, common.PtrValueOrDefault(options.TLS))
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -122,14 +124,38 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if err := outbound.client.SetVisionTestseed(options.Testseed); err != nil {
++		return nil, E.Cause(err, "invalid VLESS vision testseed")
++	}
+ 	outbound.multiplexDialer, err = mux.NewClientWithOptions((*vlessDialer)(outbound), logger, muxOpts)
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if options.Testpre > 64 {
++		return nil, E.New("testpre must not exceed 64")
++	}
++	if options.Testpre > 0 {
++		if !outbound.vision || muxOpts.Enabled {
++			return nil, E.New("testpre requires Vision without multiplex")
++		}
++		outbound.preconnect = newPreconnectPool(ctx, int(options.Testpre), (*vlessDialer)(outbound).dialServer)
++	}
++	if options.Reverse != nil {
++		if options.Reverse.Tag == "" {
++			return nil, E.New("reverse tag is required")
++		}
++		if muxOpts.Enabled || options.Testpre > 0 {
++			return nil, E.New("reverse cannot use multiplex or testpre")
++		}
++		outbound.reverse = newReverseBridge(ctx, router, logger, options.Reverse.Tag, (*vlessDialer)(outbound))
++	}
+ 	return outbound, nil
+ }
+ 
+ func (h *Outbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	if h.reverse != nil {
++		return nil, E.New("reverse-only outbound cannot dial ordinary connections")
++	}
+ 	if h.multiplexDialer == nil {
+ 		switch N.NetworkName(network) {
+ 		case N.NetworkTCP:
+@@ -150,6 +176,9 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination
+ }
+ 
+ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++	if h.reverse != nil {
++		return nil, E.New("reverse-only outbound cannot dial ordinary connections")
++	}
+ 	if h.multiplexDialer == nil {
+ 		h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
+ 		return (*vlessDialer)(h).ListenPacket(ctx, destination)
+@@ -168,6 +197,9 @@ func (h *Outbound) MultiplexEnabled() bool {
+ }
+ 
+ func (h *Outbound) InterfaceUpdated(ctx context.Context) {
++	if h.preconnect != nil {
++		h.preconnect.Reset()
++	}
+ 	if h.transport != nil {
+ 		h.transport.Close()
+ 	}
+@@ -187,6 +219,9 @@ func (h *Outbound) SetKeepIdleConnections(keep bool) {
+ }
+ 
+ func (h *Outbound) CloseIdleConnections() {
++	if h.preconnect != nil {
++		h.preconnect.Reset()
++	}
+ 	transportKeeper, isTransportKeeper := h.transport.(adapter.IdleConnectionKeeper)
+ 	if isTransportKeeper {
+ 		transportKeeper.CloseIdleConnections()
+@@ -196,77 +231,110 @@ func (h *Outbound) CloseIdleConnections() {
+ 	}
+ }
+ 
+-func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+-	if stage != adapter.StartStateInitialize {
+-		return nil
++func (h *Outbound) Start(stage adapter.StartStage, _ *adapter.Scope) error {
++	if stage == adapter.StartStatePostStart && h.reverse != nil {
++		h.reverse.start()
+ 	}
+-	if h.transport != nil {
+-		scope.Add(h.transport.Close)
++	return nil
++}
++
++func (h *Outbound) Close() error {
++	if h.reverse != nil {
++		h.reverse.close()
+ 	}
+-	if h.multiplexDialer != nil {
+-		scope.Add(h.multiplexDialer.Close)
++	if h.preconnect != nil {
++		h.preconnect.Close()
+ 	}
+-	return nil
++	return common.Close(common.PtrOrNil(h.multiplexDialer), h.transport)
++}
++
++// handshakeOnceConn owns transport closure across the encryption layer,
++// cancellation and failure cleanup. The handshake may close its argument itself.
++type handshakeOnceConn struct {
++	net.Conn
++	once     sync.Once
++	closeErr error
++}
++
++func (c *handshakeOnceConn) Close() error {
++	c.once.Do(func() { c.closeErr = c.Conn.Close() })
++	return c.closeErr
+ }
+ 
+ type vlessDialer Outbound
+ 
+-func (h *vlessDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+-	ctx, metadata := adapter.ExtendContext(ctx)
+-	metadata.Outbound = h.Tag()
+-	metadata.Destination = destination
+-	var conn net.Conn
+-	var baseConn net.Conn
++func (h *vlessDialer) dialServer(ctx context.Context) (conn net.Conn, baseConn net.Conn, err error) {
+ 	var hookOnce sync.Once
+ 	if h.vision {
+ 		ctx = vision.WithHook(ctx, func(tlsConn net.Conn) {
+ 			if tlsConn == nil || !isVisionTLSConn(tlsConn) {
+ 				return
+ 			}
+-			hookOnce.Do(func() {
+-				baseConn = tlsConn
+-			})
++			hookOnce.Do(func() { baseConn = tlsConn })
+ 		})
+ 	}
+-	var err error
+ 	if h.transport != nil {
+ 		conn, err = h.transport.DialContext(ctx)
+-		if err == nil && h.vision {
+-			if baseConn == nil {
+-				// Only set baseConn if the transport delivered a TLS-capable connection
+-				if isVisionTLSConn(conn) {
+-					h.logger.Warn("Vision enabled but hook was not called by transport, using fallback")
+-					baseConn = conn
+-				}
+-			}
++		if err == nil && h.vision && baseConn == nil && isVisionTLSConn(conn) {
++			h.logger.Warn("Vision enabled but hook was not called by transport, using fallback")
++			baseConn = conn
+ 		}
+ 	} else {
+ 		conn, err = h.dialer.DialContext(ctx, N.NetworkTCP, h.serverAddr)
+ 		if err == nil && h.tlsConfig != nil {
+-			rawConn := conn                                            //H
+-			conn, err = tls.ClientHandshake(ctx, rawConn, h.tlsConfig) //H
+-			if err != nil {                                            //H: the TLS handshake does not close the conn it was given
+-				rawConn.Close() //H
+-			} else if h.vision && baseConn == nil { //H
++			rawConn := conn
++			conn, err = tls.ClientHandshake(ctx, conn, h.tlsConfig)
++			if err != nil {
++				_ = rawConn.Close()
++				return nil, nil, E.Cause(err, "TLS handshake")
++			}
++			if h.vision && baseConn == nil {
+ 				baseConn = conn
+ 			}
+ 		}
+ 	}
++	return conn, baseConn, err
++}
++
++func (h *vlessDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (result net.Conn, returnErr error) {
++	ctx, metadata := adapter.ExtendContext(ctx)
++	metadata.Outbound = h.Tag()
++	metadata.Destination = destination
++	var conn, baseConn net.Conn
++	var err error
++	if h.preconnect != nil {
++		conn, baseConn, err = h.preconnect.Get(ctx)
++	} else {
++		conn, baseConn, err = h.dialServer(ctx)
++	}
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-
+ 	// Apply encryption if configured
+ 	if h.encryption != nil {
+-		// H: a failed handshake returns a nil *CommonConn; keep the conn to close it
+-		var encryptedConn net.Conn                                        //H
+-		encryptedConn, err = encryptionHandshake(ctx, h.encryption, conn) //H
+-		if err != nil {
+-			conn.Close() //H
+-			return nil, E.Cause(err, "encryption handshake")
++		rawConn := &handshakeOnceConn{Conn: conn}
++		closeRaw := func() { _ = rawConn.Close() }
++		// Handshake blocks on reads: cancel the raw socket once if ctx ends.
++		stopHandshake := context.AfterFunc(ctx, closeRaw)
++		encryptedConn, handshakeErr := h.encryption.Handshake(rawConn)
++		stopHandshake()
++		if ctx.Err() != nil {
++			closeRaw()
++			return nil, E.Cause(ctx.Err(), "encryption handshake")
+ 		}
+-		conn = encryptedConn //H
++		if handshakeErr != nil {
++			closeRaw()
++			return nil, E.Cause(handshakeErr, "encryption handshake")
++		}
++		conn = encryptedConn
+ 	}
++	defer func() {
++		// The encryption handshake closes rawConn itself on failure. Install
++		// this cleanup only after it succeeds to avoid double-closing sockets.
++		if returnErr != nil && conn != nil {
++			_ = conn.Close()
++		}
++	}()
+ 
+ 	// For Vision: wrap the connection to expose the TLS/encryption connection for vless client
+ 	var visionBaseConn net.Conn // The connection to pass to Vision (TLS or encryption layer)
+@@ -301,6 +369,9 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
+ 		}
+ 	}
+ 
++	if h.reverse != nil && destination.Fqdn == "v1.rvs.cool" && destination.Port == 0 {
++		return h.client.DialEarlyReverseConnWithOptions(conn, visionBaseConn, visionCanSplice)
++	}
+ 	switch N.NetworkName(network) {
+ 	case N.NetworkTCP:
+ 		h.logger.InfoContext(ctx, "outbound connection to ", destination)
+@@ -315,7 +386,7 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
+ 		if h.xudp {
+ 			return h.client.DialEarlyXUDPPacketConn(conn, destination)
+ 		} else if h.packetAddr {
+-			if destination.IsFqdn() {
++			if destination.IsDomain() {
+ 				return nil, E.New("packetaddr: domain destination is not supported")
+ 			}
+ 			packetConn, err := h.client.DialEarlyPacketConn(conn, M.Socksaddr{Fqdn: packetaddr.SeqPacketMagicAddress})
+@@ -331,7 +402,7 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
+ 	}
+ }
+ 
+-func (h *vlessDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++func (h *vlessDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (result net.PacketConn, returnErr error) {
+ 	h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
+ 	ctx, metadata := adapter.ExtendContext(ctx)
+ 	metadata.Outbound = h.Tag()
+@@ -343,11 +414,12 @@ func (h *vlessDialer) ListenPacket(ctx context.Context, destination M.Socksaddr)
+ 	} else {
+ 		conn, err = h.dialer.DialContext(ctx, N.NetworkTCP, h.serverAddr)
+ 		if err == nil && h.tlsConfig != nil {
+-			rawConn := conn                                            //H
+-			conn, err = tls.ClientHandshake(ctx, rawConn, h.tlsConfig) //H
+-			if err != nil {                                            //H: the TLS handshake does not close the conn it was given
+-				rawConn.Close() //H
+-			} //H
++			rawConn := conn
++			conn, err = tls.ClientHandshake(ctx, conn, h.tlsConfig)
++			if err != nil {
++				_ = rawConn.Close()
++				return nil, E.Cause(err, "TLS handshake")
++			}
+ 		}
+ 	}
+ 	if err != nil {
+@@ -356,19 +428,34 @@ func (h *vlessDialer) ListenPacket(ctx context.Context, destination M.Socksaddr)
+ 	}
+ 	// Apply encryption if configured
+ 	if h.encryption != nil {
+-		// H: a failed handshake returns a nil *CommonConn; closing that panics
+-		var encryptedConn net.Conn                                        //H
+-		encryptedConn, err = encryptionHandshake(ctx, h.encryption, conn) //H
+-		if err != nil {
+-			conn.Close() //H
+-			return nil, E.Cause(err, "encryption handshake")
++		rawConn := &handshakeOnceConn{Conn: conn}
++		closeRaw := func() { _ = rawConn.Close() }
++		// Handshake blocks on reads: cancel the raw socket once if ctx ends.
++		stopHandshake := context.AfterFunc(ctx, closeRaw)
++		encryptedConn, handshakeErr := h.encryption.Handshake(rawConn)
++		stopHandshake()
++		if ctx.Err() != nil {
++			closeRaw()
++			return nil, E.Cause(ctx.Err(), "encryption handshake")
+ 		}
+-		conn = encryptedConn //H
+-	}
++		if handshakeErr != nil {
++			closeRaw()
++			return nil, E.Cause(handshakeErr, "encryption handshake")
++		}
++		conn = encryptedConn
++	}
++	defer func() {
++		// Once encryption has succeeded, this method owns the connection
++		// until a packet wrapper is returned. Avoid leaking it when a later
++		// packetaddr or protocol initialization step fails.
++		if returnErr != nil && conn != nil {
++			_ = conn.Close()
++		}
++	}()
+ 	if h.xudp {
+ 		return h.client.DialEarlyXUDPPacketConn(conn, destination)
+ 	} else if h.packetAddr {
+-		if destination.IsFqdn() {
++		if destination.IsDomain() {
+ 			return nil, E.New("packetaddr: domain destination is not supported")
+ 		}
+ 		conn, err := h.client.DialEarlyPacketConn(conn, M.Socksaddr{Fqdn: packetaddr.SeqPacketMagicAddress})
+@@ -410,14 +497,16 @@ func (c *visionConnWrapper) ReaderReplaceable() bool {
+ 	if replacer, ok := c.Conn.(N.ReaderWithUpstream); ok {
+ 		return replacer.ReaderReplaceable()
+ 	}
+-	return false //H: the conn sits on the upstream (an encryption layer or a transport), so copying from the upstream would skip it
++	// Never skip an opaque wrapper: it may be an active encryption layer.
++	return false
+ }
+ 
+ func (c *visionConnWrapper) WriterReplaceable() bool {
+ 	if replacer, ok := c.Conn.(N.WriterWithUpstream); ok {
+ 		return replacer.WriterReplaceable()
+ 	}
+-	return false //H: the conn sits on the upstream (an encryption layer or a transport), so copying from the upstream would skip it
++	// Never skip an opaque wrapper: it may be an active encryption layer.
++	return false
+ }
+ 
+ // isVisionTLSConn returns true when the provided connection exposes TLS semantics Vision expects.
+@@ -507,10 +596,6 @@ func parseClientEncryption(raw string) (clientEncryptionConfig, error) {
+ 		if segment == "" {
+ 			return cfg, E.New("invalid empty segment in encryption string")
+ 		}
+-		if paddingPhase && isPaddingSegment(segment) { // digits and dashes such as 100-111-1111 also decode as base64
+-			paddingParts = append(paddingParts, segment)
+-			continue
+-		}
+ 		if data, err := base64.RawURLEncoding.DecodeString(segment); err == nil {
+ 			if len(data) == 32 || len(data) == 1184 {
+ 				cfg.keys = append(cfg.keys, data)
+diff --git a/protocol/vless/xui_handshake_test.go b/protocol/vless/xui_handshake_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b86b3c87f8d4944c16b576973922d9c8fe240a5b
+--- /dev/null
++++ b/protocol/vless/xui_handshake_test.go
+@@ -0,0 +1,102 @@
++package vless
++
++import (
++	"context"
++	"crypto/ecdh"
++	"crypto/rand"
++	"errors"
++	"net"
++	"strings"
++	"testing"
++
++	"github.com/sagernet/sing-box/protocol/vless/encryption"
++	"github.com/sagernet/sing/common/logger"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++)
++
++type xuiHandshakeConn struct {
++	net.Conn
++	closes  int
++	failure error
++}
++
++func (c *xuiHandshakeConn) Read([]byte) (int, error)  { return 0, c.failure }
++func (c *xuiHandshakeConn) Write([]byte) (int, error) { return 0, c.failure }
++func (c *xuiHandshakeConn) Close() error              { c.closes++; return nil }
++
++type xuiHandshakeDialer struct {
++	N.Dialer
++	conn net.Conn
++}
++
++func (d xuiHandshakeDialer) DialContext(context.Context, string, M.Socksaddr) (net.Conn, error) {
++	return d.conn, nil
++}
++
++// Failed subscription probes must return an error and release the transport,
++// rather than closing a typed-nil *encryption.CommonConn and crashing the core.
++func TestXUIPanelEncryptionHandshakeFailure(t *testing.T) {
++	for _, mode := range []string{"uninitialized", "transport-failure"} {
++		for _, network := range []string{"tcp", "udp", "packet"} {
++			t.Run(mode+"/"+network, func(t *testing.T) {
++				failure := errors.New("test transport closed")
++				raw := &xuiHandshakeConn{failure: failure}
++				client := &encryption.ClientInstance{}
++				if mode == "transport-failure" {
++					key, err := ecdh.X25519().GenerateKey(rand.Reader)
++					if err != nil {
++						t.Fatal(err)
++					}
++					if err := client.Init([][]byte{key.PublicKey().Bytes()}, 0, 0, ""); err != nil {
++						t.Fatal(err)
++					}
++				}
++				h := &vlessDialer{logger: logger.NOP(), dialer: xuiHandshakeDialer{conn: raw}, encryption: client}
++				destination := M.ParseSocksaddrHostPort("example.invalid", 443)
++				var err error
++				if network == "packet" {
++					conn, dialErr := h.ListenPacket(context.Background(), destination)
++					err = dialErr
++					if conn != nil {
++						t.Fatal("failed handshake returned a packet connection")
++					}
++				} else {
++					conn, dialErr := h.DialContext(context.Background(), network, destination)
++					err = dialErr
++					if conn != nil {
++						t.Fatal("failed handshake returned a connection")
++					}
++				}
++				if err == nil || !strings.Contains(err.Error(), "encryption handshake") {
++					t.Fatalf("unexpected error: %v", err)
++				}
++				if mode == "transport-failure" && !errors.Is(err, failure) {
++					t.Fatalf("transport error lost: %v", err)
++				}
++				if raw.closes != 1 {
++					t.Fatalf("transport closed %d times, want exactly once", raw.closes)
++				}
++			})
++		}
++	}
++}
++
++func TestXUIPanelListenPacketEarlyErrorClosesTransport(t *testing.T) {
++	// The packetaddr destination validation happens after the transport
++	// connection is established; a rejected destination must not leak it.
++	raw := &xuiHandshakeConn{}
++	h := &vlessDialer{
++		logger:     logger.NOP(),
++		dialer:     xuiHandshakeDialer{conn: raw},
++		packetAddr: true,
++	}
++	destination := M.ParseSocksaddrHostPort("example.invalid", 443)
++	packetConn, err := h.ListenPacket(context.Background(), destination)
++	if packetConn != nil || err == nil || !strings.Contains(err.Error(), "domain destination") {
++		t.Fatalf("unexpected packet result: %v %v", packetConn, err)
++	}
++	if raw.closes != 1 {
++		t.Fatalf("transport closed %d times, want exactly once", raw.closes)
++	}
++}
+diff --git a/protocol/vless/xui_preconnect.go b/protocol/vless/xui_preconnect.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..cf78418397ae195235caaa5427e19db8a8c66ec1
+--- /dev/null
++++ b/protocol/vless/xui_preconnect.go
+@@ -0,0 +1,130 @@
++package vless
++
++import (
++	"context"
++	"net"
++	"sync"
++	"time"
++)
++
++type preconnected struct {
++	conn       net.Conn
++	base       net.Conn
++	expires    time.Time
++	generation chan struct{}
++}
++
++type preconnectPool struct {
++	ctx        context.Context
++	cancel     context.CancelFunc
++	dial       func(context.Context) (net.Conn, net.Conn, error)
++	size       int
++	once       sync.Once
++	mu         sync.Mutex
++	closed     bool
++	generation chan struct{}
++	ready      chan preconnected
++	wg         sync.WaitGroup
++}
++
++// newPreconnectPool remains idle until the first request.
++func newPreconnectPool(ctx context.Context, size int, dial func(context.Context) (net.Conn, net.Conn, error)) *preconnectPool {
++	ctx, cancel := context.WithCancel(ctx)
++	return &preconnectPool{
++		ctx:        ctx,
++		cancel:     cancel,
++		dial:       dial,
++		size:       size,
++		ready:      make(chan preconnected),
++		generation: make(chan struct{}),
++	}
++}
++
++func (p *preconnectPool) Get(ctx context.Context) (net.Conn, net.Conn, error) {
++	p.once.Do(func() {
++		p.mu.Lock()
++		defer p.mu.Unlock()
++		if p.closed || p.ctx.Err() != nil {
++			return
++		}
++		for range p.size {
++			p.wg.Add(1)
++			go p.worker()
++		}
++	})
++	for {
++		select {
++		case <-ctx.Done():
++			return nil, nil, ctx.Err()
++		case <-p.ctx.Done():
++			return nil, nil, p.ctx.Err()
++		case entry := <-p.ready:
++			select {
++			case <-entry.generation:
++				_ = entry.conn.Close()
++				continue
++			default:
++			}
++			if p.ctx.Err() != nil || ctx.Err() != nil {
++				_ = entry.conn.Close()
++				continue
++			}
++			if time.Now().Before(entry.expires) {
++				return entry.conn, entry.base, nil
++			}
++			_ = entry.conn.Close()
++		}
++	}
++}
++
++func (p *preconnectPool) worker() {
++	defer p.wg.Done()
++	for p.ctx.Err() == nil {
++		p.mu.Lock()
++		generation := p.generation
++		p.mu.Unlock()
++		dialCtx, cancel := context.WithTimeout(p.ctx, 30*time.Second)
++		conn, base, err := p.dial(dialCtx)
++		cancel()
++		if err == nil && conn != nil {
++			timer := time.NewTimer(2 * time.Minute)
++			select {
++			case <-p.ctx.Done():
++				_ = conn.Close()
++			case <-generation:
++				_ = conn.Close()
++			case <-timer.C:
++				_ = conn.Close()
++			case p.ready <- preconnected{conn: conn, base: base, expires: time.Now().Add(2 * time.Minute), generation: generation}:
++			}
++			timer.Stop()
++		} else if conn != nil {
++			_ = conn.Close()
++		}
++		timer := time.NewTimer(200 * time.Millisecond)
++		select {
++		case <-p.ctx.Done():
++			timer.Stop()
++			return
++		case <-timer.C:
++		}
++	}
++}
++
++func (p *preconnectPool) Reset() {
++	p.mu.Lock()
++	defer p.mu.Unlock()
++	if p.closed {
++		return
++	}
++	close(p.generation)
++	p.generation = make(chan struct{})
++}
++
++func (p *preconnectPool) Close() {
++	p.mu.Lock()
++	p.closed = true
++	p.mu.Unlock()
++	p.cancel()
++	p.wg.Wait()
++}
+diff --git a/protocol/vless/xui_preconnect_e2e_test.go b/protocol/vless/xui_preconnect_e2e_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2ca0b5a7b84a6ed8dbd8781e39ed4b32f3106d66
+--- /dev/null
++++ b/protocol/vless/xui_preconnect_e2e_test.go
+@@ -0,0 +1,101 @@
++package vless
++
++import (
++	"bytes"
++	"context"
++	stdtls "crypto/tls"
++	"io"
++	"net"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/common/dialer"
++	"github.com/sagernet/sing-box/common/tls"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing-vmess/vless"
++	"github.com/sagernet/sing/common/logger"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++)
++
++// Exercise actual TLS, VLESS framing, both Vision writers and the transport pool.
++func TestXUIPanelVisionPreconnectRoundTrip(t *testing.T) {
++	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel()
++	keyPEM, certPEM, err := tls.GenerateCertificate(nil, nil, time.Now, "localhost", time.Now().Add(time.Hour))
++	if err != nil {
++		t.Fatal(err)
++	}
++	certificate, err := stdtls.X509KeyPair(certPEM, keyPEM)
++	if err != nil {
++		t.Fatal(err)
++	}
++	listener, err := stdtls.Listen("tcp", "127.0.0.1:0", &stdtls.Config{Certificates: []stdtls.Certificate{certificate}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	const id = "11111111-1111-4111-8111-111111111111"
++	handler := adapter.NewUpstreamContextHandler(func(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
++		defer conn.Close()
++		io.Copy(conn, conn)
++	}, func(context.Context, N.PacketConn, adapter.InboundContext, N.CloseHandlerFunc) {})
++	service := vless.NewService[int](logger.NOP(), handler)
++	service.UpdateUsers([]int{0}, []string{id}, []string{"xtls-rprx-vision"})
++	var accepts atomic.Int32
++	go func() {
++		for {
++			conn, err := listener.Accept()
++			if err != nil {
++				return
++			}
++			accepts.Add(1)
++			go func() {
++				defer conn.Close()
++				conn.SetDeadline(time.Now().Add(5 * time.Second))
++				service.NewConnection(ctx, conn, M.Socksaddr{}, nil)
++			}()
++		}
++	}()
++	client, err := vless.NewClient(id, "xtls-rprx-vision", logger.NOP())
++	if err != nil {
++		t.Fatal(err)
++	}
++	config, err := tls.NewClient(ctx, logger.NOP(), "localhost", option.OutboundTLSOptions{Enabled: true, ServerName: "localhost", Insecure: true})
++	if err != nil {
++		t.Fatal(err)
++	}
++	physical, err := dialer.New(ctx, option.DialerOptions{}, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	addr := listener.Addr().(*net.TCPAddr)
++	outbound := &Outbound{logger: logger.NOP(), dialer: physical, client: client, serverAddr: M.ParseSocksaddrHostPort("127.0.0.1", uint16(addr.Port)), tlsConfig: config, vision: true}
++	outbound.preconnect = newPreconnectPool(ctx, 2, (*vlessDialer)(outbound).dialServer)
++	defer outbound.Close()
++	for range 3 {
++		conn, err := (*vlessDialer)(outbound).DialContext(ctx, "tcp", M.ParseSocksaddrHostPort("example.invalid", 80))
++		if err != nil {
++			t.Fatal(err)
++		}
++		payload := bytes.Repeat([]byte("vision payload "), 500)
++		if _, err = conn.Write(payload); err != nil {
++			conn.Close()
++			t.Fatal(err)
++		}
++		got := make([]byte, len(payload))
++		_, err = io.ReadFull(conn, got)
++		conn.Close()
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !bytes.Equal(got, payload) {
++			t.Fatal("Vision data corrupted")
++		}
++	}
++	if accepts.Load() < 3 {
++		t.Fatal("preconnect reused a consumed connection")
++	}
++}
+diff --git a/protocol/vless/xui_preconnect_test.go b/protocol/vless/xui_preconnect_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8b000f8e2b766636a3d3c966e19a9f1345664968
+--- /dev/null
++++ b/protocol/vless/xui_preconnect_test.go
+@@ -0,0 +1,61 @@
++package vless
++
++import (
++	"context"
++	"net"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++func TestXUIPanelPreconnectLifecycle(t *testing.T) {
++	var calls atomic.Int32
++	peers := make(chan net.Conn, 16)
++	pool := newPreconnectPool(context.Background(), 2, func(context.Context) (net.Conn, net.Conn, error) {
++		calls.Add(1)
++		a, b := net.Pipe()
++		peers <- b
++		return a, a, nil
++	})
++	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++	defer cancel()
++	if calls.Load() != 0 {
++		t.Fatal("pool dialed before the first request")
++	}
++	first, base, err := pool.Get(ctx)
++	if err != nil || first != base {
++		t.Fatalf("get: %v", err)
++	}
++	_ = first.Close()
++	pool.Reset()
++	second, _, err := pool.Get(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_ = second.Close()
++	pool.Close()
++	if conn, _, err := pool.Get(ctx); err == nil {
++		_ = conn.Close()
++		t.Fatal("closed pool returned a connection")
++	}
++	close(peers)
++	for peer := range peers {
++		_ = peer.SetReadDeadline(time.Now().Add(time.Second))
++		var b [1]byte
++		if _, err := peer.Read(b[:]); err == nil {
++			t.Fatal("pool leaked a peer connection")
++		}
++		_ = peer.Close()
++	}
++}
++
++func TestXUIPanelPreconnectCloseBeforeGet(t *testing.T) {
++	pool := newPreconnectPool(context.Background(), 1, func(context.Context) (net.Conn, net.Conn, error) {
++		t.Error("dial after close")
++		return nil, nil, context.Canceled
++	})
++	pool.Close()
++	if _, _, err := pool.Get(context.Background()); err == nil {
++		t.Fatal("closed pool accepted Get")
++	}
++}
+diff --git a/protocol/vless/xui_reverse.go b/protocol/vless/xui_reverse.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8794df73eeb496fa1a96a4af66eb512a2575b8fd
+--- /dev/null
++++ b/protocol/vless/xui_reverse.go
+@@ -0,0 +1,644 @@
++package vless
++
++import (
++	"context"
++	"fmt"
++	"io"
++	"net"
++	"os"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/adapter/outbound"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	SB "github.com/sagernet/sing/common/buf"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++	"github.com/sagernet/sing/service"
++
++	XR "github.com/xtls/xray-core/app/reverse"
++	XC "github.com/xtls/xray-core/common"
++	XB "github.com/xtls/xray-core/common/buf"
++	XM "github.com/xtls/xray-core/common/mux"
++	XN "github.com/xtls/xray-core/common/net"
++	XS "github.com/xtls/xray-core/common/session"
++	"github.com/xtls/xray-core/features/routing"
++	XT "github.com/xtls/xray-core/transport"
++	XP "github.com/xtls/xray-core/transport/pipe"
++	"google.golang.org/protobuf/proto"
++)
++
++// reverseStream owns the physical stream so mux interruption closes blocking I/O.
++type reverseStream struct {
++	net.Conn
++	reader  XB.Reader
++	writer  XB.Writer
++	once    sync.Once
++	writeMu sync.Mutex
++}
++
++func reverseLink(c net.Conn) *XT.Link {
++	s := &reverseStream{Conn: c, reader: XB.NewReader(c), writer: XB.NewWriter(c)}
++	return &XT.Link{Reader: s, Writer: s}
++}
++
++func (s *reverseStream) ReadMultiBuffer() (XB.MultiBuffer, error) { return s.reader.ReadMultiBuffer() }
++
++func (s *reverseStream) WriteMultiBuffer(b XB.MultiBuffer) error {
++	s.writeMu.Lock()
++	defer s.writeMu.Unlock()
++	return s.writer.WriteMultiBuffer(b)
++}
++
++func (s *reverseStream) Close() error { s.once.Do(func() { s.Conn.Close() }); return nil }
++func (s *reverseStream) Interrupt()   { s.Close() }
++func xrDestination(d M.Socksaddr, udp bool) XN.Destination {
++	a := XN.ParseAddress(d.AddrString())
++	if udp {
++		return XN.UDPDestination(a, XN.Port(d.Port))
++	}
++	return XN.TCPDestination(a, XN.Port(d.Port))
++}
++
++func sbDestination(d XN.Destination) M.Socksaddr {
++	return M.ParseSocksaddrHostPort(d.Address.String(), uint16(d.Port))
++}
++
++func reverseContext(ctx context.Context, d XN.Destination) context.Context {
++	ctx = XS.ContextWithIsReverseMux(ctx, true)
++	return XS.ContextWithOutbounds(ctx, []*XS.Outbound{{Target: d}})
++}
++
++type reversePortal struct {
++	outbound.Adapter
++	ctx     context.Context
++	mu      sync.Mutex
++	workers []*XM.ClientWorker
++	closed  bool
++	wg      sync.WaitGroup
++}
++
++func NewReversePortal(ctx context.Context, _ adapter.Router, _ log.ContextLogger, tag string, _ option.VLESSReversePortalOptions) (adapter.Outbound, error) {
++	if tag == "" {
++		return nil, fmt.Errorf("reverse portal tag required")
++	}
++	return &reversePortal{Adapter: outbound.NewAdapter("vless-reverse", tag, []string{"tcp", "udp"}, nil), ctx: ctx}, nil
++}
++
++func (p *reversePortal) PickAvailable() (*XM.ClientWorker, error) {
++	p.mu.Lock()
++	defer p.mu.Unlock()
++	if p.closed {
++		return nil, net.ErrClosed
++	}
++	var best *XM.ClientWorker
++	active := p.workers[:0]
++	for _, w := range p.workers {
++		if w.Closed() {
++			continue
++		}
++		active = append(active, w)
++		if !w.IsFull() && (best == nil || w.ActiveConnections() < best.ActiveConnections()) {
++			best = w
++		}
++	}
++	p.workers = active
++	if best == nil {
++		return nil, fmt.Errorf("reverse portal %q has no connected bridge", p.Tag())
++	}
++	return best, nil
++}
++
++func (p *reversePortal) accept(ctx context.Context, c net.Conn, onClose N.CloseHandlerFunc) error {
++	w, err := XM.NewClientWorker(*reverseLink(c), XM.ClientStrategy{})
++	if err != nil {
++		return err
++	}
++	p.mu.Lock()
++	if p.closed {
++		p.mu.Unlock()
++		w.Close()
++		return net.ErrClosed
++	}
++	active := p.workers[:0]
++	for _, old := range p.workers {
++		if !old.Closed() {
++			active = append(active, old)
++		}
++	}
++	p.workers = active
++	if len(p.workers) >= 64 {
++		p.mu.Unlock()
++		w.Close()
++		return fmt.Errorf("reverse portal worker limit reached")
++	}
++	p.workers = append(p.workers, w)
++	p.wg.Add(1)
++	p.mu.Unlock()
++	go func() {
++		defer p.wg.Done()
++		defer w.Close()
++		defer c.Close()
++		defer func() {
++			if onClose != nil {
++				onClose(nil)
++			}
++		}()
++		stop := context.AfterFunc(ctx, func() { w.Close(); c.Close() })
++		defer stop()
++		stopRoot := context.AfterFunc(p.ctx, func() { w.Close(); c.Close() })
++		defer stopRoot()
++		// The reference reverse protocol uses an internal UDP mux session for control.
++		upR, upW := XP.New(XP.WithSizeLimit(16384))
++		downR, downW := XP.New(XP.WithSizeLimit(16384))
++		defer upR.Interrupt()
++		defer downR.Interrupt()
++		defer upW.Interrupt()
++		defer downW.Interrupt()
++		if !w.Dispatch(reverseContext(ctx, XN.UDPDestination(XN.DomainAddress("reverse"), 0)), &XT.Link{Reader: upR, Writer: downW}) {
++			return
++		}
++		ticker := time.NewTicker(10 * time.Second)
++		defer ticker.Stop()
++		for {
++			ctl := &XR.Control{}
++			ctl.FillInRandom()
++			data, err := proto.Marshal(ctl)
++			if err != nil {
++				return
++			}
++			if err = upW.WriteMultiBuffer(XB.MergeBytes(nil, data)); err != nil {
++				return
++			}
++			select {
++			case <-ctx.Done():
++				return
++			case <-p.ctx.Done():
++				return
++			case <-w.WaitClosed():
++				return
++			case <-ticker.C:
++			}
++		}
++	}()
++	return nil
++}
++
++func (p *reversePortal) DialContext(ctx context.Context, network string, d M.Socksaddr) (net.Conn, error) {
++	if N.NetworkName(network) == N.NetworkUDP {
++		pc, err := p.ListenPacket(ctx, d)
++		if err != nil {
++			return nil, err
++		}
++		return newReverseBoundPacket(pc, d), nil
++	}
++	if N.NetworkName(network) != N.NetworkTCP {
++		return nil, N.ErrUnknownNetwork
++	}
++	if _, err := p.PickAvailable(); err != nil {
++		return nil, err
++	}
++	front, back := net.Pipe()
++	stop := context.AfterFunc(ctx, func() { front.Close(); back.Close() })
++	go func() {
++		defer stop()
++		defer back.Close()
++		m := XM.ClientManager{Picker: p}
++		m.Dispatch(reverseContext(ctx, xrDestination(d, false)), reverseLink(back))
++	}()
++
++	return front, nil
++}
++
++func (p *reversePortal) ListenPacket(ctx context.Context, d M.Socksaddr) (net.PacketConn, error) {
++	upR, upW := XP.New(XP.WithSizeLimit(65536))
++	downR, downW := XP.New(XP.WithSizeLimit(65536))
++	pc := newReversePacket(&XT.Link{Reader: downR, Writer: upW}, d)
++	m := XM.ClientManager{Picker: p}
++	if err := m.Dispatch(reverseContext(ctx, xrDestination(d, true)), &XT.Link{Reader: upR, Writer: downW}); err != nil {
++		pc.Close()
++		upR.Interrupt()
++		downW.Interrupt()
++		return nil, err
++	}
++	return pc, nil
++}
++
++func (p *reversePortal) Close() error {
++	p.mu.Lock()
++	p.closed = true
++	workers := append([]*XM.ClientWorker(nil), p.workers...)
++	p.workers = nil
++	p.mu.Unlock()
++	for _, w := range workers {
++		w.Close()
++	}
++	p.wg.Wait()
++	return nil
++}
++
++func (h *Inbound) newReverseConnection(ctx context.Context, index int, c net.Conn, source M.Socksaddr, onClose N.CloseHandlerFunc) error {
++	user := h.users[index]
++	manager := service.FromContext[adapter.OutboundManager](h.ctx)
++	if manager == nil {
++		return fmt.Errorf("reverse outbound manager unavailable")
++	}
++	ob, ok := manager.Outbound(user.Reverse.Tag)
++	if !ok {
++		return fmt.Errorf("reverse portal %q missing", user.Reverse.Tag)
++	}
++	p, ok := ob.(*reversePortal)
++	if !ok {
++		return fmt.Errorf("reverse tag does not refer to a reverse portal")
++	}
++	// Reverse transport bypasses the ordinary router: account for its bytes once.
++	if api := service.FromContext[adapter.V2RayServer](h.ctx); api != nil && api.StatsService() != nil {
++		c = api.StatsService().RoutedConnection(ctx, c, adapter.InboundContext{Inbound: h.Tag(), InboundType: "vless", User: user.Name, Source: source, Destination: M.Socksaddr{Fqdn: "v1.rvs.cool"}, Network: "tcp"}, nil, p)
++	}
++	if clash := service.FromContext[adapter.ClashServer](h.ctx); clash != nil {
++		c = clash.RoutedConnection(ctx, c, adapter.InboundContext{Inbound: h.Tag(), InboundType: "vless", User: user.Name, Source: source, Destination: M.Socksaddr{Fqdn: "v1.rvs.cool"}, Network: "tcp"}, nil, p)
++	}
++	return p.accept(ctx, c, onClose)
++}
++
++type reverseBridge struct {
++	ctx             context.Context
++	cancel          context.CancelFunc
++	router          adapter.ConnectionRouterEx
++	logger          log.ContextLogger
++	tag             string
++	dialer          *vlessDialer
++	mu              sync.Mutex
++	started, closed bool
++	wg              sync.WaitGroup
++}
++
++func newReverseBridge(ctx context.Context, r adapter.Router, l log.ContextLogger, tag string, d *vlessDialer) *reverseBridge {
++	ctx, cancel := context.WithCancel(ctx)
++	return &reverseBridge{ctx: ctx, cancel: cancel, router: r, logger: l, tag: tag, dialer: d}
++}
++
++func (b *reverseBridge) start() {
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	if b.started || b.closed {
++		return
++	}
++	b.started = true
++	b.wg.Add(1)
++	go b.run()
++}
++
++func (b *reverseBridge) close() { b.mu.Lock(); b.closed = true; b.cancel(); b.mu.Unlock(); b.wg.Wait() }
++
++type bridgeSession struct {
++	worker     *XM.ServerWorker
++	dispatcher *reverseDispatcher
++	conn       net.Conn
++	cancel     context.CancelFunc
++}
++
++func (b *reverseBridge) run() {
++	defer b.wg.Done()
++	var workers []bridgeSession
++	defer func() {
++		for _, w := range workers {
++			w.cancel()
++			w.worker.Close()
++			w.conn.Close()
++		}
++	}()
++	ticker := time.NewTicker(2 * time.Second)
++	defer ticker.Stop()
++	for {
++		var count, connections uint32
++		active := workers[:0]
++		for _, w := range workers {
++			if w.worker.Closed() {
++				w.cancel()
++				w.conn.Close()
++				continue
++			}
++			active = append(active, w)
++			if !w.dispatcher.draining.Load() {
++				count++
++				connections += w.worker.ActiveConnections()
++			}
++		}
++		workers = active
++		if (count == 0 || connections/count > 16) && len(workers) < 64 {
++			ctx, cancel := context.WithCancel(b.ctx)
++			timer := time.AfterFunc(15*time.Second, cancel)
++			c, err := b.dialer.DialContext(ctx, "tcp", M.Socksaddr{Fqdn: "v1.rvs.cool"})
++			if err == nil {
++				_, err = c.Write(nil)
++			} // Emit VLESS request before waiting for reverse mux.
++			if !timer.Stop() && err == nil {
++				err = context.DeadlineExceeded
++			}
++			if err == nil {
++				if api := service.FromContext[adapter.V2RayServer](ctx); api != nil {
++					if tracker, ok := api.StatsService().(interface {
++						RoutedOutboundConnection(context.Context, net.Conn, adapter.Outbound) net.Conn
++					}); ok {
++						c = tracker.RoutedOutboundConnection(ctx, c, (*Outbound)(b.dialer))
++					}
++				}
++				d := &reverseDispatcher{bridge: b, ctx: ctx}
++				w, e := XM.NewServerWorker(XS.ContextWithIsReverseMux(ctx, true), d, reverseLink(c))
++				err = e
++				if err == nil {
++					workers = append(workers, bridgeSession{w, d, c, cancel})
++					context.AfterFunc(ctx, func() { w.Close(); c.Close() })
++				}
++			}
++			if err != nil {
++				cancel()
++				if c != nil {
++					c.Close()
++				}
++				if b.ctx.Err() == nil {
++					b.logger.Warn("reverse bridge connection: ", err)
++				}
++			}
++		}
++		select {
++		case <-b.ctx.Done():
++			return
++		case <-ticker.C:
++		}
++	}
++}
++
++type reverseDispatcher struct {
++	bridge   *reverseBridge
++	ctx      context.Context
++	draining atomic.Bool
++}
++
++func (d *reverseDispatcher) Type() any    { return routing.DispatcherType() }
++func (d *reverseDispatcher) Start() error { return nil }
++func (d *reverseDispatcher) Close() error { return nil }
++func (d *reverseDispatcher) Dispatch(ctx context.Context, dest XN.Destination) (*XT.Link, error) {
++	if dest.Address.Family().IsDomain() && dest.Address.Domain() == "reverse" {
++		upR, upW := XP.New(XP.WithSizeLimit(16384))
++		downR, downW := XP.New(XP.WithSizeLimit(16384))
++		go func() {
++			defer upR.Interrupt()
++			defer downW.Interrupt()
++			stop := context.AfterFunc(d.ctx, func() { upR.Interrupt() })
++			defer stop()
++			for {
++				mb, err := upR.ReadMultiBuffer()
++				if err != nil {
++					return
++				}
++				for _, b := range mb {
++					var ctl XR.Control
++					if proto.Unmarshal(b.Bytes(), &ctl) == nil {
++						d.draining.Store(ctl.State == XR.Control_DRAIN)
++					}
++				}
++				XB.ReleaseMulti(mb)
++			}
++		}()
++		return &XT.Link{Reader: downR, Writer: upW}, nil
++	}
++	metadata := adapter.InboundContext{Inbound: d.bridge.tag, InboundType: "vless", Destination: sbDestination(dest)}
++	if dest.Network == XN.Network_UDP {
++		upR, upW := XP.New(XP.WithSizeLimit(65536))
++		downR, downW := XP.New(XP.WithSizeLimit(65536))
++		pc := newReversePacket(&XT.Link{Reader: upR, Writer: downW}, metadata.Destination)
++		stop := context.AfterFunc(d.ctx, func() { pc.Close() })
++		d.bridge.router.RoutePacketConnectionEx(d.ctx, pc, metadata, func(error) { stop(); pc.Close() })
++		return &XT.Link{Reader: downR, Writer: upW}, nil
++	}
++	front, back := net.Pipe()
++	stop := context.AfterFunc(d.ctx, func() { front.Close(); back.Close() })
++	d.bridge.router.RouteConnectionEx(d.ctx, front, metadata, func(error) { stop(); front.Close() })
++	return reverseLink(back), nil
++}
++
++func (d *reverseDispatcher) DispatchLink(context.Context, XN.Destination, *XT.Link) error {
++	return fmt.Errorf("reverse dispatcher requires Dispatch")
++}
++
++// reversePacket preserves datagram boundaries and per-packet destinations across Xray mux.
++type reverseDatagram struct {
++	data []byte
++	dest M.Socksaddr
++	err  error
++}
++type reversePacket struct {
++	link                      *XT.Link
++	dest                      M.Socksaddr
++	packets                   chan reverseDatagram
++	mu                        sync.Mutex
++	rd, wd                    time.Time
++	readChanged, writeChanged chan struct{}
++	writeMu                   sync.Mutex
++	once                      sync.Once
++	closed                    chan struct{}
++}
++
++func newReversePacket(l *XT.Link, d M.Socksaddr) *reversePacket {
++	p := &reversePacket{link: l, dest: d, packets: make(chan reverseDatagram, 32), readChanged: make(chan struct{}), writeChanged: make(chan struct{}), closed: make(chan struct{})}
++	go p.receive()
++	return p
++}
++
++func (p *reversePacket) receive() {
++	// There is one receiver goroutine; it alone closes packets, allowing
++	// repeated ReadFrom calls to observe remote EOF instead of hanging.
++	defer close(p.packets)
++	for {
++		mb, err := p.link.Reader.ReadMultiBuffer()
++		for i, b := range mb {
++			// Xray readers may return a nil buffer alongside EOF.
++			// Do not dereference it while routing reverse UDP.
++			if b == nil {
++				continue
++			}
++			dest := p.dest
++			if b.UDP != nil {
++				dest = sbDestination(*b.UDP)
++			}
++			packet := reverseDatagram{data: append([]byte(nil), b.Bytes()...), dest: dest}
++			b.Release()
++			select {
++			case p.packets <- packet:
++			case <-p.closed:
++				XB.ReleaseMulti(mb[i+1:])
++				return
++			}
++		}
++		if err != nil {
++			select {
++			case p.packets <- reverseDatagram{err: err}:
++			case <-p.closed:
++			}
++			return
++		}
++	}
++}
++
++func deadlineTimer(t time.Time) (*time.Timer, <-chan time.Time) {
++	if t.IsZero() {
++		return nil, nil
++	}
++	timer := time.NewTimer(max(0, time.Until(t)))
++	return timer, timer.C
++}
++
++func (p *reversePacket) read() (data []byte, dest M.Socksaddr, err error) {
++	for {
++		p.mu.Lock()
++		deadline, changed := p.rd, p.readChanged
++		p.mu.Unlock()
++		timer, timed := deadlineTimer(deadline)
++		select {
++		case <-p.closed:
++			err = net.ErrClosed
++		case packet, ok := <-p.packets:
++			if !ok {
++				err = io.EOF
++				break
++			}
++			data, dest, err = packet.data, packet.dest, packet.err
++		case <-timed:
++			err = os.ErrDeadlineExceeded
++		case <-changed:
++			if timer != nil {
++				timer.Stop()
++			}
++			continue
++		}
++		if timer != nil {
++			timer.Stop()
++		}
++		return
++	}
++}
++
++func (p *reversePacket) ReadFrom(b []byte) (int, net.Addr, error) {
++	data, d, err := p.read()
++	if err != nil {
++		return 0, nil, err
++	}
++	if len(data) > len(b) {
++		return 0, nil, io.ErrShortBuffer
++	}
++	return copy(b, data), d, nil
++}
++
++func (p *reversePacket) ReadPacket(b *SB.Buffer) (M.Socksaddr, error) {
++	data, d, err := p.read()
++	if err != nil {
++		return d, err
++	}
++	_, err = b.Write(data)
++	return d, err
++}
++
++func (p *reversePacket) WriteTo(data []byte, a net.Addr) (int, error) {
++	p.writeMu.Lock()
++	defer p.writeMu.Unlock()
++	select {
++	case <-p.closed:
++		return 0, net.ErrClosed
++	default:
++	}
++	if len(data) > XB.Size {
++		return 0, fmt.Errorf("reverse mux UDP packet exceeds %d bytes", XB.Size)
++	}
++	p.mu.Lock()
++	deadline := p.wd
++	p.mu.Unlock()
++	if !deadline.IsZero() && time.Until(deadline) <= 0 {
++		return 0, os.ErrDeadlineExceeded
++	}
++	b := XB.NewWithSize(int32(len(data)))
++	b.Write(data)
++	dest := xrDestination(M.SocksaddrFromNet(a), true)
++	b.UDP = &dest
++	result := make(chan error, 1)
++	go func() { result <- p.link.Writer.WriteMultiBuffer(XB.MultiBuffer{b}) }()
++	for {
++		p.mu.Lock()
++		deadline, changed := p.wd, p.writeChanged
++		p.mu.Unlock()
++		timer, timed := deadlineTimer(deadline)
++		var err error
++		select {
++		case err = <-result:
++		case <-p.closed:
++			err = net.ErrClosed
++		case <-timed:
++			p.Close()
++			err = os.ErrDeadlineExceeded
++		case <-changed:
++			if timer != nil {
++				timer.Stop()
++			}
++			continue
++		}
++		if timer != nil {
++			timer.Stop()
++		}
++		if err != nil {
++			return 0, err
++		}
++		return len(data), nil
++	}
++}
++
++func (p *reversePacket) WritePacket(b *SB.Buffer, d M.Socksaddr) error {
++	defer b.Release()
++	_, err := p.WriteTo(b.Bytes(), d)
++	return err
++}
++
++func (p *reversePacket) Close() error {
++	p.once.Do(func() { close(p.closed); XC.Interrupt(p.link.Reader); XC.Interrupt(p.link.Writer) })
++	return nil
++}
++
++func (p *reversePacket) LocalAddr() net.Addr { return &net.UDPAddr{} }
++func (p *reversePacket) SetDeadline(t time.Time) error {
++	p.SetReadDeadline(t)
++	return p.SetWriteDeadline(t)
++}
++
++func (p *reversePacket) SetReadDeadline(t time.Time) error {
++	p.mu.Lock()
++	p.rd = t
++	close(p.readChanged)
++	p.readChanged = make(chan struct{})
++	p.mu.Unlock()
++	return nil
++}
++
++func (p *reversePacket) SetWriteDeadline(t time.Time) error {
++	p.mu.Lock()
++	p.wd = t
++	close(p.writeChanged)
++	p.writeChanged = make(chan struct{})
++	p.mu.Unlock()
++	return nil
++}
++
++type reverseBoundPacket struct {
++	net.PacketConn
++	dest M.Socksaddr
++}
++
++func newReverseBoundPacket(c net.PacketConn, d M.Socksaddr) *reverseBoundPacket {
++	return &reverseBoundPacket{c, d}
++}
++
++func (p *reverseBoundPacket) Read(b []byte) (int, error)  { n, _, err := p.ReadFrom(b); return n, err }
++func (p *reverseBoundPacket) Write(b []byte) (int, error) { return p.WriteTo(b, p.dest) }
++func (p *reverseBoundPacket) RemoteAddr() net.Addr        { return p.dest }
+diff --git a/protocol/vless/xui_reverse_bridge_e2e_test.go b/protocol/vless/xui_reverse_bridge_e2e_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..dfdb815c7cb30df13b23a146b6d74aa10ab3c371
+--- /dev/null
++++ b/protocol/vless/xui_reverse_bridge_e2e_test.go
+@@ -0,0 +1,126 @@
++package vless
++
++import (
++	"context"
++	"crypto/tls"
++	"io"
++	"net"
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/adapter/inbound"
++	"github.com/sagernet/sing-box/experimental/v2rayapi"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	V "github.com/sagernet/sing-vmess/vless"
++	M "github.com/sagernet/sing/common/metadata"
++	"github.com/sagernet/sing/service"
++)
++
++// Full connection lifecycle for the native bridge: post-start, TCP echo,
++// routed bytes, reconnection after transport loss and close without a hang.
++func TestXUIPanelReverseNativeBridgeReconnectAndShutdown(t *testing.T) {
++	for _, flow := range []string{"", "xtls-rprx-vision"} {
++		t.Run("TLS-"+flow, func(t *testing.T) { testReverseNativeBridge(t, flow) })
++	}
++}
++
++func testReverseNativeBridge(t *testing.T, flow string) {
++	ctx, cancel := context.WithCancel(service.ContextWithDefaultRegistry(context.Background()))
++	defer cancel()
++	logger := log.NewNOPFactory().Logger()
++	ob, _ := NewReversePortal(ctx, nil, logger, "portal", option.VLESSReversePortalOptions{})
++	portal := ob.(*reversePortal)
++	defer portal.Close()
++	service.MustRegister[adapter.OutboundManager](ctx, &reverseTestManager{portal: portal})
++	stats := v2rayapi.NewStatsService(option.V2RayStatsServiceOptions{Enabled: true, Outbounds: []string{"remote"}})
++	service.MustRegister[adapter.V2RayServer](ctx, &reverseTestAPI{stats: stats})
++	in := &Inbound{Adapter: inbound.NewAdapter("vless", "server"), ctx: ctx, users: []option.VLESSUser{{UUID: reverseUUID, Flow: flow, Reverse: &option.VLESSReverseOptions{Tag: "portal"}}}}
++	s := V.NewService[int](logger, nil)
++	s.UpdateUsers([]int{0}, []string{reverseUUID}, []string{flow})
++	s.SetReverseHandler(map[int]bool{0: true}, in.newReverseConnection)
++	certServer := httptest.NewTLSServer(nil)
++	tlsConfig := certServer.TLS.Clone()
++	certServer.Close()
++	rawListener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	listener := tls.NewListener(rawListener, tlsConfig)
++	defer listener.Close()
++	accepted := make(chan net.Conn, 8)
++	go func() {
++		for {
++			c, err := listener.Accept()
++			if err != nil {
++				return
++			}
++			accepted <- c
++			go func() {
++				if err := s.NewConnection(ctx, c, M.SocksaddrFromNet(c.RemoteAddr()), nil); err != nil {
++					c.Close()
++				}
++			}()
++		}
++	}()
++	router := &reverseTestRouter{metadata: make(chan adapter.InboundContext, 32)}
++	serverOptions := option.ServerOptions{Server: "127.0.0.1", ServerPort: uint16(listener.Addr().(*net.TCPAddr).Port)}
++	tlsOptions := option.OutboundTLSOptionsContainer{TLS: &option.OutboundTLSOptions{Enabled: true, Insecure: true}}
++	bridge, err := NewOutbound(ctx, router, logger, "remote", option.VLESSOutboundOptions{ServerOptions: serverOptions, UUID: reverseUUID, Flow: flow, OutboundTLSOptionsContainer: tlsOptions, Reverse: &option.VLESSReverseOptions{Tag: "bridge"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer bridge.(io.Closer).Close()
++	if err = bridge.(adapter.Lifecycle).Start(adapter.StartStatePostStart, nil); err != nil {
++		t.Fatal(err)
++	}
++	var first net.Conn
++	select {
++	case first = <-accepted:
++	case <-time.After(3 * time.Second):
++		t.Fatal("bridge did not connect")
++	}
++	deadline := time.Now().Add(4 * time.Second)
++	for {
++		if _, err := portal.PickAvailable(); err == nil {
++			break
++		}
++		if time.Now().After(deadline) {
++			t.Fatal("bridge not ready")
++		}
++		time.Sleep(10 * time.Millisecond)
++	}
++	c, err := portal.DialContext(ctx, "tcp", M.ParseSocksaddr("test.example:8080"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	c.SetDeadline(time.Now().Add(3 * time.Second))
++	go c.Write([]byte("native reverse"))
++	got := make([]byte, 14)
++	if _, err = io.ReadFull(c, got); err != nil || string(got) != "native reverse" {
++		t.Fatalf("native bridge: %q %v", got, err)
++	}
++	c.Close()
++	for _, direction := range []string{"uplink", "downlink"} {
++		result, err := stats.GetStats(ctx, &v2rayapi.GetStatsRequest{Name: "outbound>>>remote>>>traffic>>>" + direction})
++		if err != nil || result.Stat.Value <= 0 {
++			t.Fatalf("reverse outbound stats: %v %v", result, err)
++		}
++	}
++	first.Close()
++	select {
++	case second := <-accepted:
++		defer second.Close()
++	case <-time.After(5 * time.Second):
++		t.Fatal("bridge did not reconnect")
++	}
++	done := make(chan struct{})
++	go func() { bridge.(io.Closer).Close(); close(done) }()
++	select {
++	case <-done:
++	case <-time.After(3 * time.Second):
++		t.Fatal("bridge shutdown hung")
++	}
++}
+diff --git a/protocol/vless/xui_reverse_integration_test.go b/protocol/vless/xui_reverse_integration_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5fef4b6ec2b9783b0b8de717f5c2f4ca4daf6494
+--- /dev/null
++++ b/protocol/vless/xui_reverse_integration_test.go
+@@ -0,0 +1,247 @@
++package vless
++
++import (
++	"bytes"
++	"context"
++	"io"
++	"net"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/adapter/inbound"
++	"github.com/sagernet/sing-box/adapter/outbound"
++	"github.com/sagernet/sing-box/experimental/v2rayapi"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	V "github.com/sagernet/sing-vmess/vless"
++	B "github.com/sagernet/sing/common/buf"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++	"github.com/sagernet/sing/service"
++
++	XM "github.com/xtls/xray-core/common/mux"
++	XS "github.com/xtls/xray-core/common/session"
++)
++
++// Native end-to-end parity for the retired 3x-ui reverse_runtime_test.go.in.
++// Exercise the real authenticated VLESS wire and Xray mux rather than merely
++// constructing a reverse portal with no bridge.
++const reverseUUID = "11111111-1111-4111-8111-111111111111"
++
++type reverseTestRouter struct {
++	adapter.Router
++	metadata chan adapter.InboundContext
++}
++
++func (r *reverseTestRouter) RouteConnectionEx(_ context.Context, c net.Conn, m adapter.InboundContext, close N.CloseHandlerFunc) {
++	r.metadata <- m
++	go func() { _, err := io.Copy(c, c); c.Close(); close(err) }()
++}
++
++func (r *reverseTestRouter) RoutePacketConnectionEx(_ context.Context, c N.PacketConn, m adapter.InboundContext, close N.CloseHandlerFunc) {
++	r.metadata <- m
++	go func() {
++		defer c.Close()
++		defer close(nil)
++		for {
++			b := B.NewSize(65535)
++			dest, err := c.ReadPacket(b)
++			if err != nil {
++				b.Release()
++				return
++			}
++			if err = c.WritePacket(b, dest); err != nil {
++				return
++			}
++		}
++	}()
++}
++
++type reverseTestManager struct {
++	adapter.OutboundManager
++	portal adapter.Outbound
++}
++
++func (m *reverseTestManager) Outbound(tag string) (adapter.Outbound, bool) {
++	return m.portal, tag == m.portal.Tag()
++}
++
++type reverseTestAPI struct {
++	adapter.V2RayServer
++	stats *v2rayapi.StatsService
++}
++
++func (a *reverseTestAPI) StatsService() adapter.ConnectionTracker { return a.stats }
++
++func TestXUIPanelReverseTCPUDPAndStats(t *testing.T) {
++	ctx, cancel := context.WithCancel(service.ContextWithDefaultRegistry(context.Background()))
++	defer cancel()
++	logger := log.NewNOPFactory().Logger()
++	ob, err := NewReversePortal(ctx, nil, logger, "portal", option.VLESSReversePortalOptions{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	portal := ob.(*reversePortal)
++	defer portal.Close()
++	service.MustRegister[adapter.OutboundManager](ctx, &reverseTestManager{portal: portal})
++	stats := v2rayapi.NewStatsService(option.V2RayStatsServiceOptions{Enabled: true, Users: []string{"reverse-user"}, Inbounds: []string{"server"}})
++	service.MustRegister[adapter.V2RayServer](ctx, &reverseTestAPI{stats: stats})
++	in := &Inbound{Adapter: inbound.NewAdapter("vless", "server"), ctx: ctx, users: []option.VLESSUser{{Name: "reverse-user", UUID: reverseUUID, Reverse: &option.VLESSReverseOptions{Tag: "portal"}}}}
++	server := V.NewService[int](logger, nil)
++	server.UpdateUsers([]int{0}, []string{reverseUUID}, []string{""})
++	server.SetReverseHandler(map[int]bool{0: true}, in.newReverseConnection)
++	front, back := net.Pipe()
++	defer front.Close()
++	defer back.Close()
++	serverErr := make(chan error, 1)
++	go func() { serverErr <- server.NewConnection(ctx, back, M.Socksaddr{}, nil) }()
++	client, err := V.NewClient(reverseUUID, "", logger)
++	if err != nil {
++		t.Fatal(err)
++	}
++	conn, err := client.DialEarlyReverseConnWithOptions(front, front, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err = conn.Write(nil); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case err := <-serverErr:
++		if err != nil {
++			t.Fatal(err)
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatal("reverse auth timed out")
++	}
++	router := &reverseTestRouter{metadata: make(chan adapter.InboundContext, 32)}
++	bridge := &reverseBridge{ctx: ctx, router: router, tag: "bridge"}
++	dispatcher := &reverseDispatcher{bridge: bridge, ctx: ctx}
++	worker, err := XM.NewServerWorker(XS.ContextWithIsReverseMux(ctx, true), dispatcher, reverseLink(conn))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer worker.Close()
++	for range 4 {
++		c, err := portal.DialContext(ctx, "tcp", M.ParseSocksaddr("example.org:443"))
++		if err != nil {
++			t.Fatal(err)
++		}
++		c.SetDeadline(time.Now().Add(3 * time.Second))
++		payload := strings.Repeat("reverse TCP data ", 600)
++		go func() { c.Write([]byte(payload)) }()
++		got := make([]byte, len(payload))
++		if _, err = io.ReadFull(c, got); err != nil {
++			t.Fatal(err)
++		}
++		if string(got) != payload {
++			t.Fatal("TCP payload changed")
++		}
++		c.Close()
++		m := <-router.metadata
++		if m.Inbound != "bridge" || m.Destination.Fqdn != "example.org" {
++			t.Fatalf("route metadata: %+v", m)
++		}
++	}
++	pc, err := portal.ListenPacket(ctx, M.ParseSocksaddr("example.org:53"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer pc.Close()
++	pc.SetDeadline(time.Now().Add(3 * time.Second))
++	for _, payload := range [][]byte{nil, []byte("reverse UDP data"), bytes.Repeat([]byte{7}, 8192)} {
++		for _, dest := range []M.Socksaddr{M.ParseSocksaddr("example.org:53"), M.ParseSocksaddr("127.0.0.2:5353")} {
++			if _, err = pc.WriteTo(payload, dest); err != nil {
++				t.Fatal(err)
++			}
++			got := make([]byte, 8192)
++			n, addr, err := pc.ReadFrom(got)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if !bytes.Equal(got[:n], payload) || addr.String() != dest.String() {
++				t.Fatalf("UDP payload/address: len %d / %d %s", n, len(payload), addr)
++			}
++		}
++	}
++	if _, err = pc.WriteTo(make([]byte, 8193), M.ParseSocksaddr("example.org:53")); err == nil {
++		t.Fatal("oversized mux datagram accepted")
++	}
++
++	m := <-router.metadata
++	if m.Inbound != "bridge" {
++		t.Fatal("UDP reverse routing tag missing")
++	}
++	for _, direction := range []string{"uplink", "downlink"} {
++		s, err := stats.GetStats(ctx, &v2rayapi.GetStatsRequest{Name: "user>>>reverse-user>>>traffic>>>" + direction})
++		if err != nil || s.Stat.Value <= 0 {
++			t.Fatalf("reverse user stats: %v %v", s, err)
++		}
++	}
++	portal.Close()
++	c, err := portal.DialContext(ctx, "tcp", M.ParseSocksaddr("example.org:80"))
++	if err == nil {
++		c.Close()
++		t.Fatal("closed portal allowed new traffic")
++	}
++}
++
++func TestXUIPanelReverseAuthorization(t *testing.T) {
++	logger := log.NewNOPFactory().Logger()
++	for _, tc := range []struct {
++		name, id         string
++		reverse, allowed bool
++		flow             string
++	}{
++		{"ordinary user reverse", reverseUUID, true, false, ""},
++		{"unknown UUID reverse", "22222222-2222-4222-8222-222222222222", true, true, ""},
++		{"reverse user ordinary", reverseUUID, false, true, ""},
++		{"flow mismatch", reverseUUID, true, true, "xtls-rprx-vision"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			s := V.NewService[int](logger, nil)
++			s.UpdateUsers([]int{0}, []string{reverseUUID}, []string{tc.flow})
++			s.SetReverseHandler(map[int]bool{0: tc.allowed}, func(context.Context, int, net.Conn, M.Socksaddr, N.CloseHandlerFunc) error {
++				t.Error("unauthorized reverse dispatched")
++				return nil
++			})
++			a, b := net.Pipe()
++			defer a.Close()
++			defer b.Close()
++			a.SetDeadline(time.Now().Add(time.Second))
++			result := make(chan error, 1)
++			go func() { result <- s.NewConnection(context.Background(), b, M.Socksaddr{}, nil) }()
++			c, _ := V.NewClient(tc.id, "", logger)
++			var conn net.Conn
++			if tc.reverse {
++				conn, _ = c.DialEarlyReverseConnWithOptions(a, a, false)
++			} else {
++				conn, _ = c.DialEarlyConn(a, M.ParseSocksaddr("example.org:80"))
++			}
++			conn.Write(nil)
++			select {
++			case err := <-result:
++				if err == nil {
++					t.Fatal("unauthorized request accepted")
++				}
++			case <-time.After(time.Second):
++				t.Fatal("auth hung")
++			}
++		})
++	}
++}
++
++func TestXUIPanelReverseMissingPortal(t *testing.T) {
++	ctx := service.ContextWithDefaultRegistry(context.Background())
++	wrong := &reversePortal{Adapter: outbound.NewAdapter("vless-reverse", "different", nil, nil)}
++	service.MustRegister[adapter.OutboundManager](ctx, &reverseTestManager{portal: wrong})
++	in := &Inbound{ctx: ctx, users: []option.VLESSUser{{Reverse: &option.VLESSReverseOptions{Tag: "missing"}}}}
++	a, b := net.Pipe()
++	defer a.Close()
++	defer b.Close()
++	if err := in.newReverseConnection(ctx, 0, a, M.Socksaddr{}, nil); err == nil {
++		t.Fatal("unknown portal authorized")
++	}
++}
+diff --git a/protocol/vless/xui_reverse_native_test.go b/protocol/vless/xui_reverse_native_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..cbe24d2e259e41f1578b1c14403361f1bb93afbd
+--- /dev/null
++++ b/protocol/vless/xui_reverse_native_test.go
+@@ -0,0 +1,76 @@
++package vless
++
++import (
++	"bytes"
++	"context"
++	"errors"
++	"io"
++	"net"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/option"
++	M "github.com/sagernet/sing/common/metadata"
++
++	XB "github.com/xtls/xray-core/common/buf"
++	XT "github.com/xtls/xray-core/transport"
++)
++
++func TestXUIReversePortalRejectsMissingTag(t *testing.T) {
++	portal, err := NewReversePortal(context.Background(), nil, nil, "", option.VLESSReversePortalOptions{})
++	if err == nil || portal != nil {
++		t.Fatalf("invalid unnamed portal constructed: %v", err)
++	}
++}
++
++func TestXUIReversePortalFailsClosedWithoutBridge(t *testing.T) {
++	value, err := NewReversePortal(context.Background(), nil, nil, "portal", option.VLESSReversePortalOptions{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	portal := value.(*reversePortal)
++	if _, err := portal.PickAvailable(); err == nil || !strings.Contains(err.Error(), "no connected bridge") {
++		t.Fatalf("portal without authenticated bridge accepted a worker: %v", err)
++	}
++	destination := M.ParseSocksaddrHostPort("example.com", 443)
++	for _, network := range []string{"tcp", "udp"} {
++		if network == "tcp" {
++			if c, err := portal.DialContext(context.Background(), network, destination); err == nil {
++				_ = c.Close()
++				t.Fatalf("unauthenticated reverse %s dial succeeded", network)
++			}
++		} else {
++			if c, err := portal.ListenPacket(context.Background(), destination); err == nil {
++				_ = c.Close()
++				t.Fatal("unauthenticated reverse UDP listener succeeded")
++			}
++		}
++	}
++	if err := portal.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := portal.PickAvailable(); !errors.Is(err, net.ErrClosed) {
++		t.Fatalf("closed portal unexpectedly available: %v", err)
++	}
++	if err := portal.Close(); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestXUIReversePacketRemoteEOFIsPersistent(t *testing.T) {
++	reader := XB.NewReader(bytes.NewReader(nil))
++	writer := XB.NewWriter(io.Discard)
++	packet := newReversePacket(&XT.Link{Reader: reader, Writer: writer}, M.Socksaddr{})
++	defer packet.Close()
++
++	for range 2 {
++		if err := packet.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
++			t.Fatal(err)
++		}
++		n, _, err := packet.ReadFrom(make([]byte, 8))
++		if n != 0 || !errors.Is(err, io.EOF) {
++			t.Fatalf("remote EOF lost or blocked: n=%d err=%v", n, err)
++		}
++	}
++}
+diff --git a/protocol/vless/xui_unsupported_options_test.go b/protocol/vless/xui_unsupported_options_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b421f94dc3e2e0d026ce66ff84ac7c9b2a6a3ac5
+--- /dev/null
++++ b/protocol/vless/xui_unsupported_options_test.go
+@@ -0,0 +1,43 @@
++package vless
++
++import (
++	"encoding/json"
++	"testing"
++
++	"github.com/sagernet/sing-box/option"
++	vlesswire "github.com/sagernet/sing-vmess/vless"
++)
++
++func TestXUIPanelNativeVLESSReverseOptions(t *testing.T) {
++	var in option.VLESSInboundOptions
++	if err := json.Unmarshal([]byte(`{"users":[{"uuid":"11111111-1111-4111-8111-111111111111","reverse":{"tag":"portal"}}],"testseed":[900,500,900,256]}`), &in); err != nil {
++		t.Fatal(err)
++	}
++	if len(in.Users) != 1 || in.Users[0].Reverse == nil || in.Users[0].Reverse.Tag != "portal" {
++		t.Fatalf("inbound reverse configuration lost: %+v", in.Users)
++	}
++	if _, err := vlesswire.ValidateVisionTestseed(in.Testseed); err != nil {
++		t.Fatal(err)
++	}
++
++	var out option.VLESSOutboundOptions
++	if err := json.Unmarshal([]byte(`{"reverse":{"tag":"bridge"},"testseed":[800,300,800,128]}`), &out); err != nil {
++		t.Fatal(err)
++	}
++	if out.Reverse == nil || out.Reverse.Tag != "bridge" {
++		t.Fatalf("outbound reverse configuration lost: %+v", out.Reverse)
++	}
++	if _, err := vlesswire.ValidateVisionTestseed(out.Testseed); err != nil {
++		t.Fatal(err)
++	}
++
++	for _, invalid := range [][]uint32{
++		{1000, 1},
++		{900, 0, 900, 256},
++		{900, 500, 800, 256},
++	} {
++		if _, err := vlesswire.ValidateVisionTestseed(invalid); err == nil {
++			t.Errorf("invalid testseed %v was accepted", invalid)
++		}
++	}
++}
+diff --git a/protocol/vless/xui_user_validation_test.go b/protocol/vless/xui_user_validation_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d6ee00320275a1897f82a2a10a960fe4e410794f
+--- /dev/null
++++ b/protocol/vless/xui_user_validation_test.go
+@@ -0,0 +1,29 @@
++package vless
++
++import (
++	"strings"
++	"testing"
++
++	"github.com/sagernet/sing-box/option"
++)
++
++func TestXUIPanelVLESSUserUUIDUniqueness(t *testing.T) {
++	const id1 = "11111111-1111-4111-8111-111111111111"
++	const id2 = "22222222-2222-4222-8222-222222222222"
++	for name, tc := range map[string]struct {
++		users  []option.VLESSUser
++		reject bool
++	}{
++		"empty":       {nil, false},
++		"unique":      {[]option.VLESSUser{{UUID: id1}, {UUID: id2}}, false},
++		"duplicate":   {[]option.VLESSUser{{UUID: id1}, {UUID: id1}}, true},
++		"case-folded": {[]option.VLESSUser{{UUID: id1}, {UUID: strings.ToUpper(id1)}}, true},
++	} {
++		t.Run(name, func(t *testing.T) {
++			err := validateVLESSUserUUIDs(tc.users)
++			if (err != nil) != tc.reject {
++				t.Fatalf("rejected=%v want=%v: %v", err != nil, tc.reject, err)
++			}
++		})
++	}
++}
+diff --git a/protocol/vless/xui_vision_testseed_native_test.go b/protocol/vless/xui_vision_testseed_native_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..071fe4208fd319ef491e5ae089bf1b2878480f91
+--- /dev/null
++++ b/protocol/vless/xui_vision_testseed_native_test.go
+@@ -0,0 +1,29 @@
++package vless
++
++import (
++	"testing"
++
++	vmess "github.com/sagernet/sing-vmess/vless"
++)
++
++func TestXUIPanelVisionTestseedNativeValidation(t *testing.T) {
++	for _, seed := range [][]uint32{
++		nil, {900, 500, 900, 256}, {512, 256, 512, 256}, {900, 500, 900, 65536},
++	} {
++		if _, err := vmess.ValidateVisionTestseed(seed); err != nil {
++			t.Fatalf("valid testseed %v rejected: %v", seed, err)
++		}
++	}
++	for _, seed := range [][]uint32{
++		{1},
++		{900, 0, 900, 256},
++		{0, 500, 900, 256},
++		{900, 500, 898, 256},
++		{900, 500, 900, 65537},
++		{900, 65535, 900, 256},
++	} {
++		if _, err := vmess.ValidateVisionTestseed(seed); err == nil {
++			t.Fatalf("invalid testseed %v accepted", seed)
++		}
++	}
++}

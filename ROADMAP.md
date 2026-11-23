@@ -7,5 +7,5 @@
 - [x] Gate upstream candidate builds behind a single patch-application preflight with conflict reports.
 - [x] Detect personal fork updates not yet included in the audited patch snapshots.
 - [ ] Rebase Core and sing-box patch stacks onto current original upstream revisions without losing features.
-- [ ] Split the large fork-baseline patches into independently verifiable functional changes.
+- [x] Split the large Core and sing-box baseline patches into ordered subsystem groups and verify unchanged source trees.
 - [ ] Add native Cronet, Android and Apple shared-library packages for GUI clients.

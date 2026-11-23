@@ -1,0 +1,100 @@
+diff --git a/common/httpclient/apple_transport_darwin_test.go b/common/httpclient/apple_transport_darwin_test.go
+index ac62592962a65972b2543fdb2e76ed974f0b62ba..a1dde81699c01744eea5c0c196c76ab412204758 100644
+--- a/common/httpclient/apple_transport_darwin_test.go
++++ b/common/httpclient/apple_transport_darwin_test.go
+@@ -248,7 +248,7 @@ func TestNewAppleSessionConfig(t *testing.T) {
+ 			options: option.HTTPClientOptions{
+ 				OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{
+ 					TLS: &option.OutboundTLSOptions{
+-						CipherSuites: option.LegacyListable[string]{"TLS_AES_128_GCM_SHA256"},
++						CipherSuites: badoption.Listable[string]{"TLS_AES_128_GCM_SHA256"},
+ 					},
+ 				},
+ 			},
+@@ -259,7 +259,7 @@ func TestNewAppleSessionConfig(t *testing.T) {
+ 			options: option.HTTPClientOptions{
+ 				OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{
+ 					TLS: &option.OutboundTLSOptions{
+-						CurvePreferences: option.LegacyListable[option.CurvePreference]{option.CurvePreference(option.X25519)},
++						CurvePreferences: badoption.Listable[option.CurvePreference]{option.CurvePreference(option.X25519)},
+ 					},
+ 				},
+ 			},
+diff --git a/common/httpclient/managed_transport.go b/common/httpclient/managed_transport.go
+index 7e2f94723ed2e1cfd378a25fa81463fcc353f9ea..7ba256a17199ad85d251f73f046f09ee2f20919b 100644
+--- a/common/httpclient/managed_transport.go
++++ b/common/httpclient/managed_transport.go
+@@ -163,14 +163,6 @@ func (t *ManagedTransport) Reset() {
+ 	t.retireEpoch(oldEpoch)
+ }
+ 
+-func (t *ManagedTransport) close() error {
+-	epoch := t.epoch.Swap(nil)
+-	if epoch != nil {
+-		return epoch.transport.Close()
+-	}
+-	return nil
+-}
+-
+ var _ adapter.HTTPTransport = (*sharedRef)(nil)
+ 
+ type sharedRef struct {
+diff --git a/common/httpclient/manager.go b/common/httpclient/manager.go
+index 820cbeabb3172f2b8d3095ea7c551df615844e68..1fb7de9884ccccb5f194747e270d8ed785590a96 100644
+--- a/common/httpclient/manager.go
++++ b/common/httpclient/manager.go
+@@ -71,26 +71,21 @@ func (m *Manager) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 			return E.Cause(err, "resolve default http client")
+ 		}
+ 		m.defaultTransport = sharedTransport
+-	}
+-	scope.Add(m.close)
+-	return nil
+-}
+-
+-func (m *Manager) DefaultTransport() adapter.HTTPTransport {
+-	m.access.Lock()
+-	defer m.access.Unlock()
+-	if m.defaultTransport == nil && m.defaultTransportFallback != nil {
++	} else if m.defaultTransportFallback != nil {
+ 		transport, err := m.defaultTransportFallback()
+ 		if err != nil {
+-			m.logger.Error(E.Cause(err, "create default http client"))
+-			return nil
++			return E.Cause(err, "create default http client")
+ 		}
+-		m.managedTransports = append(m.managedTransports, transport)
++		m.trackTransport(transport)
+ 		m.defaultTransport = &sharedManagedTransport{
+ 			managed: transport,
+ 			shared:  &sharedState{},
+ 		}
+ 	}
++	return nil
++}
++
++func (m *Manager) DefaultTransport() adapter.HTTPTransport {
+ 	if m.defaultTransport == nil {
+ 		return nil
+ 	}
+@@ -164,20 +159,6 @@ func (m *Manager) ResetNetwork() {
+ 	}
+ }
+ 
+-func (m *Manager) close() error {
+-	m.access.Lock()
+-	defer m.access.Unlock()
+-	var err error
+-	for _, transport := range m.managedTransports {
+-		err = E.Append(err, transport.close(), func(err error) error {
+-			return E.Cause(err, "close http client")
+-		})
+-	}
+-	m.managedTransports = nil
+-	m.sharedTransports = nil
+-	return err
+-}
+-
+ func (m *Manager) References() []string {
+ 	m.access.Lock()
+ 	defer m.access.Unlock()

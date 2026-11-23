@@ -1,0 +1,12 @@
+diff --git a/log/factory.go b/log/factory.go
+index 9c1921a302223aaa394295c7c2dcd84f8cbf99ad..d9d21106278e5018740709e657dfc70b47d78656 100644
+--- a/log/factory.go
++++ b/log/factory.go
+@@ -23,6 +23,7 @@ type Factory interface {
+ type ObservableFactory interface {
+ 	Factory
+ 	observable.Observable[Entry]
++	AttachPlatformWriter(writer PlatformWriter)
+ }
+ 
+ type Entry struct {

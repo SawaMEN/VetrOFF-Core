@@ -1,0 +1,70 @@
+diff --git a/experimental/boxdd/managed.go b/experimental/boxdd/managed.go
+index 608decf27f8e109edf1be477c1cd268d925af524..616a8ec8e445416b24882b40e40677ca07653939 100644
+--- a/experimental/boxdd/managed.go
++++ b/experimental/boxdd/managed.go
+@@ -91,3 +91,7 @@ func (h *managedHandler) SetSystemProxyEnabled(enabled bool) error {
+ func (h *managedHandler) TriggerNativeCrash() error {
+ 	return E.New("native crash is not supported")
+ }
++
++func (h *managedHandler) WriteDebugMessage(message string) {
++	h.daemon.logger.Debug(message)
++}
+diff --git a/experimental/boxdd/peer_linux.go b/experimental/boxdd/peer_linux.go
+index f586f321be84b5f25d5b2a8eb2070db60f8e9dad..f9e6a89a7897a36b8175639cce1fce6a58c3a5cb 100644
+--- a/experimental/boxdd/peer_linux.go
++++ b/experimental/boxdd/peer_linux.go
+@@ -61,8 +61,8 @@ func (c *linuxTransportCredentials) ServerHandshake(rawConnection net.Conn) (net
+ 	}
+ 	c.daemon.registerPeerConnection(connection)
+ 	authenticationInformation := &peerAuthInfo{
+-		CommonAuthInfo: credentials.CommonAuthInfo{SecurityLevel: credentials.PrivacyAndIntegrity},
+-		identity:       identity,
++		SecurityLevel: credentials.PrivacyAndIntegrity,
++		identity:      identity,
+ 	}
+ 	return connection, authenticationInformation, nil
+ }
+@@ -121,11 +121,11 @@ func linuxProcessStartTime(processID uint32) (uint64, error) {
+ 	if err != nil {
+ 		return 0, err
+ 	}
+-	commandEnd := bytes.LastIndexByte(content, ')')
+-	if commandEnd < 0 {
++	_, after, ok := bytes.CutLast(content, []byte{')'})
++	if !ok {
+ 		return 0, E.New("invalid process stat")
+ 	}
+-	fields := strings.Fields(string(content[commandEnd+1:]))
++	fields := strings.Fields(string(after))
+ 	if len(fields) <= 19 {
+ 		return 0, E.New("incomplete process stat")
+ 	}
+diff --git a/experimental/boxdd/peer_windows.go b/experimental/boxdd/peer_windows.go
+index 7ccaf16723f2566ebb5f9e3b7068233bebe1b4c8..50e9f0239d27945e247cb68f7094e733607057d8 100644
+--- a/experimental/boxdd/peer_windows.go
++++ b/experimental/boxdd/peer_windows.go
+@@ -250,8 +250,8 @@ func (c *windowsTransportCredentials) serverHandshake(rawConnection net.Conn) (n
+ 	keepParentProcessImage = true
+ 	c.daemon.registerPeerConnection(connection)
+ 	authenticationInformation := &peerAuthInfo{
+-		CommonAuthInfo: credentials.CommonAuthInfo{SecurityLevel: credentials.PrivacyAndIntegrity},
+-		identity:       parentIdentity,
++		SecurityLevel: credentials.PrivacyAndIntegrity, // H: Go 1.27 promoted field
++		identity:      parentIdentity,
+ 	}
+ 	return connection, authenticationInformation, nil
+ }
+diff --git a/experimental/boxdd/report.go b/experimental/boxdd/report.go
+index d73fb5baf1f3ff696bd6fcd1490e8c8b75c38138..d9786fc30c9763dcbc2502bfa3ceb200994689ca 100644
+--- a/experimental/boxdd/report.go
++++ b/experimental/boxdd/report.go
+@@ -193,7 +193,7 @@ func exportReportArchive(reportsDirectory string, name string, userID string, wi
+ 		os.Remove(filepath.Join(strippedPath, goLogFileName))
+ 		os.Remove(filepath.Join(strippedPath, nativeLogFileName))
+ 	}
+-	fileName := name + ".zip" //H: reports are not encrypted; CreateZipArchive scrubs them
++	fileName := name + ".zip" // H: reports are not encrypted; CreateZipArchive scrubs them
+ 	archivePath := filepath.Join(tempDirectory, fileName)
+ 	err = libbox.CreateZipArchive(strippedPath, archivePath, encrypt)
+ 	if err != nil {

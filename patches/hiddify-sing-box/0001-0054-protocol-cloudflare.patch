@@ -1,0 +1,158 @@
+diff --git a/protocol/cloudflare/h_icmp_router_test.go b/protocol/cloudflare/h_icmp_router_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..acfe16ed84127b5fbcef02ed17137823c39fa9da
+--- /dev/null
++++ b/protocol/cloudflare/h_icmp_router_test.go
+@@ -0,0 +1,81 @@
++//go:build with_cloudflared
++
++package cloudflare
++
++import (
++	"net/netip"
++	"testing"
++
++	"github.com/sagernet/sing-box/adapter"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-tun"
++	N "github.com/sagernet/sing/common/network"
++	"github.com/stretchr/testify/require"
++)
++
++type hPreMatchRouter struct {
++	adapter.Router
++	result   adapter.PreMatchResult
++	metadata adapter.InboundContext
++}
++
++func (r *hPreMatchRouter) PreMatch(metadata adapter.InboundContext, firstPacket []byte) adapter.PreMatchResult {
++	r.metadata = metadata
++	return r.result
++}
++
++type hPortOutbound struct {
++	adapter.Outbound
++	tun.Port
++}
++
++type hPlainOutbound struct {
++	adapter.Outbound
++}
++
++func hHandler(router adapter.Router) *icmpRouterHandler {
++	return &icmpRouterHandler{router: router, logger: log.NewNOPFactory().NewLogger("cf"), tag: "cf-in"}
++}
++
++func TestH_RouteICMPFlowMetadata(t *testing.T) {
++	router := &hPreMatchRouter{}
++	source := netip.MustParseAddr("10.0.0.1")
++	_, err := hHandler(router).RouteICMPFlow(source, netip.MustParseAddr("1.1.1.1"))
++	require.Error(t, err)
++	require.Equal(t, "cf-in", router.metadata.Inbound)
++	require.Equal(t, C.TypeCloudflared, router.metadata.InboundType)
++	require.Equal(t, N.NetworkICMP, router.metadata.Network)
++	require.Equal(t, uint8(4), router.metadata.IPVersion)
++	require.Equal(t, source, router.metadata.Source.Addr)
++	require.Equal(t, netip.MustParseAddr("1.1.1.1"), router.metadata.Destination.Addr)
++	require.Equal(t, router.metadata.Destination, router.metadata.OriginDestination)
++
++	_, err = hHandler(router).RouteICMPFlow(netip.MustParseAddr("fd00::1"), netip.MustParseAddr("2606:4700::1111"))
++	require.Error(t, err)
++	require.Equal(t, uint8(6), router.metadata.IPVersion)
++}
++
++func TestH_RouteICMPFlowActions(t *testing.T) {
++	source := netip.MustParseAddr("10.0.0.1")
++	destination := netip.MustParseAddr("8.8.8.8")
++	port := &hPortOutbound{}
++
++	result, err := hHandler(&hPreMatchRouter{result: adapter.PreMatchResult{Action: adapter.PreMatchFlow, Outbound: port}}).RouteICMPFlow(source, destination)
++	require.NoError(t, err)
++	require.Same(t, port, result)
++
++	_, err = hHandler(&hPreMatchRouter{result: adapter.PreMatchResult{Action: adapter.PreMatchFlow, Outbound: &hPlainOutbound{}}}).RouteICMPFlow(source, destination)
++	require.ErrorContains(t, err, "does not support ICMP flow routing")
++
++	_, err = hHandler(&hPreMatchRouter{result: adapter.PreMatchResult{Action: adapter.PreMatchReject}}).RouteICMPFlow(source, destination)
++	require.ErrorContains(t, err, "rejected")
++
++	_, err = hHandler(&hPreMatchRouter{result: adapter.PreMatchResult{Action: adapter.PreMatchBypass}}).RouteICMPFlow(source, destination)
++	require.ErrorContains(t, err, "bypassed")
++
++	for _, action := range []adapter.PreMatchAction{adapter.PreMatchContinue, adapter.PreMatchDrop} {
++		_, err = hHandler(&hPreMatchRouter{result: adapter.PreMatchResult{Action: action}}).RouteICMPFlow(source, destination)
++		require.ErrorContains(t, err, "no route for ICMP connection")
++	}
++}
+diff --git a/protocol/cloudflare/inbound.go b/protocol/cloudflare/inbound.go
+index 8d3d848e31ff3203f7b5bdfd756327457983819e..42cd766cccd28bae90cc15a4c5a1c5b1db06756f 100644
+--- a/protocol/cloudflare/inbound.go
++++ b/protocol/cloudflare/inbound.go
+@@ -218,44 +218,36 @@ type icmpRouterHandler struct {
+ }
+ 
+ func (h *icmpRouterHandler) RouteICMPFlow(source netip.Addr, destination netip.Addr) (tun.Port, error) {
++	var ipVersion uint8
++	if destination.Is4() {
++		ipVersion = 4
++	} else {
++		ipVersion = 6
++	}
++	destinationAddr := M.SocksaddrFrom(destination, 0)
+ 	result := h.router.PreMatch(adapter.InboundContext{
+-		Inbound:     h.tag,
+-		InboundType: C.TypeCloudflared,
+-		Network:     N.NetworkICMP,
+-		Source:      M.SocksaddrFrom(source, 0),
+-		Destination: M.SocksaddrFrom(destination, 0),
++		Inbound:           h.tag,
++		InboundType:       C.TypeCloudflared,
++		IPVersion:         ipVersion,
++		Network:           N.NetworkICMP,
++		Source:            M.SocksaddrFrom(source, 0),
++		Destination:       destinationAddr,
++		OriginDestination: destinationAddr,
+ 	}, nil)
+ 	switch result.Action {
+ 	case adapter.PreMatchFlow:
+-		flowOutbound, isFlowOutbound := result.Outbound.(adapter.FlowOutbound)
+-		if !isFlowOutbound {
+-			return nil, E.New("outbound is not a flow outbound")
+-		}
+-		if result.Destination.IsValid() && result.Destination.Addr() != destination {
+-			h.logger.Trace("drop ICMP flow from ", source, " to ", destination, ": destination override is not supported from cloudflared")
+-			return nil, E.New("destination override is not supported")
+-		}
+-		inet4Address, inet6Address := flowOutbound.PortAddresses()
+-		var portAddress netip.Addr
+-		if destination.Is4() {
+-			portAddress = inet4Address
+-		} else {
+-			portAddress = inet6Address
+-		}
+-		if !portAddress.IsValid() || !portAddress.IsUnspecified() {
+-			h.logger.Trace("drop ICMP flow from ", source, " to ", destination, ": forwarding ICMP to outbound/", result.Outbound.Type(), "[", result.Outbound.Tag(), "] is not supported from cloudflared")
+-			return nil, E.New("unsupported flow outbound")
++		port, isPort := result.Outbound.(tun.Port)
++		if !isPort {
++			return nil, E.New("outbound does not support ICMP flow routing")
+ 		}
+-		h.logger.Debug("link ICMP flow from ", source, " to ", destination, " via outbound/", result.Outbound.Type(), "[", result.Outbound.Tag(), "]")
+-		return flowOutbound, nil
++		return port, nil
+ 	case adapter.PreMatchReject:
+-		h.logger.Trace("reject ICMP flow from ", source, " to ", destination)
++		h.logger.Trace("reject ICMP connection from ", source, " to ", destination)
+ 		return nil, E.New("rejected")
+-	case adapter.PreMatchDrop:
+-		return nil, E.New("dropped")
++	case adapter.PreMatchBypass:
++		return nil, E.New("bypassed")
+ 	default:
+-		h.logger.Trace("drop ICMP flow from ", source, " to ", destination, ": no direct route")
+-		return nil, E.New("no direct route")
++		return nil, E.New("no route for ICMP connection from ", source, " to ", destination)
+ 	}
+ }
+ 

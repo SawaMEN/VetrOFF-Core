@@ -1,0 +1,504 @@
+diff --git a/transport/http/capsule.go b/transport/http/capsule.go
+index 6f4d31e9ffcd355cfed930f26bf4aa60db476266..a2121e9d606fe202b58f413b04ffdbb5d07b1822 100644
+--- a/transport/http/capsule.go
++++ b/transport/http/capsule.go
+@@ -12,7 +12,6 @@ import (
+ 	"sync"
+ 	"time"
+ 
+-	"github.com/sagernet/sing/common"
+ 	"github.com/sagernet/sing/common/buf"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	F "github.com/sagernet/sing/common/format"
+@@ -163,36 +162,6 @@ func WriteDatagramCapsule(writer io.Writer, datagram *buf.Buffer) error {
+ 	return err
+ }
+ 
+-func WriteDatagramCapsules(writer io.Writer, datagrams []*buf.Buffer) error {
+-	if len(datagrams) == 1 {
+-		return WriteDatagramCapsule(writer, datagrams[0])
+-	}
+-	defer buf.ReleaseMulti(datagrams)
+-	var totalLength int
+-	for _, datagram := range datagrams {
+-		totalLength += 1 + VarintLen(uint64(datagram.Len())) + datagram.Len()
+-	}
+-	capsules := buf.NewSize(min(totalLength, buf.MaxPooledBufferSize))
+-	defer capsules.Release()
+-	for _, datagram := range datagrams {
+-		length := uint64(datagram.Len())
+-		headerLength := 1 + VarintLen(length)
+-		if headerLength+datagram.Len() > capsules.FreeLen() {
+-			_, err := writer.Write(capsules.Bytes())
+-			if err != nil {
+-				return err
+-			}
+-			capsules.Reset()
+-		}
+-		header := capsules.Extend(headerLength)
+-		header[0] = CapsuleTypeDatagram
+-		PutVarint(header[1:], length)
+-		common.Must1(capsules.Write(datagram.Bytes()))
+-	}
+-	_, err := writer.Write(capsules.Bytes())
+-	return err
+-}
+-
+ type capsuleConn struct {
+ 	reader      *std_bufio.Reader
+ 	writer      io.Writer
+diff --git a/transport/http/client.go b/transport/http/client.go
+index 42c75e32d91f5ae41990212a9c3f54fd53db4d93..8bb366c63b3546951184e1948b02acc48a4bdb4d 100644
+--- a/transport/http/client.go
++++ b/transport/http/client.go
+@@ -188,10 +188,6 @@ func ResolveVersion(version int, path string, host string) int {
+ 	return 2
+ }
+ 
+-func (c *Client) MultiplexEnabled() bool {
+-	return c.http3Available() || (c.tlsDialer != nil && !c.http2Unsupported.Load())
+-}
+-
+ func (c *Client) http3Available() bool {
+ 	if c.http3 == nil {
+ 		return false
+@@ -366,7 +362,6 @@ var (
+ 	ErrHTTP2Unsupported           = E.New("server does not support HTTP/2")
+ 	ErrHTTP3Unavailable           = E.New("HTTP/3 unavailable")
+ 	errExtendedConnectUnsupported = E.New("server does not support HTTP/2 extended CONNECT")
+-	errExtendedConnectUnavailable = E.New("HTTP/2 extended CONNECT is unavailable in this build: Go 1.27+ requires the badlinkname build tag")
+ )
+ 
+ func statusError(response *http.Response) error {
+diff --git a/transport/http/client_h2.go b/transport/http/client_h2.go
+index 0e9fb4c78367a6fdb48b47fbcb468c7eaa5bfdde..d1f97f8ae1f9035d7f2531ba228184d48ffdba1e 100644
+--- a/transport/http/client_h2.go
++++ b/transport/http/client_h2.go
+@@ -8,7 +8,6 @@ import (
+ 	"slices"
+ 	"strings"
+ 
+-	"github.com/sagernet/sing-box/adapter"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	"github.com/sagernet/sing/common/pipe"
+@@ -25,7 +24,7 @@ func (c *Client) acquireHTTP2(ctx context.Context) (*http2ClientConn, net.Conn,
+ 			return clientConn, nil, nil
+ 		}
+ 	}
+-	conn, err := c.tlsDialer.DialTLSContext(adapter.ContextForMultiplexSession(ctx), c.server)
++	conn, err := c.tlsDialer.DialTLSContext(ctx, c.server)
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+@@ -40,7 +39,7 @@ func (c *Client) acquireHTTP2(ctx context.Context) (*http2ClientConn, net.Conn,
+ 		conn.Close()
+ 		return nil, nil, E.Cause(err, "create HTTP/2 connection")
+ 	}
+-	clientConn.reserveNewRequest()
++	clientConn.reserveNewRequest() // H: both Go 1.27 and legacy HTTP/2 wrappers
+ 	c.http2Conns = append(c.http2Conns, clientConn)
+ 	return clientConn, nil, nil
+ }
+diff --git a/transport/http/client_h3.go b/transport/http/client_h3.go
+index 43d5d29906e1e7aa48c9edd1a412fec4d211fb48..c864d44d9e14a8e87ab79fa19c38dff83d591549 100644
+--- a/transport/http/client_h3.go
++++ b/transport/http/client_h3.go
+@@ -4,8 +4,9 @@ package http
+ 
+ import (
+ 	"context"
+-	stdTLS "crypto/tls"
++	"crypto/tls"
+ 	"errors"
++	"io"
+ 	"net"
+ 	"net/http"
+ 	"net/url"
+@@ -15,9 +16,8 @@ import (
+ 
+ 	"github.com/sagernet/quic-go"
+ 	"github.com/sagernet/quic-go/http3"
+-	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/common/httpclient"
+-	"github.com/sagernet/sing-quic"
++	qtls "github.com/sagernet/sing-quic"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
+@@ -85,12 +85,12 @@ func (c *http3ClientImpl) acquire(ctx context.Context) (*http3.ClientConn, error
+ 		c.rawConn.Close()
+ 		c.rawConn = nil
+ 	}
+-	rawConn, err := c.dialer.DialContext(adapter.ContextForMultiplexSession(ctx), N.NetworkUDP, c.server)
++	rawConn, err := c.dialer.DialContext(ctx, N.NetworkUDP, c.server)
+ 	if err != nil {
+ 		if ctx.Err() != nil {
+ 			return nil, ctx.Err()
+ 		}
+-		return nil, wrapHTTP3Error(err)
++		return nil, E.Cause1(ErrHTTP3Unavailable, err)
+ 	}
+ 	quicConn, err := qtls.DialEarly(ctx, rawConn, c.tlsConfig, c.quicConfig)
+ 	if err != nil {
+@@ -98,7 +98,7 @@ func (c *http3ClientImpl) acquire(ctx context.Context) (*http3.ClientConn, error
+ 		if ctx.Err() != nil {
+ 			return nil, ctx.Err()
+ 		}
+-		return nil, wrapHTTP3Error(err)
++		return nil, wrapHTTP3Error(err) // H
+ 	}
+ 	c.conn = c.transport.NewClientConn(quicConn)
+ 	c.rawConn = rawConn
+@@ -115,7 +115,7 @@ func (c *http3ClientImpl) openStream(ctx context.Context, request *http.Request)
+ 		if ctx.Err() != nil {
+ 			return nil, nil, ctx.Err()
+ 		}
+-		return nil, nil, wrapHTTP3Error(err)
++		return nil, nil, wrapHTTP3Error(err) // H
+ 	}
+ 	stop := context.AfterFunc(ctx, func() {
+ 		stream.CancelRead(0)
+@@ -144,7 +144,7 @@ func (c *http3ClientImpl) openStream(ctx context.Context, request *http.Request)
+ 		if ctx.Err() != nil {
+ 			return nil, nil, ctx.Err()
+ 		}
+-		return nil, nil, wrapHTTP3Error(E.Cause(err, "HTTP/3 CONNECT"))
++		return nil, nil, E.Cause(wrapHTTP3Error(err), "HTTP/3 CONNECT")
+ 	}
+ 	if response.StatusCode != http.StatusOK {
+ 		stream.CancelRead(0)
+@@ -154,26 +154,6 @@ func (c *http3ClientImpl) openStream(ctx context.Context, request *http.Request)
+ 	return stream, clientConn, nil
+ }
+ 
+-func wrapHTTP3Error(err error) error {
+-	if err == nil || errors.Is(err, context.Canceled) {
+-		return err
+-	}
+-	var certificateError *stdTLS.CertificateVerificationError
+-	if errors.As(err, &certificateError) {
+-		return err
+-	}
+-	var transportError *quic.TransportError
+-	if errors.As(err, &transportError) && transportError.ErrorCode >= 0x100 && transportError.ErrorCode < 0x200 {
+-		// TLS failures must remain visible. An ALPN negotiation failure is
+-		// different: the peer may support HTTP over TCP but not HTTP/3.
+-		const noApplicationProtocol = 0x100 + 120
+-		if transportError.ErrorCode != noApplicationProtocol {
+-			return err
+-		}
+-	}
+-	return E.Cause1(ErrHTTP3Unavailable, err)
+-}
+-
+ func (c *http3ClientImpl) DialContext(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {
+ 	stream, _, err := c.openStream(ctx, &http.Request{
+ 		Method: http.MethodConnect,
+@@ -203,10 +183,7 @@ func (c *http3ClientImpl) OpenTunnel(ctx context.Context, request tunnelRequest)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	return &http3RequestDatagramStream{
+-		stream:           stream,
+-		datagramsEnabled: clientConn.Settings().EnableDatagrams,
+-	}, nil
++	return &http3RequestDatagramStream{stream: stream, datagramsEnabled: clientConn.Settings().EnableDatagrams}, nil
+ }
+ 
+ func (c *http3ClientImpl) ResetConnection() {
+@@ -262,7 +239,7 @@ func (c *http3StreamConn) wrapError(err error) error {
+ 	if c.closed.Load() {
+ 		return net.ErrClosed
+ 	}
+-	return qtls.WrapError(err)
++	return wrapHTTP3Error(err)
+ }
+ 
+ func (c *http3StreamConn) CloseWrite() error {
+@@ -320,21 +297,6 @@ func (s *http3RequestDatagramStream) Write(p []byte) (int, error) {
+ 	return n, s.wrapError(err)
+ }
+ 
+-func (s *http3RequestDatagramStream) wrapError(err error) error {
+-	if err == nil || s.closed.Load() {
+-		return err
+-	}
+-	var streamError *quic.StreamError
+-	if errors.As(err, &streamError) && !streamError.Remote {
+-		return err
+-	}
+-	var applicationError *quic.ApplicationError
+-	if errors.As(err, &applicationError) && !applicationError.Remote {
+-		return err
+-	}
+-	return wrapHTTP3Error(err)
+-}
+-
+ func (s *http3RequestDatagramStream) Close() error {
+ 	s.closed.Store(true)
+ 	s.stream.SetWriteDeadline(time.Now())
+@@ -350,19 +312,15 @@ func (s *http3RequestDatagramStream) SendDatagram(payload []byte) error {
+ 	if err == nil {
+ 		return nil
+ 	}
+-	var tooLarge *quic.DatagramTooLargeError
+-	if errors.As(err, &tooLarge) {
++	if tooLarge, ok := errors.AsType[*quic.DatagramTooLargeError](err); ok {
+ 		return &DatagramTooLargeError{MaxPayloadSize: int(tooLarge.MaxDatagramPayloadSize) - VarintLen(uint64(s.stream.StreamID()/4))}
+ 	}
+ 	return s.wrapError(err)
+ }
+ 
+ func (s *http3RequestDatagramStream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
+-	datagram, err := s.stream.ReceiveDatagram(ctx)
+-	if err != nil && ctx.Err() != nil {
+-		return nil, ctx.Err()
+-	}
+-	return datagram, s.wrapError(err)
++	data, err := s.stream.ReceiveDatagram(ctx)
++	return data, s.wrapError(err)
+ }
+ 
+ var (
+@@ -370,3 +328,53 @@ var (
+ 	_ N.WriteCloser  = (*http3StreamConn)(nil)
+ 	_ DatagramStream = (*http3RequestDatagramStream)(nil)
+ )
++
++// wrapHTTP3Error marks connection-level QUIC failures as eligible for HTTP/2
++// fallback, while preserving authentication, certificate and caller errors.
++func wrapHTTP3Error(err error) error {
++	if err == nil {
++		return nil
++	}
++	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
++		return err
++	}
++	if _, ok := errors.AsType[*tls.CertificateVerificationError](err); ok {
++		return err
++	}
++	if transportErr, ok := errors.AsType[*quic.TransportError](err); ok {
++		if transportErr.ErrorCode == 0x178 { // QUIC NO_APPLICATION_PROTOCOL
++			return E.Cause1(ErrHTTP3Unavailable, err)
++		}
++		return err
++	}
++	if h3Err, ok := errors.AsType[*http3.Error](err); ok {
++		if h3Err.Remote {
++			return E.Cause1(ErrHTTP3Unavailable, err)
++		}
++		return err
++	}
++	if appErr, ok := errors.AsType[*quic.ApplicationError](err); ok {
++		if appErr.Remote {
++			return E.Cause1(ErrHTTP3Unavailable, err)
++		}
++		return err
++	}
++	var handshakeErr *quic.HandshakeTimeoutError
++	var idleErr *quic.IdleTimeoutError
++	var resetErr *quic.StatelessResetError
++	if errors.As(err, &handshakeErr) || errors.As(err, &idleErr) ||
++		errors.As(err, &resetErr) || errors.Is(err, io.EOF) {
++		return E.Cause1(ErrHTTP3Unavailable, err)
++	}
++	return qtls.WrapError(err)
++}
++
++func (s *http3RequestDatagramStream) wrapError(err error) error {
++	if err == nil {
++		return nil
++	}
++	if s.closed.Load() {
++		return net.ErrClosed
++	}
++	return wrapHTTP3Error(err)
++}
+diff --git a/transport/http/extended_connect_legacy.go b/transport/http/extended_connect_legacy.go
+index 943910fa6e7842168f982b18dc804f2a54f4fbab..9a3b13133e0a53a74820b3757505a8e3c5f6bed9 100644
+--- a/transport/http/extended_connect_legacy.go
++++ b/transport/http/extended_connect_legacy.go
+@@ -1,4 +1,4 @@
+-//go:build !go1.27 || http2legacy
++//go:build !go1.27 || http2legacy || !badlinkname
+ 
+ package http
+ 
+@@ -8,8 +8,6 @@ import (
+ 	_ "golang.org/x/net/http2"
+ )
+ 
+-const extendedConnectAvailable = true
+-
+ //go:linkname disableExtendedConnectProtocol golang.org/x/net/http2.disableExtendedConnectProtocol
+ var disableExtendedConnectProtocol bool
+ 
+diff --git a/transport/http/extended_connect_wrap_badlinkname.go b/transport/http/extended_connect_wrap_badlinkname.go
+index d8f534cdf2fa3b071a239883ca558c552d372422..4898bb2e4432e191653c7c2cd543af8a3a3c018a 100644
+--- a/transport/http/extended_connect_wrap_badlinkname.go
++++ b/transport/http/extended_connect_wrap_badlinkname.go
+@@ -7,8 +7,6 @@ import (
+ 	_ "unsafe"
+ )
+ 
+-const extendedConnectAvailable = true
+-
+ //go:linkname disableExtendedConnectProtocol net/http/internal/http2.disableExtendedConnectProtocol
+ var disableExtendedConnectProtocol bool
+ 
+diff --git a/transport/http/extended_connect_wrap_stub.go b/transport/http/extended_connect_wrap_stub.go
+deleted file mode 100644
+index 5aa1c6208d734934f896460122656aa7b3c10171..0000000000000000000000000000000000000000
+--- a/transport/http/extended_connect_wrap_stub.go
++++ /dev/null
+@@ -1,5 +0,0 @@
+-//go:build go1.27 && !http2legacy && !badlinkname
+-
+-package http
+-
+-const extendedConnectAvailable = false
+diff --git a/transport/http/forward.go b/transport/http/forward.go
+index 6619d8f515e5884be6d7055f0bb5a77126425838..1d388a1f596d1dd45782fbe6124eb4a4aa90f743 100644
+--- a/transport/http/forward.go
++++ b/transport/http/forward.go
+@@ -82,11 +82,6 @@ func (c *serverConn) serveForward(ctx context.Context, request *http.Request, so
+ 		request.Header["User-Agent"] = nil
+ 	}
+ 	request.Close = false
+-	// Request.Write and Response.Write close the body, and net/http's (*body).Close
+-	// drains an unread body to EOF from the connection reader.
+-	if request.Body != http.NoBody {
+-		request.Body = io.NopCloser(request.Body)
+-	}
+ 
+ 	upstream := c.openUpstream(ctx, source, destination)
+ 	writeDone := make(chan error, 1)
+@@ -152,13 +147,14 @@ func (c *serverConn) serveForward(ctx context.Context, request *http.Request, so
+ 		response.Header.Set("Connection", "keep-alive")
+ 		response.Header.Set("Proxy-Connection", "keep-alive")
+ 	}
+-	response.Body = io.NopCloser(response.Body)
+ 	err := response.Write(c.conn)
+ 	if err != nil {
+ 		c.closeUpstream()
++		response.Body.Close()
+ 		c.finishRequestWrite(writeDone)
+ 		return requestClose, E.Cause(err, "write response")
+ 	}
++	response.Body.Close()
+ 	writeErr := c.finishRequestWrite(writeDone)
+ 	if writeErr != nil {
+ 		c.closeUpstream()
+diff --git a/transport/http/h_capsules.go b/transport/http/h_capsules.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d203b499d263ec83b3e0bc89683cd7cd5b96a815
+--- /dev/null
++++ b/transport/http/h_capsules.go
+@@ -0,0 +1,38 @@
++package http
++
++import (
++	"io"
++
++	"github.com/sagernet/sing/common"
++	"github.com/sagernet/sing/common/buf"
++)
++
++func WriteDatagramCapsules(writer io.Writer, datagrams []*buf.Buffer) error {
++	if len(datagrams) == 1 {
++		return WriteDatagramCapsule(writer, datagrams[0])
++	}
++	defer buf.ReleaseMulti(datagrams)
++	var totalLength int
++	for _, datagram := range datagrams {
++		totalLength += 1 + VarintLen(uint64(datagram.Len())) + datagram.Len()
++	}
++	capsules := buf.NewSize(min(totalLength, buf.MaxPooledBufferSize))
++	defer capsules.Release()
++	for _, datagram := range datagrams {
++		length := uint64(datagram.Len())
++		headerLength := 1 + VarintLen(length)
++		if headerLength+datagram.Len() > capsules.FreeLen() {
++			_, err := writer.Write(capsules.Bytes())
++			if err != nil {
++				return err
++			}
++			capsules.Reset()
++		}
++		header := capsules.Extend(headerLength)
++		header[0] = CapsuleTypeDatagram
++		PutVarint(header[1:], length)
++		common.Must1(capsules.Write(datagram.Bytes()))
++	}
++	_, err := writer.Write(capsules.Bytes())
++	return err
++}
+diff --git a/transport/http/h_client_h3_test.go b/transport/http/h_client_h3_test.go
+index 6e8328c51ca2a0891b8c69d650923efe6f397420..5de5efae86fa2170a12bc6fc7c62d0727f4161aa 100644
+--- a/transport/http/h_client_h3_test.go
++++ b/transport/http/h_client_h3_test.go
+@@ -32,6 +32,8 @@ func TestH_HTTP3TransportErrorClassification(t *testing.T) {
+ 		{"handshake_timeout", &quic.HandshakeTimeoutError{}, true},
+ 		{"idle_timeout", &quic.IdleTimeoutError{}, true},
+ 		{"connection_reset", &quic.StatelessResetError{}, true},
++		{"remote_http3_internal", &http3.Error{Remote: true, ErrorCode: http3.ErrCodeInternalError}, true},
++		{"local_http3_internal", &http3.Error{Remote: false, ErrorCode: http3.ErrCodeInternalError}, false},
+ 		{"connect_eof", io.EOF, true},
+ 		{"no_h3_alpn", &quic.TransportError{ErrorCode: 0x178}, true},
+ 		{"bad_certificate", &quic.TransportError{ErrorCode: 0x12a}, false},
+diff --git a/transport/http/server_h2.go b/transport/http/server_h2.go
+index a1427861acfdfa6b73226505e331a893aa61e169..4d23118ac1b0be3aa28a2fc5d5108a9bd2a9e25a 100644
+--- a/transport/http/server_h2.go
++++ b/transport/http/server_h2.go
+@@ -220,9 +220,9 @@ func (h *httpHandler) serveForward(ctx context.Context, writer http.ResponseWrit
+ 		if response.StatusCode >= 200 {
+ 			break
+ 		}
+-		if response.StatusCode < 100 || response.StatusCode == http.StatusSwitchingProtocols {
++		if response.StatusCode == http.StatusSwitchingProtocols {
+ 			upstream.Close()
+-			h.server.logger.ErrorContext(ctx, "process connection from ", source, ": unexpected ", response.StatusCode, " response")
++			h.server.logger.ErrorContext(ctx, "process connection from ", source, ": unexpected 101 response")
+ 			writer.WriteHeader(http.StatusBadGateway)
+ 			return
+ 		}
+diff --git a/transport/http/server_h3.go b/transport/http/server_h3.go
+index 938c30c8a6819184bcf18bc9ba88bf638c450ea0..0254a61e0b9c840291411033900ee1ea414cc081 100644
+--- a/transport/http/server_h3.go
++++ b/transport/http/server_h3.go
+@@ -16,7 +16,7 @@ import (
+ 	"github.com/sagernet/sing-box/common/tls"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+-	"github.com/sagernet/sing-quic"
++	qtls "github.com/sagernet/sing-quic"
+ 	congestion_meta2 "github.com/sagernet/sing-quic/congestion_meta2"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	"github.com/sagernet/sing/common/logger"
+@@ -95,8 +95,7 @@ func (s *datagramStream) SendDatagram(payload []byte) error {
+ 	if err == nil {
+ 		return nil
+ 	}
+-	var tooLarge *quic.DatagramTooLargeError
+-	if errors.As(err, &tooLarge) {
++	if tooLarge, ok := errors.AsType[*quic.DatagramTooLargeError](err); ok {
+ 		return &DatagramTooLargeError{MaxPayloadSize: int(tooLarge.MaxDatagramPayloadSize) - VarintLen(uint64(s.Stream.StreamID()/4))}
+ 	}
+ 	return err
+diff --git a/transport/http/tunnel_client.go b/transport/http/tunnel_client.go
+index 7fb6e25087ea4b69b78a1a3caf0a72bde5b963ac..ed2c48314bacedff4e47292671d0c6152933510b 100644
+--- a/transport/http/tunnel_client.go
++++ b/transport/http/tunnel_client.go
+@@ -59,10 +59,7 @@ func (c *Client) openTunnel(ctx context.Context, request tunnelRequest) (net.Con
+ 		}
+ 		c.markHTTP3Broken()
+ 	}
+-	if !extendedConnectAvailable && c.tlsDialer != nil && c.disableVersionFallback {
+-		return nil, nil, errExtendedConnectUnavailable
+-	}
+-	if extendedConnectAvailable && c.tlsDialer != nil && !c.http2Unsupported.Load() && !c.http2ExtendedConnectUnsupported.Load() {
++	if c.tlsDialer != nil && !c.http2Unsupported.Load() && !c.http2ExtendedConnectUnsupported.Load() {
+ 		clientConn, conn, err := c.acquireHTTP2(ctx)
+ 		if err != nil {
+ 			return nil, nil, err

@@ -1,0 +1,15 @@
+diff --git a/service/ccm/service.go b/service/ccm/service.go
+index 0d89527d4332a103f48f1f533a32d0d924944d50..335854a160bbb19ae1c7318316336b37280dcd90 100644
+--- a/service/ccm/service.go
++++ b/service/ccm/service.go
+@@ -590,10 +590,3 @@ func (s *Service) handleResponseWithTracking(writer http.ResponseWriter, respons
+ 		}
+ 	}
+ }
+-
+-func (s *Service) References() []string {
+-	if s.detour == "" {
+-		return nil
+-	}
+-	return []string{s.detour}
+-}

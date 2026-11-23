@@ -1,0 +1,159 @@
+diff --git a/platform/wrt/Makefile b/platform/wrt/Makefile
+index e3b4ba7e29563f5ad221d90ef423975f2b2441a0..eec54b50430002999b767eafb88ee92c76c79be8 100644
+--- a/platform/wrt/Makefile
++++ b/platform/wrt/Makefile
+@@ -5,7 +5,7 @@
+ include $(TOPDIR)/rules.mk
+ 
+ PKG_NAME:=hiddify-core
+-PKG_VERSION:=5.4.0
++PKG_VERSION:=5.5.5
+ PKG_RELEASE:=1
+ 
+ # From git at the version's tag, with the submodules (hiddify-sing-box, ray2sing, the forks under
+@@ -31,7 +31,7 @@ GO_PKG_LDFLAGS_X:= \
+ 	$(GO_PKG)/v2/hcommon/constants.Version=$(PKG_VERSION) \
+ 	github.com/sagernet/sing-box/constant.Version=$(PKG_VERSION)
+ # keep in sync with WRT_TAGS in the repository's Makefile
+-GO_PKG_TAGS:=with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,with_grpc,with_awg,tfogo_checklinkname0,with_conntrack,with_embedded_tor,with_openvpn,with_openconnect,with_masque,with_kcp,with_sudoku,with_bond,with_dhcp,with_low_memory
++GO_PKG_TAGS:=with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,with_grpc,with_awg,tfogo_checklinkname0,with_conntrack,with_embedded_tor,with_openvpn,with_openconnect,with_masque,with_kcp,with_sudoku,with_bond,with_call,with_xdrive,with_v2ray_api,with_dhcp,with_low_memory
+ 
+ include $(INCLUDE_DIR)/package.mk
+ include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk
+diff --git a/platform/wrt/README.md b/platform/wrt/README.md
+index c6a3382e6a67c47322224de9f7eee9278c75697d..3a38922ca209ff1769f7f57bf001f02468232f4a 100644
+--- a/platform/wrt/README.md
++++ b/platform/wrt/README.md
+@@ -19,41 +19,21 @@ sh <(wget -qO- https://raw.githubusercontent.com/hiddify/hiddify-core/main/insta
+ It tells opkg from apk, finds the router's architecture, installs the package of the latest
+ release and starts the service. Run it again to update.
+ 
+-### The feed
+-
+-A feed keeps the package updated with `opkg upgrade` / `apk upgrade`. Each architecture has its
+-own feed, the assets of the release tagged `openwrt-<arch>` in this repository, replaced on every
+-version. Find the architecture with `opkg print-architecture` (the last line, e.g. `x86_64`,
+-`aarch64_cortex-a53`, `mipsel_24kc`) or `apk --print-arch`.
+-
+-opkg (24.10 and earlier):
+-
+-```sh
+-ARCH=$(opkg print-architecture | awk '{print $2}' | tail -n1)
+-FEED=https://github.com/hiddify/hiddify-core/releases/download/openwrt-$ARCH
+-wget -qO /tmp/hiddify.pub "$FEED/hiddify.pub" && opkg-key add /tmp/hiddify.pub
+-echo "src/gz hiddify $FEED" >> /etc/opkg/customfeeds.conf
+-opkg update && opkg install hiddify-core
+-```
++### One package by hand
+ 
+-apk (25.12 and later):
++Every release carries a package for each OpenWrt architecture: `hiddify-core_<version>_<arch>.ipk`
++for opkg (24.10 and earlier) and `hiddify-core-<version>-r0_<arch>.apk` for apk (25.12 and
++later). Find the architecture with `opkg print-architecture` (the last line, e.g. `x86_64`,
++`aarch64_cortex-a53`, `mipsel_24kc`) or `apk --print-arch`, download its package from the
++[latest release](https://github.com/hiddify/hiddify-core/releases/latest), then:
+ 
+ ```sh
+-ARCH=$(apk --print-arch)
+-FEED=https://github.com/hiddify/hiddify-core/releases/download/openwrt-$ARCH
+-wget -qO /etc/apk/keys/hiddify-apk.pem "$FEED/hiddify-apk.pem"
+-echo "$FEED/packages.adb" > /etc/apk/repositories.d/hiddify.list
+-apk update && apk add hiddify-core
++opkg install ./hiddify-core_*.ipk                  # opkg
++apk add --allow-untrusted ./hiddify-core-*.apk     # apk
+ ```
+ 
+-The keys verify the feed's index. They are kept across `sysupgrade` by the package's
+-`/lib/upgrade/keep.d/hiddify-core`, along with `/etc/hiddify-core/`.
+-
+-### One package by hand
+-
+-Download the package for the architecture from the
+-[release](https://github.com/hiddify/hiddify-core/releases/latest), then
+-`opkg install ./hiddify-core_*.ipk` or `apk add --allow-untrusted ./hiddify-core-*.apk`.
++To update, run the installer again, or install the next release's package the same way. The
++package keeps `/etc/hiddify-core/` across `sysupgrade` (`/lib/upgrade/keep.d/hiddify-core`).
+ 
+ ## Configure
+ 
+@@ -93,6 +73,7 @@ Makefile's `WRT_TAGS`: no naive outbound (cronet is a native library) and no cal
+ 
+ `release/openwrt/build-ipk.sh` and `build-apk.sh` package a cross-built binary for one
+ architecture (`make openwrt-packages WRT_ARCH=x86_64` does both for a local binary), and
+-`make-feed.sh` writes and signs the indexes the way OpenWrt's own build does: `usign` for
+-`Packages.sig`, `apk mkndx --sign` for `packages.adb`. The signing keys are described in
++`make-feed.sh` writes and signs a feed's indexes the way OpenWrt's own build does: `usign` for
++`Packages.sig`, `apk mkndx --sign` for `packages.adb`, for anyone hosting a feed of their own; the
++releases publish the packages alone. The signing keys are described in
+ [keys/README.md](keys/README.md).
+diff --git a/platform/wrt/files/hiddify.conf b/platform/wrt/files/hiddify.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..fe71f16895b956eacf367a5936a20e47b8f35303
+--- /dev/null
++++ b/platform/wrt/files/hiddify.conf
+@@ -0,0 +1,4 @@
++config hiddify 'main'
++	option enabled '0'
++	option config '/config/file/or/sublink'
++	option appconfig '/etc/hiddify/appconfig.json'
+diff --git a/platform/wrt/files/hiddify.init b/platform/wrt/files/hiddify.init
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e61b72090b0306c164922c405e091830ac8b206
+--- /dev/null
++++ b/platform/wrt/files/hiddify.init
+@@ -0,0 +1,27 @@
++#!/bin/sh /etc/rc.common
++
++USE_PROCD=1
++START=99
++
++NAME="hiddify"
++PROG="/usr/bin/hiddify-cli"
++ 
++ 
++start_service() {
++	config_load "$NAME"
++
++	local enabled config appconfig
++	config_get_bool enabled "main" "enabled" "0"
++	[ "$enabled" -eq "1" ] || return 0
++	
++	config_get config "main" "config"
++	config_get appconfig "main" "appconfig" 
++	args=""
++	args="$args run -c $config -d $appconfig"
++	procd_open_instance
++	procd_set_param command $PROG $args
++#	procd_set_param stdout 1
++#	procd_set_param stderr 1
++	procd_set_param respawn
++	procd_close_instance
++}
+diff --git a/platform/wrt/keys/README.md b/platform/wrt/keys/README.md
+index a67231b1691ecba94683a70e114136795d336c72..5455b1a3bbe496d419bb22442ed2744613777616 100644
+--- a/platform/wrt/keys/README.md
++++ b/platform/wrt/keys/README.md
+@@ -1,16 +1,15 @@
+ # Feed signing keys
+ 
+-The public halves of the keys that sign the OpenWrt package feeds. A router installs them once
+-and then verifies every index it fetches. The private halves live only in the repository's
+-GitHub secrets, `OPENWRT_USIGN_KEY` and `OPENWRT_APK_KEY`; never commit them.
++The public halves of the keys that sign an OpenWrt package feed built with
++`release/openwrt/make-feed.sh`. The releases publish the packages alone, with no feed; these keys are
++for a feed hosted separately. A router installs them once and then verifies every index it fetches.
++Never commit the private halves.
+ 
+ | File | For | Made with |
+ |---|---|---|
+ | `hiddify.pub` | opkg (OpenWrt 24.10 and earlier), `Packages.sig` | `usign -G -c "Hiddify OpenWrt feed" -s hiddify.sec -p hiddify.pub` |
+ | `hiddify-apk.pem` | apk (OpenWrt 25.12 and later), `packages.adb` | `openssl ecparam -name prime256v1 -genkey -noout -out hiddify-apk.key` then `openssl ec -in hiddify-apk.key -pubout -out hiddify-apk.pem` |
+ 
+-Store `hiddify.sec` as the secret `OPENWRT_USIGN_KEY` and `hiddify-apk.key` as `OPENWRT_APK_KEY`,
+-whole file contents each. Until both are set, the feed job still publishes, with a warning, and
+-the indexes are unsigned: routers then need `option check_signature 0` (opkg) or
+-`--allow-untrusted` (apk). The apk key must be an EC key in SEC1 PEM form, as above; a PKCS#8
+-key from `openssl genpkey` is refused by `apk mkndx`.
++Pass the private keys to `make-feed.sh`. Without them the indexes are unsigned: routers then need
++`option check_signature 0` (opkg) or `--allow-untrusted` (apk). The apk key must be an EC key in
++SEC1 PEM form, as above; a PKCS#8 key from `openssl genpkey` is refused by `apk mkndx`.

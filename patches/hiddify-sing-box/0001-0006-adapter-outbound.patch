@@ -1,0 +1,216 @@
+diff --git a/adapter/outbound/adapter.go b/adapter/outbound/adapter.go
+index c4b432f1127de883b47f89caf0fb143e8703f5cb..c1d1ec33b67442d671bbd751cb5acaceaf6f27d3 100644
+--- a/adapter/outbound/adapter.go
++++ b/adapter/outbound/adapter.go
+@@ -1,7 +1,6 @@
+ package outbound
+ 
+ import (
+-	"github.com/sagernet/sing-box/adapter"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/option"
+ )
+@@ -46,11 +45,10 @@ func (a *Adapter) Dependencies() []string {
+ 	return a.dependencies
+ }
+ 
+-func (a *Adapter) DisplayType() string { //H
+-	return C.ProxyDisplayName(a.Type()) //H
+-} //H
++func (a *Adapter) DisplayType() string {
++	return C.ProxyDisplayName(a.Type())
++}
+ 
+-// Status is ready: an outbound without a connection of its own carries traffic at once. //H
+-func (a *Adapter) Status() adapter.Status { //H
+-	return adapter.StatusReady //H
+-} //H
++func (a *Adapter) IsReady() bool {
++	return true
++}
+diff --git a/adapter/outbound/h_adapter_test.go b/adapter/outbound/h_adapter_test.go
+index a8104ceb09980b5dba2c9a9788632f4d321a8c93..71468ded441478a06e4d3df3ca20ca49c804bb02 100644
+--- a/adapter/outbound/h_adapter_test.go
++++ b/adapter/outbound/h_adapter_test.go
+@@ -20,6 +20,6 @@ func TestH_AdapterDisplayTypeAndReady(t *testing.T) {
+ 		adapter := NewAdapter(proxyType, "tag", nil, nil)
+ 		require.Equal(t, proxyType, adapter.Type())
+ 		require.Equal(t, expected, adapter.DisplayType())
+-		require.Equal(t, "ready", adapter.Status().String())
++		require.True(t, adapter.IsReady())
+ 	}
+ }
+diff --git a/adapter/outbound/manager.go b/adapter/outbound/manager.go
+index 976de50193a1735f9b7bd7a3575ac9ec741b49df..a56075c31237362da68b492af744061c5f337c58 100644
+--- a/adapter/outbound/manager.go
++++ b/adapter/outbound/manager.go
+@@ -2,7 +2,6 @@ package outbound
+ 
+ import (
+ 	"context"
+-	"github.com/sagernet/sing-box/option"
+ 	"os"
+ 	"slices"
+ 	"strings"
+@@ -10,6 +9,7 @@ import (
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
+ 	"github.com/sagernet/sing/common"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ )
+@@ -194,94 +194,76 @@ func (m *Manager) remove(tag string, ignoreDependents bool) error {
+ 		return os.ErrInvalid
+ 	}
+ 	if !ignoreDependents {
+-		dependBy := m.dependents(tag)
+-		if len(dependBy) > 0 {
++		var dependBy []string
++		for _, candidate := range m.outbounds {
++			if candidate.Tag() != tag && slices.Contains(candidate.Dependencies(), tag) {
++				dependBy = append(dependBy, candidate.Tag())
++			}
++		}
++		if len(dependBy) != 0 {
+ 			m.access.Unlock()
+ 			return E.New("outbound[", tag, "] is depended by ", strings.Join(dependBy, ", "))
+ 		}
+ 	}
+-	delete(m.outboundByTag, tag)
+ 	index := slices.Index(m.outbounds, outbound)
+-	if index == -1 {
+-		panic("invalid outbound index")
++	if index < 0 {
++		m.access.Unlock()
++		return E.New("invalid outbound index: ", tag)
+ 	}
+-	m.outbounds = slices.Delete(slices.Clone(m.outbounds), index, index+1) // H: never change a slice already handed out
++	m.outbounds = slices.Delete(slices.Clone(m.outbounds), index, index+1)
++	delete(m.outboundByTag, tag)
+ 	if m.defaultOutbound == outbound {
++		m.defaultOutbound = nil
+ 		if len(m.outbounds) > 0 {
+ 			m.defaultOutbound = m.outbounds[0]
+-		} else {
+-			m.defaultOutbound = nil
+ 		}
+ 	}
+-	started := m.started
++	started, scope := m.started, m.scope
+ 	m.access.Unlock()
+ 	if started {
+-		return adapter.CloseLate(m.scope, outbound)
++		return adapter.CloseLate(scope, outbound)
+ 	}
+ 	return nil
+ }
+ 
+-// dependents lists the outbounds and endpoints that depend on tag. Call with access held.
+-func (m *Manager) dependents(tag string) []string {
+-	var dependBy []string
+-	for _, outbound := range m.outbounds {
+-		if common.Contains(outbound.Dependencies(), tag) {
+-			dependBy = append(dependBy, outbound.Tag())
+-		}
+-	}
+-	for _, endpoint := range m.endpoint.Endpoints() {
+-		if common.Contains(endpoint.Dependencies(), tag) {
+-			dependBy = append(dependBy, endpoint.Tag())
+-		}
+-	}
+-	return dependBy
+-}
+-
+ func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, inboundType string, options any) error {
+ 	if tag == "" {
+ 		return os.ErrInvalid
+ 	}
+-	option.MigrateTLSFragment(options) //H: a tls_fragment in the tls block applies like the dialer's
++	option.MigrateTLSFragment(options) // H
+ 	outbound, err := m.registry.CreateOutbound(ctx, router, logger, tag, inboundType, options)
+ 	if err != nil {
+ 		return err
+ 	}
+-	m.access.Lock()
+-	started := m.started
+-	m.access.Unlock()
+-	if started { // H: hot reload; started outside the lock, as starting may look up other outbounds
+-		err = adapter.StartLate(m.scope, "outbound/"+outbound.Type()+"["+outbound.Tag()+"]", outbound)
+-		if err != nil {
++	m.access.RLock()
++	started, scope := m.started, m.scope
++	m.access.RUnlock()
++	if started {
++		if err = adapter.StartLate(scope, "outbound/"+outbound.Type()+"["+outbound.Tag()+"]", outbound); err != nil {
+ 			return err
+ 		}
+ 	}
+ 	m.access.Lock()
+-	existsOutbound, replaced := m.outboundByTag[tag]
+-	if replaced && !started {
+-		m.access.Unlock()
+-		return E.New("duplicate outbound tag: ", tag)
+-	}
++	old, replaced := m.outboundByTag[tag]
+ 	if replaced {
+-		existsIndex := slices.Index(m.outbounds, existsOutbound)
+-		if existsIndex == -1 {
+-			panic("invalid outbound index")
++		index := slices.Index(m.outbounds, old)
++		if index < 0 {
++			m.access.Unlock()
++			return E.New("invalid outbound index: ", tag)
+ 		}
+-		// H: the replacement takes the old one's place (callers rely on the order, e.g. the main group
+-		// comes first); a copy, so a slice already handed out never changes
+ 		m.outbounds = slices.Clone(m.outbounds)
+-		m.outbounds[existsIndex] = outbound
++		m.outbounds[index] = outbound
+ 	} else {
+-		m.outbounds = append(m.outbounds, outbound)
++		m.outbounds = append(slices.Clone(m.outbounds), outbound)
+ 	}
+ 	m.outboundByTag[tag] = outbound
+-	if tag == m.defaultTag || (m.defaultTag == "" && m.defaultOutbound == nil) || m.defaultOutbound == existsOutbound && replaced {
++	if tag == m.defaultTag || (m.defaultTag == "" && m.defaultOutbound == nil) || (replaced && m.defaultOutbound == old) {
+ 		m.defaultOutbound = outbound
+ 	}
+ 	m.access.Unlock()
+ 	if replaced {
+-		err = adapter.CloseLate(m.scope, existsOutbound)
+-		if err != nil {
+-			return E.Cause(err, "close outbound/", existsOutbound.Type(), "[", existsOutbound.Tag(), "]")
++		if err = adapter.CloseLate(scope, old); err != nil {
++			return E.Cause(err, "close outbound/", old.Type(), "[", old.Tag(), "]")
+ 		}
+ 	}
+ 	return nil
+@@ -305,7 +287,9 @@ func (m *Manager) SetDefaultTag(tag string) error {
+ 		outbound = endpoint
+ 	}
+ 	m.access.Lock()
+-	m.defaultOutbound = outbound
+-	m.access.Unlock()
++	defer m.access.Unlock()
++	if m.defaultOutbound != outbound {
++		m.defaultOutbound = outbound
++	}
+ 	return nil
+ }
+diff --git a/adapter/outbound/registry.go b/adapter/outbound/registry.go
+index d5eda61d51305f4050333a1a7961d16b1eb72b12..2167fae1323a90ec1ea06724844e06314c4e604e 100644
+--- a/adapter/outbound/registry.go
++++ b/adapter/outbound/registry.go
+@@ -63,9 +63,9 @@ func (r *Registry) CreateOptions(outboundType string) (any, bool) {
+ }
+ 
+ func (r *Registry) CreateOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, outboundType string, options any) (adapter.Outbound, error) {
+-	r.access.Lock() //H: not held while the constructor runs, so a constructor can create nested inbounds or outbounds (bond)
++	r.access.Lock() // H: not held while the constructor runs, so a constructor can create nested inbounds or outbounds (bond)
+ 	constructor, loaded := r.constructors[outboundType]
+-	r.access.Unlock() //H
++	r.access.Unlock() // H
+ 	if !loaded {
+ 		return nil, E.New("outbound type not found: " + outboundType)
+ 	}

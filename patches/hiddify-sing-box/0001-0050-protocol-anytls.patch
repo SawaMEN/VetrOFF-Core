@@ -1,0 +1,12 @@
+diff --git a/protocol/anytls/outbound.go b/protocol/anytls/outbound.go
+index 03aa1c54411ef4ec58d760e2979eb2b1ebbedfa3..28b1ac38297e1e8b4b5c98c2d4324f2cb0769845 100644
+--- a/protocol/anytls/outbound.go
++++ b/protocol/anytls/outbound.go
+@@ -92,7 +92,6 @@ func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 		return err
+ 	}
+ 	h.client = client
+-	scope.Add(client.Close)
+ 	h.uotClient = &uot.Client{
+ 		Dialer:  anytlsDialer(client.DialContext),
+ 		Version: uot.Version,

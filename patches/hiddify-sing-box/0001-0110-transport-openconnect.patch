@@ -1,0 +1,20 @@
+diff --git a/transport/openconnect/configuration.go b/transport/openconnect/configuration.go
+index 57eff045b931763c0e7c2b423dffe43d543b64ee..d27d2ec7de985dbcf121aacab6dc10a4bf9c409c 100644
+--- a/transport/openconnect/configuration.go
++++ b/transport/openconnect/configuration.go
+@@ -3,9 +3,14 @@ package openconnect
+ import (
+ 	"net/netip"
+ 	"time"
++
++	"github.com/sagernet/sing-openconnect"
+ )
+ 
+-const DefaultMTU = 1500
++const (
++	DefaultMTU     = 1500
++	PacketHeadroom = openconnect.PacketHeadroom
++)
+ 
+ type Configuration struct {
+ 	MTU                      uint32

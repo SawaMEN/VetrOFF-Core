@@ -1,0 +1,215 @@
+diff --git a/service/smart_dns_pool/h_service_test.go b/service/smart_dns_pool/h_service_test.go
+index 9ca249babc4c550284072d3359a0ea8f4261d674..d03bad6cfcb3cfb91b9586976328b7996235cb4a 100644
+--- a/service/smart_dns_pool/h_service_test.go
++++ b/service/smart_dns_pool/h_service_test.go
+@@ -2,7 +2,6 @@ package smart_dns_pool
+ 
+ import (
+ 	"context"
+-	"github.com/sagernet/sing-box/adapter/htest"
+ 	"net/netip"
+ 	"testing"
+ 	"time"
+@@ -53,7 +52,7 @@ func TestH_NewServiceValidation(t *testing.T) {
+ 	t.Parallel()
+ 	logger := log.NewNOPFactory().NewLogger("test")
+ 	_, err := NewService(context.Background(), logger, "t", option.SmartDNSPoolServiceOptions{
+-		ListenOptions: option.ListenOptions{ListenPort: 19000},
++		ListenPort: 19000,
+ 		Upstreams: []option.SmartDNSPoolUpstreamOptions{
+ 			{Type: "udp", Address: "127.0.0.1:53"},
+ 			{Type: "tcp"},
+@@ -62,7 +61,7 @@ func TestH_NewServiceValidation(t *testing.T) {
+ 	require.ErrorContains(t, err, "upstream #1 missing address")
+ 
+ 	_, err = NewService(context.Background(), logger, "t", option.SmartDNSPoolServiceOptions{
+-		ListenOptions: option.ListenOptions{ListenPort: 19000},
++		ListenPort: 19000,
+ 		Upstreams: []option.SmartDNSPoolUpstreamOptions{
+ 			{Type: "udp", Address: "127.0.0.1:53"},
+ 			{Type: "quic", Address: "127.0.0.1:853"},
+@@ -78,8 +77,8 @@ func TestH_NewServiceListenAddress(t *testing.T) {
+ 	upstreams := []option.SmartDNSPoolUpstreamOptions{{Address: "127.0.0.1:53"}}
+ 
+ 	instance, err := NewService(context.Background(), logger, "pool", option.SmartDNSPoolServiceOptions{
+-		ListenOptions: option.ListenOptions{ListenPort: 19876},
+-		Upstreams:     upstreams,
++		ListenPort: 19876,
++		Upstreams:  upstreams,
+ 	})
+ 	require.NoError(t, err)
+ 	service := instance.(*Service)
+@@ -89,16 +88,16 @@ func TestH_NewServiceListenAddress(t *testing.T) {
+ 
+ 	listen := badoption.Addr(netip.MustParseAddr("::1"))
+ 	instance, err = NewService(context.Background(), logger, "pool", option.SmartDNSPoolServiceOptions{
+-		ListenOptions: option.ListenOptions{Listen: &listen, ListenPort: 5353},
+-		Upstreams:     upstreams,
++		Listen: &listen, ListenPort: 5353,
++		Upstreams: upstreams,
+ 	})
+ 	require.NoError(t, err)
+ 	require.Equal(t, "[::1]:5353", instance.(*Service).listenAddr)
+ 
+ 	listen4 := badoption.Addr(netip.MustParseAddr("0.0.0.0"))
+ 	instance, err = NewService(context.Background(), logger, "pool", option.SmartDNSPoolServiceOptions{
+-		ListenOptions: option.ListenOptions{Listen: &listen4, ListenPort: 53},
+-		Upstreams:     upstreams,
++		Listen: &listen4, ListenPort: 53,
++		Upstreams: upstreams,
+ 	})
+ 	require.NoError(t, err)
+ 	require.Equal(t, "0.0.0.0:53", instance.(*Service).listenAddr)
+@@ -107,13 +106,13 @@ func TestH_NewServiceListenAddress(t *testing.T) {
+ func TestH_ServiceStartOtherStagesAndCloseIdle(t *testing.T) {
+ 	t.Parallel()
+ 	instance, err := NewService(context.Background(), log.NewNOPFactory().NewLogger("test"), "pool", option.SmartDNSPoolServiceOptions{
+-		ListenOptions: option.ListenOptions{ListenPort: 1},
+-		Upstreams:     []option.SmartDNSPoolUpstreamOptions{{Address: "127.0.0.1:53"}},
++		ListenPort: 1,
++		Upstreams:  []option.SmartDNSPoolUpstreamOptions{{Address: "127.0.0.1:53"}},
+ 	})
+ 	require.NoError(t, err)
+ 	service := instance.(*Service)
+ 	for _, stage := range []adapter.StartStage{adapter.StartStateInitialize, adapter.StartStatePostStart, adapter.StartStateStarted} {
+-		require.NoError(t, htest.Start(service, stage))
++		require.NoError(t, service.Start(stage, nil))
+ 	}
+ 	require.Nil(t, service.mgr)
+ 	require.Nil(t, service.server)
+diff --git a/service/smart_dns_pool/service.go b/service/smart_dns_pool/service.go
+index c87ece2aeec1355c6b4cb56462bfe0c7a419dd2c..762781565cb6284b3ec01d89239ac7c541780797 100644
+--- a/service/smart_dns_pool/service.go
++++ b/service/smart_dns_pool/service.go
+@@ -45,11 +45,10 @@ type Service struct {
+ 
+ 	listenAddr string
+ 
+-	mu         sync.Mutex
+-	mgr        *multidns.Manager
+-	server     *multidns.Server
+-	serverOnce sync.Once
+-	serveErr   chan error
++	mu       sync.Mutex
++	mgr      *multidns.Manager
++	server   *multidns.Server
++	serveErr chan error
+ }
+ 
+ // NewService constructs a smart_dns_pool service. It validates the options
+@@ -90,9 +89,6 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, opts
+ // at the StartStart stage so dnstt outbounds (which start later) find a
+ // listener already accepting queries on their first request.
+ func (s *Service) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+-	if stage == adapter.StartStateInitialize {
+-		scope.Add(s.Close) // H: closed with the box
+-	}
+ 	if stage != adapter.StartStateStart {
+ 		return nil
+ 	}
+@@ -134,6 +130,7 @@ func (s *Service) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 
+ 	s.mgr = mgr
+ 	s.server = srv
++	scope.Add(s.Close)
+ 	s.logger.Info("smart_dns_pool: listening on ", s.listenAddr, " (udp+tcp), ", len(s.opts.Upstreams), " upstream(s)")
+ 	return nil
+ }
+@@ -202,12 +199,15 @@ func newLoggerAdapter(logger log.ContextLogger, tag string) *loggerAdapter {
+ func (l *loggerAdapter) Debugf(format string, args ...any) {
+ 	l.logger.Debug(l.tag, ": ", fmt.Sprintf(format, args...))
+ }
++
+ func (l *loggerAdapter) Infof(format string, args ...any) {
+ 	l.logger.Info(l.tag, ": ", fmt.Sprintf(format, args...))
+ }
++
+ func (l *loggerAdapter) Warnf(format string, args ...any) {
+ 	l.logger.Warn(l.tag, ": ", fmt.Sprintf(format, args...))
+ }
++
+ func (l *loggerAdapter) Errorf(format string, args ...any) {
+ 	l.logger.Error(l.tag, ": ", fmt.Sprintf(format, args...))
+ }
+diff --git a/service/smart_dns_pool/service_test.go b/service/smart_dns_pool/service_test.go
+index 5357324d3eb0f83519d14db5b9dfc9962df00840..61661738872f957dee893048b803eda6815521f5 100644
+--- a/service/smart_dns_pool/service_test.go
++++ b/service/smart_dns_pool/service_test.go
+@@ -2,7 +2,6 @@ package smart_dns_pool
+ 
+ import (
+ 	"context"
+-	"github.com/sagernet/sing-box/adapter/htest"
+ 	"net"
+ 	"strconv"
+ 	"strings"
+@@ -100,10 +99,8 @@ func TestSmartDNSPool_EndToEnd(t *testing.T) {
+ 	}
+ 
+ 	opts := option.SmartDNSPoolServiceOptions{
+-		ListenOptions: option.ListenOptions{
+-			Listen:     &listenAddr,
+-			ListenPort: port,
+-		},
++		Listen:     &listenAddr,
++		ListenPort: port,
+ 		Upstreams: []option.SmartDNSPoolUpstreamOptions{
+ 			{Type: "udp", Address: upA},
+ 			{Type: "udp", Address: upB},
+@@ -115,10 +112,12 @@ func TestSmartDNSPool_EndToEnd(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatalf("NewService: %v", err)
+ 	}
+-	if err := htest.Start(svc, adapter.StartStateStart); err != nil {
++	scope := adapter.NewScope(context.Background(), log.NewNOPFactory().NewLogger("smart-dns-pool-test"))
++	defer scope.Close()
++	if err := svc.Start(adapter.StartStateStart, scope); err != nil {
+ 		t.Fatalf("Start: %v", err)
+ 	}
+-	defer htest.Close(svc)
++	defer svc.(*Service).Close()
+ 
+ 	addr := "127.0.0.1:" + strconv.Itoa(int(port))
+ 
+@@ -136,7 +135,7 @@ func TestSmartDNSPool_EndToEnd(t *testing.T) {
+ 
+ 	// Run several queries — round-robin should distribute across both upstreams.
+ 	answers := map[string]int{}
+-	for i := 0; i < 10; i++ {
++	for range 10 {
+ 		ip := digOnce(t, addr, "smart.test.")
+ 		answers[ip]++
+ 	}
+@@ -168,7 +167,7 @@ func TestSmartDNSPool_FailoverWithinDeadline(t *testing.T) {
+ 	}
+ 
+ 	opts := option.SmartDNSPoolServiceOptions{
+-		ListenOptions: option.ListenOptions{Listen: &listenAddr, ListenPort: port},
++		Listen: &listenAddr, ListenPort: port,
+ 		Upstreams: []option.SmartDNSPoolUpstreamOptions{
+ 			{Type: "udp", Address: dropAddr},
+ 			{Type: "udp", Address: good},
+@@ -181,10 +180,12 @@ func TestSmartDNSPool_FailoverWithinDeadline(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatalf("NewService: %v", err)
+ 	}
+-	if err := htest.Start(svc, adapter.StartStateStart); err != nil {
++	scope := adapter.NewScope(context.Background(), log.NewNOPFactory().NewLogger("smart-dns-pool-test"))
++	defer scope.Close()
++	if err := svc.Start(adapter.StartStateStart, scope); err != nil {
+ 		t.Fatalf("Start: %v", err)
+ 	}
+-	defer htest.Close(svc)
++	defer svc.(*Service).Close()
+ 
+ 	addr := "127.0.0.1:" + strconv.Itoa(int(port))
+ 	// Warmup until the listener accepts.
+@@ -200,7 +201,7 @@ func TestSmartDNSPool_FailoverWithinDeadline(t *testing.T) {
+ 	}
+ 
+ 	saw := false
+-	for i := 0; i < 6; i++ {
++	for range 6 {
+ 		ip := digOnce(t, addr, "fail.test.")
+ 		if ip == "192.0.2.60" {
+ 			saw = true

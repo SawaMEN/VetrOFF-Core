@@ -1,0 +1,495 @@
+diff --git a/transport/sudoku/crypto/aead.go b/transport/sudoku/crypto/aead.go
+index 368caea3294c727fe73c23c7dd5f8a9575ec66b5..0c5ab6b703c4fb01be1c833b4958330cc0a67e64 100644
+--- a/transport/sudoku/crypto/aead.go
++++ b/transport/sudoku/crypto/aead.go
+@@ -86,10 +86,7 @@ func (cc *AEADConn) Write(p []byte) (int, error) {
+ 	nonce := make([]byte, cc.nonceSize)
+ 
+ 	for len(p) > 0 {
+-		chunkSize := len(p)
+-		if chunkSize > maxPayload {
+-			chunkSize = maxPayload
+-		}
++		chunkSize := min(len(p), maxPayload)
+ 		chunk := p[:chunkSize]
+ 		p = p[chunkSize:]
+ 
+diff --git a/transport/sudoku/crypto/record_conn.go b/transport/sudoku/crypto/record_conn.go
+index e4e68d1e01f0daa919abd8883dcca26742a3da21..df5c4a1af3aa3f5bcd581f2dba13fa06fa9fb5b9 100644
+--- a/transport/sudoku/crypto/record_conn.go
++++ b/transport/sudoku/crypto/record_conn.go
+@@ -339,10 +339,7 @@ func (c *RecordConn) Write(p []byte) (int, error) {
+ 		if maxPlain <= 0 {
+ 			return total, errors.New("frame size too small")
+ 		}
+-		n := len(p)
+-		if n > maxPlain {
+-			n = maxPlain
+-		}
++		n := min(len(p), maxPlain)
+ 		chunk := p[:n]
+ 		p = p[n:]
+ 
+diff --git a/transport/sudoku/init.go b/transport/sudoku/init.go
+index 3e65591fd15c737d33d2b420ebc4be3ea77a415f..65a1ef5bf62d1516be7b94e70484ee12defdb11b 100644
+--- a/transport/sudoku/init.go
++++ b/transport/sudoku/init.go
+@@ -5,9 +5,10 @@ import (
+ 	"fmt"
+ 	"strings"
+ 
+-	"filippo.io/edwards25519"
+ 	"github.com/sagernet/sing-box/transport/sudoku/crypto"
+ 	"github.com/sagernet/sing-box/transport/sudoku/obfs/sudoku"
++
++	"filippo.io/edwards25519"
+ )
+ 
+ func NewTable(key string, tableType string) *sudoku.Table {
+diff --git a/transport/sudoku/multiplex/session.go b/transport/sudoku/multiplex/session.go
+index 70f879167322f19777c876ea42ef084e8f20a563..51197cde73a771deaacaed451d938a925fc9ad74 100644
+--- a/transport/sudoku/multiplex/session.go
++++ b/transport/sudoku/multiplex/session.go
+@@ -640,9 +640,9 @@ func (c *stream) enqueue(payload []byte) error {
+ 
+ 	// backpressure: wait for the reader to make room, which stops the session's read loop and so
+ 	// the peer, instead of resetting the stream as soon as the reader falls behind //H
+-	for c.queuedBytes > 0 && c.queuedBytes+len(payload) > maxQueuedBytesPerStream && !c.closed && !c.localReadClosed && !c.remoteWriteClosed { //H
+-		c.cond.Wait() //H
+-	} //H
++	for c.queuedBytes > 0 && c.queuedBytes+len(payload) > maxQueuedBytesPerStream && !c.closed && !c.localReadClosed && !c.remoteWriteClosed { // H
++		c.cond.Wait() // H
++	} // H
+ 	if c.closed || c.localReadClosed || c.remoteWriteClosed {
+ 		return nil
+ 	}
+diff --git a/transport/sudoku/multiplex_dialer.go b/transport/sudoku/multiplex_dialer.go
+index 95b86b593b6b55302bd07ced3aa92be19700ee1b..e92be580d988f5b44fe39b7d32ed86a75bf18416 100644
+--- a/transport/sudoku/multiplex_dialer.go
++++ b/transport/sudoku/multiplex_dialer.go
+@@ -41,7 +41,7 @@ func (d *MultiplexDialer) Dial(ctx context.Context, targetAddress string) (net.C
+ 	}
+ 
+ 	var lastErr error
+-	for attempt := 0; attempt < 2; attempt++ {
++	for range 2 {
+ 		client, err := d.getOrCreateClient(ctx)
+ 		if err != nil {
+ 			return nil, err
+diff --git a/transport/sudoku/obfs/httpmask/halfpipe.go b/transport/sudoku/obfs/httpmask/halfpipe.go
+index 18fc394d7016e137a7104c60b1be51bc99e93c83..afbe0bccd7c866c9a57e86abfc382b6e2815005b 100644
+--- a/transport/sudoku/obfs/httpmask/halfpipe.go
++++ b/transport/sudoku/obfs/httpmask/halfpipe.go
+@@ -212,10 +212,6 @@ func (c *halfPipeConn) Close() error {
+ 	return nil
+ }
+ 
+-func (c *halfPipeConn) peerClosed() bool {
+-	return isClosedPipeChan(c.remoteReadDone) && isClosedPipeChan(c.remoteWriteDone)
+-}
+-
+ func (c *halfPipeConn) SetDeadline(t time.Time) error {
+ 	c.readDeadline.set(t)
+ 	c.writeDeadline.set(t)
+diff --git a/transport/sudoku/obfs/httpmask/masker.go b/transport/sudoku/obfs/httpmask/masker.go
+index 4736d6ff307f0bc0f8eda03384fd344ce6663799..169321c03de41b6bc65aea105d17b31b4a616c74 100644
+--- a/transport/sudoku/obfs/httpmask/masker.go
++++ b/transport/sudoku/obfs/httpmask/masker.go
+@@ -64,12 +64,12 @@ var (
+ 
+ var (
+ 	rngPool = sync.Pool{
+-		New: func() interface{} {
++		New: func() any {
+ 			return rand.New(rand.NewSource(time.Now().UnixNano()))
+ 		},
+ 	}
+ 	headerBufPool = sync.Pool{
+-		New: func() interface{} {
++		New: func() any {
+ 			b := make([]byte, 0, 1024)
+ 			return &b
+ 		},
+@@ -159,7 +159,7 @@ func WriteRandomRequestHeaderWithPathRoot(w io.Writer, host string, pathRoot str
+ 	case 0, 1: // ~20% WebSocket-like upgrade
+ 		hostNoPort := trimPortForHost(host)
+ 		var keyBytes [16]byte
+-		for i := 0; i < len(keyBytes); i++ {
++		for i := range len(keyBytes) {
+ 			keyBytes[i] = byte(r.Intn(256))
+ 		}
+ 		wsKey := base64.StdEncoding.EncodeToString(keyBytes[:])
+diff --git a/transport/sudoku/obfs/httpmask/tunnel_conn_stream.go b/transport/sudoku/obfs/httpmask/tunnel_conn_stream.go
+index d5d841e42d5c0f5c5ac968373f58398f9dd3ba62..23a95f78cf77cefb1afdb63c4dea3ed8f7feb0a1 100644
+--- a/transport/sudoku/obfs/httpmask/tunnel_conn_stream.go
++++ b/transport/sudoku/obfs/httpmask/tunnel_conn_stream.go
+@@ -130,9 +130,7 @@ func (c *streamSplitConn) pullLoop() {
+ 		maxBackoff    = 250 * time.Millisecond
+ 	)
+ 
+-	var (
+-		backoff = minBackoff
+-	)
++	backoff := minBackoff
+ 	buf := make([]byte, readChunkSize)
+ 	for {
+ 		select {
+diff --git a/transport/sudoku/obfs/httpmask/tunnel_dial.go b/transport/sudoku/obfs/httpmask/tunnel_dial.go
+index ca129f9d9c8a23ffd6a5f7ce52de9110713e900c..f6e94bffd8795d932dbb502b6ac050f1ca00d514 100644
+--- a/transport/sudoku/obfs/httpmask/tunnel_dial.go
++++ b/transport/sudoku/obfs/httpmask/tunnel_dial.go
+@@ -100,10 +100,10 @@ func parseAuthorizeResponse(body []byte) (*authorizeResponse, error) {
+ }
+ 
+ func findAuthorizeField(body []byte, prefix string) string {
+-	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
++	for line := range strings.SplitSeq(strings.TrimSpace(string(body)), "\n") {
+ 		line = strings.TrimSpace(line)
+-		if strings.HasPrefix(line, prefix) {
+-			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
++		if after, ok := strings.CutPrefix(line, prefix); ok {
++			return strings.TrimSpace(after)
+ 		}
+ 	}
+ 	return ""
+@@ -189,21 +189,6 @@ type tunnelHTTPClient struct {
+ 	transport *tunnelHTTPTransport
+ }
+ 
+-func (c *tunnelHTTPClient) preconnect(ctx context.Context, req *http.Request, count int) context.CancelFunc {
+-	if c == nil || c.transport == nil || c.transport.transport == nil || c.transport.dialer == nil ||
+-		req == nil || req.URL == nil || count <= 0 {
+-		return func() {}
+-	}
+-
+-	if proxy := c.transport.transport.Proxy; proxy != nil {
+-		proxyURL, err := proxy(req)
+-		if err != nil || proxyURL != nil {
+-			return func() {}
+-		}
+-	}
+-	return c.transport.dialer.preconnect(ctx, req.URL.Scheme == "https", count)
+-}
+-
+ type httpClientTarget struct {
+ 	scheme     string
+ 	urlHost    string
+@@ -298,7 +283,7 @@ func dialSessionWithClient(ctx context.Context, client *http.Client, dialer *pre
+ 
+ 	var resp *http.Response
+ 	backoff := 50 * time.Millisecond
+-	for attempt := 0; attempt < 3; attempt++ {
++	for attempt := range 3 {
+ 		resp, err = client.Do(req)
+ 		if err == nil {
+ 			break
+@@ -377,7 +362,7 @@ func sendSessionControl(client *http.Client, controlURL, headerHost string, mode
+ 		lastErr error
+ 		backoff = 50 * time.Millisecond
+ 	)
+-	for attempt := 0; attempt < maxAttempts; attempt++ {
++	for attempt := range maxAttempts {
+ 		req, err := http.NewRequestWithContext(closeCtx, http.MethodPost, controlURL, nil)
+ 		if err != nil {
+ 			return err
+diff --git a/transport/sudoku/obfs/httpmask/tunnel_preconnect.go b/transport/sudoku/obfs/httpmask/tunnel_preconnect.go
+index 73b8c724bbc2ffc567ca56e5ea57d360c2baa8cf..e64a48db7e07972b188c14920a07c823a03dc82c 100644
+--- a/transport/sudoku/obfs/httpmask/tunnel_preconnect.go
++++ b/transport/sudoku/obfs/httpmask/tunnel_preconnect.go
+@@ -194,10 +194,7 @@ func (p *preparedConnPool) take(ctx context.Context) (net.Conn, bool, error) {
+ }
+ 
+ func (p *preparedConnPool) expire(item *preparedConn) {
+-	delay := time.Until(item.expiresAt)
+-	if delay < 0 {
+-		delay = 0
+-	}
++	delay := max(time.Until(item.expiresAt), 0)
+ 	timer := time.NewTimer(delay)
+ 	defer timer.Stop()
+ 	<-timer.C
+diff --git a/transport/sudoku/obfs/httpmask/tunnel_retry.go b/transport/sudoku/obfs/httpmask/tunnel_retry.go
+index 978566caeb3d2b01d4cb07dca555e226b6339e58..264144516dff39b45996277b1aaedac9ea44feeb 100644
+--- a/transport/sudoku/obfs/httpmask/tunnel_retry.go
++++ b/transport/sudoku/obfs/httpmask/tunnel_retry.go
+@@ -47,12 +47,10 @@ func closeIdleConnections(client *http.Client) {
+ }
+ 
+ func isDialError(err error) bool {
+-	var urlErr *url.Error
+-	if errors.As(err, &urlErr) {
++	if urlErr, ok := errors.AsType[*url.Error](err); ok {
+ 		return isDialError(urlErr.Err)
+ 	}
+-	var opErr *net.OpError
+-	if errors.As(err, &opErr) {
++	if opErr, ok := errors.AsType[*net.OpError](err); ok {
+ 		if opErr.Op == "dial" || opErr.Op == "connect" {
+ 			return true
+ 		}
+@@ -64,12 +62,10 @@ func isRetryableHTTPTransportError(err error) bool {
+ 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+ 		return false
+ 	}
+-	var statusErr *httpStatusError
+-	if errors.As(err, &statusErr) {
++	if statusErr, ok := errors.AsType[*httpStatusError](err); ok {
+ 		return isRetryableStatusCode(statusErr.code)
+ 	}
+-	var urlErr *url.Error
+-	if errors.As(err, &urlErr) {
++	if urlErr, ok := errors.AsType[*url.Error](err); ok {
+ 		return isRetryableHTTPTransportError(urlErr.Err)
+ 	}
+ 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+diff --git a/transport/sudoku/obfs/httpmask/tunnel_server.go b/transport/sudoku/obfs/httpmask/tunnel_server.go
+index 3e31930ae26a953e9f4c442213f67f69db145f73..505e8cf769d36938809900071bfd3a8f739d9c7a 100644
+--- a/transport/sudoku/obfs/httpmask/tunnel_server.go
++++ b/transport/sudoku/obfs/httpmask/tunnel_server.go
+@@ -13,6 +13,7 @@ import (
+ 	"net/http/httputil"
+ 	"net/url"
+ 	"os"
++	"slices"
+ 	"strconv"
+ 	"strings"
+ 	"sync"
+@@ -565,12 +566,7 @@ func (s *TunnelServer) handleStream(rawConn net.Conn, req *httpRequestHeader, he
+ }
+ 
+ func (s *TunnelServer) isAllowedBasePath(path string) bool {
+-	for _, p := range paths {
+-		if path == p {
+-			return true
+-		}
+-	}
+-	return false
++	return slices.Contains(paths, path)
+ }
+ 
+ func newRequestBodyReader(conn net.Conn, headers map[string]string) (io.Reader, error) {
+@@ -999,7 +995,7 @@ func (s *TunnelServer) pollPush(rawConn net.Conn, token string, sequence uint64,
+ 	}
+ 
+ 	var decodedPayload bytes.Buffer
+-	for _, line := range bytes.Split(payload, []byte{'\n'}) {
++	for line := range bytes.SplitSeq(payload, []byte{'\n'}) {
+ 		line = bytes.TrimSpace(line)
+ 		if len(line) == 0 {
+ 			continue
+diff --git a/transport/sudoku/obfs/httpmask/tunnel_ws_server.go b/transport/sudoku/obfs/httpmask/tunnel_ws_server.go
+index b17b1ded3de2892d2e294ca3be795dd1c5ab7a78..6e36c4a048c39104ab2a78ba65aa995fb1a09bd9 100644
+--- a/transport/sudoku/obfs/httpmask/tunnel_ws_server.go
++++ b/transport/sudoku/obfs/httpmask/tunnel_ws_server.go
+@@ -19,7 +19,7 @@ func looksLikeWebSocketUpgrade(headers map[string]string) bool {
+ 		return false
+ 	}
+ 	conn := headers["connection"]
+-	for _, part := range strings.Split(conn, ",") {
++	for part := range strings.SplitSeq(conn, ",") {
+ 		if strings.EqualFold(strings.TrimSpace(part), "upgrade") {
+ 			return true
+ 		}
+diff --git a/transport/sudoku/obfs/sudoku/grid.go b/transport/sudoku/obfs/sudoku/grid.go
+index 3e802989d38bdef127f1c7bf9c3f1d47b878a71f..023181d8f4414401878e7c9bb9d41365dabab6f7 100644
+--- a/transport/sudoku/obfs/sudoku/grid.go
++++ b/transport/sudoku/obfs/sudoku/grid.go
+@@ -18,15 +18,15 @@ func GenerateAllGrids() []Grid {
+ 		br, bc := (row/2)*2, (col/2)*2
+ 		for num := uint8(1); num <= 4; num++ {
+ 			valid := true
+-			for i := 0; i < 4; i++ {
++			for i := range 4 {
+ 				if g[row*4+i] == num || g[i*4+col] == num {
+ 					valid = false
+ 					break
+ 				}
+ 			}
+ 			if valid {
+-				for r := 0; r < 2; r++ {
+-					for c := 0; c < 2; c++ {
++				for r := range 2 {
++					for c := range 2 {
+ 						if g[(br+r)*4+(bc+c)] == num {
+ 							valid = false
+ 							break
+diff --git a/transport/sudoku/obfs/sudoku/layout.go b/transport/sudoku/obfs/sudoku/layout.go
+index 2e1ec236a4f8d5fa656c4672acaf6c459c22d68e..78cd6cc4efde339da2f4e4fd65b9d76b1ab1a4f9 100644
+--- a/transport/sudoku/obfs/sudoku/layout.go
++++ b/transport/sudoku/obfs/sudoku/layout.go
+@@ -3,7 +3,7 @@ package sudoku
+ import (
+ 	"fmt"
+ 	"math/bits"
+-	"sort"
++	"slices"
+ 	"strings"
+ )
+ 
+@@ -60,7 +60,7 @@ func resolveLayout(mode string, customPattern string) (*byteLayout, error) {
+ 
+ func newASCIILayout() *byteLayout {
+ 	padding := make([]byte, 0, 32)
+-	for i := 0; i < 32; i++ {
++	for i := range 32 {
+ 		padding = append(padding, byte(0x20+i))
+ 	}
+ 
+@@ -72,8 +72,8 @@ func newASCIILayout() *byteLayout {
+ 		paddingPool: padding,
+ 	}
+ 
+-	for val := 0; val < 4; val++ {
+-		for pos := 0; pos < 16; pos++ {
++	for val := range 4 {
++		for pos := range 16 {
+ 			b := byte(0x40 | (byte(val) << 4) | byte(pos))
+ 			if b == 0x7F {
+ 				b = '\n'
+@@ -81,14 +81,14 @@ func newASCIILayout() *byteLayout {
+ 			layout.encodeHint[val][pos] = b
+ 		}
+ 	}
+-	for group := 0; group < 64; group++ {
++	for group := range 64 {
+ 		b := byte(0x40 | byte(group))
+ 		if b == 0x7F {
+ 			b = '\n'
+ 		}
+ 		layout.encodeGroup[group] = b
+ 	}
+-	for b := 0; b < 256; b++ {
++	for b := range 256 {
+ 		wire := byte(b)
+ 		if (wire & 0x40) == 0x40 {
+ 			layout.hintTable[wire] = true
+@@ -105,7 +105,7 @@ func newASCIILayout() *byteLayout {
+ 
+ func newEntropyLayout() *byteLayout {
+ 	padding := make([]byte, 0, 16)
+-	for i := 0; i < 8; i++ {
++	for i := range 8 {
+ 		padding = append(padding, byte(0x80+i))
+ 		padding = append(padding, byte(0x10+i))
+ 	}
+@@ -118,16 +118,16 @@ func newEntropyLayout() *byteLayout {
+ 		paddingPool: padding,
+ 	}
+ 
+-	for val := 0; val < 4; val++ {
+-		for pos := 0; pos < 16; pos++ {
++	for val := range 4 {
++		for pos := range 16 {
+ 			layout.encodeHint[val][pos] = (byte(val) << 5) | byte(pos)
+ 		}
+ 	}
+-	for group := 0; group < 64; group++ {
++	for group := range 64 {
+ 		v := byte(group)
+ 		layout.encodeGroup[group] = ((v & 0x30) << 1) | (v & 0x0F)
+ 	}
+-	for b := 0; b < 256; b++ {
++	for b := range 256 {
+ 		wire := byte(b)
+ 		if (wire & 0x90) != 0 {
+ 			continue
+@@ -193,8 +193,8 @@ func newCustomLayout(pattern string) (*byteLayout, error) {
+ 	paddingSet := make(map[byte]struct{})
+ 	var padding []byte
+ 	for drop := range xBits {
+-		for val := 0; val < 4; val++ {
+-			for pos := 0; pos < 16; pos++ {
++		for val := range 4 {
++			for pos := range 16 {
+ 				b := encodeBits(byte(val), byte(pos), drop)
+ 				if bits.OnesCount8(b) >= 5 {
+ 					if _, ok := paddingSet[b]; !ok {
+@@ -205,7 +205,7 @@ func newCustomLayout(pattern string) (*byteLayout, error) {
+ 			}
+ 		}
+ 	}
+-	sort.Slice(padding, func(i, j int) bool { return padding[i] < padding[j] })
++	slices.Sort(padding)
+ 	if len(padding) == 0 {
+ 		return nil, fmt.Errorf("custom table produced empty padding pool")
+ 	}
+@@ -218,17 +218,17 @@ func newCustomLayout(pattern string) (*byteLayout, error) {
+ 		paddingPool: padding,
+ 	}
+ 
+-	for val := 0; val < 4; val++ {
+-		for pos := 0; pos < 16; pos++ {
++	for val := range 4 {
++		for pos := range 16 {
+ 			layout.encodeHint[val][pos] = encodeBits(byte(val), byte(pos), -1)
+ 		}
+ 	}
+-	for group := 0; group < 64; group++ {
++	for group := range 64 {
+ 		val := byte(group>>4) & 0x03
+ 		pos := byte(group) & 0x0F
+ 		layout.encodeGroup[group] = encodeBits(val, pos, -1)
+ 	}
+-	for b := 0; b < 256; b++ {
++	for b := range 256 {
+ 		wire := byte(b)
+ 		if (wire & xMask) != xMask {
+ 			continue
+diff --git a/transport/sudoku/obfs/sudoku/packed.go b/transport/sudoku/obfs/sudoku/packed.go
+index 4c87ef8d0dbcf3aa2ae6431909d2a0f015b99a38..5637a3282c1b97d6046f2737279e6982ee18622e 100644
+--- a/transport/sudoku/obfs/sudoku/packed.go
++++ b/transport/sudoku/obfs/sudoku/packed.go
+@@ -102,10 +102,7 @@ func (pc *PackedConn) writeProtectedPrefix(out []byte, p []byte) ([]byte, int) {
+ 		return out, 0
+ 	}
+ 
+-	limit := len(p)
+-	if limit > packedProtectedPrefixBytes {
+-		limit = packedProtectedPrefixBytes
+-	}
++	limit := min(len(p), packedProtectedPrefixBytes)
+ 
+ 	for padCount := 0; padCount < 1+pc.rng.Intn(2); padCount++ {
+ 		out = pc.appendForcedPadding(out)
+@@ -113,7 +110,7 @@ func (pc *PackedConn) writeProtectedPrefix(out []byte, p []byte) ([]byte, int) {
+ 
+ 	gap := pc.nextProtectedPrefixGap()
+ 	effective := 0
+-	for i := 0; i < limit; i++ {
++	for i := range limit {
+ 		pc.bitBuf = (pc.bitBuf << 8) | uint64(p[i])
+ 		pc.bitCount += 8
+ 		for pc.bitCount >= 6 {
+@@ -206,7 +203,7 @@ func (pc *PackedConn) Write(p []byte) (int, error) {
+ 	}
+ 
+ 	for i+11 < n {
+-		for batch := 0; batch < 4; batch++ {
++		for range 4 {
+ 			b1, b2, b3 := p[i], p[i+1], p[i+2]
+ 			i += 3
+ 
+diff --git a/transport/sudoku/obfs/sudoku/table.go b/transport/sudoku/obfs/sudoku/table.go
+index d355ae0e1a4060a10629dfcfe9d5fb3d70d87f29..ee1c2afc391a27070a7d349792a41f51de7d9871 100644
+--- a/transport/sudoku/obfs/sudoku/table.go
++++ b/transport/sudoku/obfs/sudoku/table.go
+@@ -8,9 +8,7 @@ import (
+ 	"strings"
+ )
+ 
+-var (
+-	ErrInvalidSudokuMapMiss = errors.New("INVALID_SUDOKU_MAP_MISS")
+-)
++var ErrInvalidSudokuMapMiss = errors.New("INVALID_SUDOKU_MAP_MISS")
+ 
+ type Table struct {
+ 	EncodeTable [256][][4]byte
+@@ -111,7 +109,7 @@ func newSingleDirectionTable(key string, mode string, customPattern string) (*Ta
+ 	combine(0, 4, []int{})
+ 
+ 	// 构建映射表
+-	for byteVal := 0; byteVal < 256; byteVal++ {
++	for byteVal := range 256 {
+ 		targetGrid := shuffledGrids[byteVal]
+ 		for _, positions := range combinations {
+ 			var currentHints [4]byte

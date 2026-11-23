@@ -1,0 +1,48 @@
+diff --git a/protocol/vmess/inbound.go b/protocol/vmess/inbound.go
+index 0b4f51cc4c901080c5f02c35345196129d5d410e..3e09ec01c7d4dad0a433d0be54c65ebb50c9270c 100644
+--- a/protocol/vmess/inbound.go
++++ b/protocol/vmess/inbound.go
+@@ -47,6 +47,9 @@ type Inbound struct {
+ }
+ 
+ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.VMessInboundOptions) (adapter.Inbound, error) {
++	if options.Transport != nil && options.Transport.Type == "xdrive" {
++		return nil, E.New("XDrive requires VLESS")
++	}
+ 	inbound := &Inbound{
+ 		Adapter: inbound.NewAdapter(C.TypeVMess, tag),
+ 		ctx:     ctx,
+diff --git a/protocol/vmess/outbound.go b/protocol/vmess/outbound.go
+index 2d86767625fd7d722cef2734c362a8b17a087460..d4e45ecb00e4e02c827dc5fec773effc08533a4c 100644
+--- a/protocol/vmess/outbound.go
++++ b/protocol/vmess/outbound.go
+@@ -48,6 +48,9 @@ type Outbound struct {
+ }
+ 
+ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.VMessOutboundOptions) (adapter.Outbound, error) {
++	if options.Transport != nil && options.Transport.Type == "xdrive" {
++		return nil, E.New("XDrive requires VLESS")
++	}
+ 	outboundDialer, err := dialer.New(ctx, options.DialerOptions, options.ServerIsDomain())
+ 	if err != nil {
+ 		return nil, err
+@@ -148,17 +151,8 @@ func (h *Outbound) CloseIdleConnections() {
+ 	}
+ }
+ 
+-func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+-	if stage != adapter.StartStateInitialize {
+-		return nil
+-	}
+-	if h.transport != nil {
+-		scope.Add(h.transport.Close)
+-	}
+-	if h.multiplexDialer != nil {
+-		scope.Add(h.multiplexDialer.Close)
+-	}
+-	return nil
++func (h *Outbound) Close() error {
++	return common.Close(common.PtrOrNil(h.multiplexDialer), h.transport)
+ }
+ 
+ func (h *Outbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {

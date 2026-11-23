@@ -1,0 +1,282 @@
+diff --git a/tools/prepare-panel-kernel.py b/tools/prepare-panel-kernel.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..600a4249b76ab43654b449d6304c8b46c0303613
+--- /dev/null
++++ b/tools/prepare-panel-kernel.py
+@@ -0,0 +1,129 @@
++#!/usr/bin/env python3
++"""Prepare pinned native Linux kernel releases, never replaying panel patches."""
++import json
++import os
++from pathlib import Path
++import re
++import subprocess
++import sys
++
++SHA = re.compile(r"^[0-9a-f]{40}$")
++SUFFIX = re.compile(r"(-(?:mask|panel)[0-9]+(?:-ciphers[0-9]+)?(?:-net[0-9]+)?(?:-sec[0-9]+)?(?:-stream[0-9]+)?)$")
++REQUIRED_TAGS = {"with_xui_panel", "with_v2ray_api", "with_awg", "with_quic", "with_wireguard", "with_utls", "with_clash_api", "with_masque", "with_gvisor", "with_naive_outbound", "with_purego", "with_kcp", "http2legacy", "tfogo_checklinkname0"}
++REQUIRED_FILES = {"cmd/cmd_xui_check.go", "hiddify-sing-box/internal/xuispeed/client.go", "hiddify-sing-box/transport/masque/server.go", "hiddify-sing-box/transport/masque/session.go", "hiddify-sing-box/protocol/masque/server.go", "hiddify-sing-box/protocol/vless/xui_reverse.go", "hiddify-sing-box/protocol/group/xui_balancer.go"}
++NATIVE_MODULES = ("github.com/metacubex/utls", "github.com/starifly/sing-vmess", "github.com/xtls/xray-core")
++
++
++def command(*args):
++    return subprocess.check_output(args, text=True).strip()
++
++
++def gitlink(name):
++    fields = command("git", "ls-tree", "HEAD", "--", name).split()
++    if len(fields) != 4 or fields[:2] != ["160000", "commit"] or fields[3] != name or not SHA.fullmatch(fields[2]):
++        raise ValueError("Missing pinned native gitlink: " + name)
++    return fields[2]
++
++
++def patch_profile_suffix(version):
++    match = SUFFIX.search(version) if isinstance(version, str) else None
++    if match is None:
++        raise ValueError("Unreviewed kernel compatibility suffix")
++    return match.group(1)
++
++
++def release_tag(core_sha, sing_sha, channel, suffix):
++    if not SHA.fullmatch(core_sha) or not SHA.fullmatch(sing_sha) or channel not in ("dev", "stable"):
++        raise ValueError("Invalid release source identity")
++    prefix = "sawamen" if channel == "stable" else "sawamen-dev"
++    return f"{prefix}-{core_sha[:12]}-{sing_sha[:12]}{suffix}"
++
++
++def verify_native_panel(panel, lock):
++    build = lock.get("panel_build")
++    if not isinstance(build, dict):
++        raise ValueError("Missing native panel contract")
++    tags = build.get("tags")
++    files = build.get("native_source_files")
++    if not isinstance(tags, list) or not REQUIRED_TAGS.issubset(tags):
++        raise ValueError("Native kernel feature tags missing")
++    if not isinstance(files, list) or len(files) < 20 or len(files) != len(set(files)) or not REQUIRED_FILES.issubset(files):
++        raise ValueError("Missing native source evidence")
++    if any(key.endswith("_overlay") for key in build) or "speed_broker_sdk" in build:
++        raise ValueError("A retired panel overlay remains in the manifest")
++    checks = {row["path"]: row["contains"] for row in lock.get("source_checks", [])}
++    if checks.get("cmd/cmd_xui_check.go") != 'Use:   "check"' or checks.get("hiddify-sing-box/transport/masque/server.go") != 'xuispeed.New("masque:"':
++        raise ValueError("Native CLI or speed-broker evidence missing")
++    builder_path = panel / "tools/build-hiddify-core.sh"
++    builder = builder_path.read_text()
++    # A malformed quote or duplicated block can stop every core release
++    # before Go starts. Validate the actual panel builder, not a copied fixture.
++    shell = subprocess.run(["bash", "-n", str(builder_path)], capture_output=True, text=True)
++    if shell.returncode:
++        raise ValueError("Invalid native kernel builder Bash syntax: " + shell.stderr.strip())
++    for fragment in (
++        "go build -buildvcs=true",
++        "github.com/metacubex/utls -run '^TestChrome155(",
++        "if [[ ${HIDDIFY_VULNCHECK:-0} == 1 ]]; then",
++    ):
++        if builder.count(fragment) != 1:
++            raise ValueError("Native kernel builder gate is missing or duplicated: " + fragment)
++    if ".patch" in builder or ".go.in" in builder or "xui-dependencies" in builder:
++        raise ValueError("Native builder still modifies upstream sources")
++    for evidence in ("verify-hiddify-build.py", "native_source_files", "go mod tidy", "go mod download", "go build -buildvcs=true", "sha256sum"):
++        if evidence not in builder:
++            raise ValueError("Missing native release gate: " + evidence)
++    return build
++
++
++def prepare(panel):
++    core_sha, channel = os.environ["KERNEL_COMMIT"], os.environ["KERNEL_CHANNEL"]
++    if not SHA.fullmatch(core_sha) or command("git", "rev-parse", "HEAD") != core_sha:
++        raise ValueError("Kernel checkout differs from trigger")
++    if channel not in ("stable", "dev"):
++        raise ValueError("Invalid kernel channel")
++    sing_gitlink = gitlink("hiddify-sing-box")
++    sing_sha = os.environ.get("SINGBOX_COMMIT") or sing_gitlink
++    ray_sha = gitlink("ray2sing")
++    if not SHA.fullmatch(sing_sha) or (channel == "stable" and sing_sha != sing_gitlink):
++        raise ValueError("Stable release must use reviewed Sing-box gitlink")
++    lock_path = panel / "deploy/hiddify/hiddify-core-target.json"
++    lock = json.loads(lock_path.read_text())
++    if lock.get("schema_version") != 2 or lock.get("stage") != 4:
++        raise ValueError("Unexpected native panel lock schema")
++    build = verify_native_panel(panel, lock)
++    target = lock["target"]
++    if target["repository"] != "https://github.com/SawaMEN/hiddify-core":
++        raise ValueError("Wrong kernel origin")
++    if target["submodule_repositories"].get("hiddify-sing-box") != "https://github.com/SawaMEN/hiddify-sing-box" or target["submodule_repositories"].get("ray2sing") != "https://github.com/SawaMEN/ray2sing":
++        raise ValueError("Wrong pinned native module origins")
++    module = Path("go.mod").read_text()
++    match = re.search(r"(?m)^go ([0-9]+\.[0-9]+(?:\.[0-9]+)?)$", module)
++    if match is None or "go" + match.group(1) != "go1.27.3":
++        raise ValueError("Unreviewed core Go toolchain")
++    if not Path("cmd/cmd_xui_check.go").is_file():
++        raise ValueError("Native raw config check command missing")
++
++    version = release_tag(core_sha, sing_sha, channel, patch_profile_suffix(target["version"]))
++    target["version"], target["commit"] = version, core_sha
++    target["submodules"]["hiddify-sing-box"] = sing_sha
++    target["submodules"]["ray2sing"] = ray_sha
++    build["toolchain"] = "go" + match.group(1)
++    build["sing_box_version"] = "sawamen-" + sing_sha[:12]
++    build["protection_dependency_versions"] = {name: "native:" + sing_sha for name in NATIVE_MODULES}
++    lock_path.write_text(json.dumps(lock, ensure_ascii=False, indent=2) + "\n")
++    profile_file = panel / "internal/hiddify/translate.go"
++    profile = profile_file.read_text()
++    for name, value in (("TargetVersion", version), ("TargetRevision", core_sha)):
++        pattern = r'(?m)^([ \t]*' + name + r'[ \t]*=[ \t]*)"[^"\n]+"'
++        profile, count = re.subn(pattern, lambda m: m.group(1) + '"' + value + '"', profile)
++        if count != 1:
++            raise ValueError("Cannot update panel identity: " + name)
++    profile_file.write_text(profile)
++    print(f"Native release: core={core_sha} sing-box={sing_sha} parser={ray_sha} tag={version}")
++
++
++if __name__ == "__main__":
++    if len(sys.argv) != 2:
++        raise SystemExit("usage: prepare-panel-kernel.py PANEL_CHECKOUT")
++    prepare(Path(sys.argv[1]))
+diff --git a/tools/test_prepare_panel_kernel.py b/tools/test_prepare_panel_kernel.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..df140b5aea22a82ea40031fcc42b7515681a3f51
+--- /dev/null
++++ b/tools/test_prepare_panel_kernel.py
+@@ -0,0 +1,141 @@
++import importlib.util
++from pathlib import Path
++import tempfile
++import unittest
++
++spec = importlib.util.spec_from_file_location("prep", Path(__file__).with_name("prepare-panel-kernel.py"))
++prep = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(prep)
++
++REVIEWED = sorted(prep.REQUIRED_FILES | {
++    "hiddify-sing-box/protocol/vless/xui_handshake_test.go",
++    "hiddify-sing-box/protocol/vless/xui_preconnect.go",
++    "hiddify-sing-box/protocol/vless/xui_reverse_native_test.go",
++    "hiddify-sing-box/common/tls/xui_reality_mldsa_handshake_test.go",
++    "hiddify-sing-box/protocol/group/xui_balancer_test.go",
++    "hiddify-sing-box/h_xray_kcp_test.go",
++    "hiddify-sing-box/transport/v2raykcp/h_kcp_test.go",
++    "hiddify-sing-box/transport/v2rayxhttp/xui_upload_queue_native_test.go",
++    "hiddify-sing-box/third_party/sing-vmess/vless/xui_vision_options.go",
++    "hiddify-sing-box/third_party/xray-core/go.mod",
++    "hiddify-sing-box/experimental/clashapi/trafficontrol/xui_panel_test.go",
++    "hiddify-sing-box/option/xui_panel_http1_test.go",
++    "hiddify-sing-box/transport/trojan/xui_stream_test.go",
++    "hiddify-sing-box/transport/v2rayhttpupgrade/xui_stream_test.go",
++})
++
++
++def fixture(root):
++    (root / "tools").mkdir()
++    script = ("python3 tools/verify-hiddify-build.py --upstream src\n"
++              "native_source_files\n"
++              "go mod tidy\n"
++              "go mod download packages\n"
++              "go build -buildvcs=true\n"
++              "CGO_ENABLED=0 go test github.com/metacubex/utls -run '^TestChrome155(CapturedClientHello|DefaultFingerprintRoundTrip|PresetOwnership)$' -count=1 -timeout=90s\n"
++              "if [[ ${HIDDIFY_VULNCHECK:-0} == 1 ]]; then true; fi\n"
++              "sha256sum\n")
++    (root / "tools/build-hiddify-core.sh").write_text(script)
++    return {
++        "panel_build": {"tags": sorted(prep.REQUIRED_TAGS), "native_source_files": REVIEWED},
++        "source_checks": [
++            {"path": "cmd/cmd_xui_check.go", "contains": 'Use:   "check"'},
++            {"path": "hiddify-sing-box/transport/masque/server.go", "contains": 'xuispeed.New("masque:"'},
++        ],
++    }
++
++
++class NativeBuildTest(unittest.TestCase):
++    def test_native_builder_has_no_panel_patches(self):
++        with tempfile.TemporaryDirectory() as temporary:
++            root = Path(temporary)
++            lock = fixture(root)
++            self.assertIs(prep.verify_native_panel(root, lock), lock["panel_build"])
++
++    def test_reject_old_overlay_manifest(self):
++        with tempfile.TemporaryDirectory() as temporary:
++            root = Path(temporary)
++            lock = fixture(root)
++            lock["panel_build"]["masque_overlay"] = "old.patch"
++            with self.assertRaises(ValueError):
++                prep.verify_native_panel(root, lock)
++
++    def test_reject_unverified_speed_broker(self):
++        with tempfile.TemporaryDirectory() as temporary:
++            root = Path(temporary)
++            lock = fixture(root)
++            lock["panel_build"]["native_source_files"].remove("hiddify-sing-box/internal/xuispeed/client.go")
++            with self.assertRaises(ValueError):
++                prep.verify_native_panel(root, lock)
++
++    def test_reject_builder_reintroducing_git_patch(self):
++        with tempfile.TemporaryDirectory() as temporary:
++            root = Path(temporary)
++            lock = fixture(root)
++            with (root / "tools/build-hiddify-core.sh").open("a") as script:
++                script.write("git apply --check removed.patch\n")
++            with self.assertRaises(ValueError):
++                prep.verify_native_panel(root, lock)
++
++    def test_reject_malformed_panel_builder_shell(self):
++        with tempfile.TemporaryDirectory() as temporary:
++            root = Path(temporary)
++            lock = fixture(root)
++            with (root / "tools/build-hiddify-core.sh").open("a") as script:
++                script.write("echo 'unclosed quote\\n")
++            with self.assertRaisesRegex(ValueError, "Bash syntax"):
++                prep.verify_native_panel(root, lock)
++
++    def test_reject_duplicated_native_release_build(self):
++        with tempfile.TemporaryDirectory() as temporary:
++            root = Path(temporary)
++            lock = fixture(root)
++            with (root / "tools/build-hiddify-core.sh").open("a") as script:
++                script.write("go build -buildvcs=true\\n")
++            with self.assertRaisesRegex(ValueError, "missing or duplicated"):
++                prep.verify_native_panel(root, lock)
++
++    def test_reject_missing_browser_fingerprint_test_gate(self):
++        with tempfile.TemporaryDirectory() as temporary:
++            root = Path(temporary)
++            lock = fixture(root)
++            script_path = root / "tools/build-hiddify-core.sh"
++            script = script_path.read_text()
++            script_path.write_text(script.replace("github.com/metacubex/utls -run '^TestChrome155(",
++                                                  "github.com/metacubex/utls -run '^OldChrome133("))
++            with self.assertRaisesRegex(ValueError, "missing or duplicated"):
++                prep.verify_native_panel(root, lock)
++
++    def test_release_uses_matching_panel_go_toolchain(self):
++        workflow = (Path(__file__).parents[1] / ".github/workflows/panel-kernel-release.yml").read_text()
++        self.assertIn("go-version-file: panel-source/go.mod", workflow)
++        self.assertIn("cache-dependency-path: panel-source/go.sum", workflow)
++        self.assertLess(workflow.index("go-version-file: panel-source/go.mod"),
++                        workflow.index("name: MASQUE HTTP/2 CONNECT-IP"))
++        self.assertIn("if: matrix.arch == 'amd64'", workflow)
++
++    def test_masque_release_gate_requires_all_wire_protocols(self):
++        workflow = (Path(__file__).parents[1] / ".github/workflows/panel-kernel-release.yml").read_text()
++        self.assertIn('"TestMASQUESpeedLimits/HTTP1"', workflow)
++        self.assertIn('"TestMASQUESpeedLimits/HTTP2"', workflow)
++        self.assertIn('"TestMASQUESpeedLimits/HTTP3"', workflow)
++        self.assertIn('if results.get(name) != "pass"', workflow)
++        self.assertIn('MASQUE release E2E incomplete', workflow)
++
++    def test_validate_abi_suffix(self):
++        old = "sawamen-4f1b5e6b9b2b-4fe303071f4f-mask1-ciphers1-net62-sec1-stream1"
++        self.assertEqual("-mask1-ciphers1-net62-sec1-stream1", prep.patch_profile_suffix(old))
++        with self.assertRaises(ValueError):
++            prep.patch_profile_suffix("invalid-profile")
++
++    def test_release_versions_are_reviewed_and_distinct(self):
++        core, sing = "a" * 40, "b" * 40
++        self.assertEqual("sawamen-" + "a" * 12 + "-" + "b" * 12 + "-mask1",
++                         prep.release_tag(core, sing, "stable", "-mask1"))
++        self.assertTrue(prep.release_tag(core, sing, "dev", "-mask1").startswith("sawamen-dev-"))
++        with self.assertRaises(ValueError):
++            prep.release_tag(core, "bad", "stable", "-mask1")
++
++
++if __name__ == "__main__":
++    unittest.main()

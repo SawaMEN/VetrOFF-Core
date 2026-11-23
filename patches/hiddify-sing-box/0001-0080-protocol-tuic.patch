@@ -1,0 +1,53 @@
+diff --git a/protocol/tuic/h_outbound_test.go b/protocol/tuic/h_outbound_test.go
+index 97642409baad80617fa57963d9a8d1c2e3ff8a03..11ba15b9d59ac2318691876f0583050a7e0e313b 100644
+--- a/protocol/tuic/h_outbound_test.go
++++ b/protocol/tuic/h_outbound_test.go
+@@ -12,10 +12,10 @@ import (
+ 
+ func hTUICOptions(mode string) option.TUICOutboundOptions {
+ 	return option.TUICOutboundOptions{
+-		ServerOptions:               option.ServerOptions{Server: "127.0.0.1", ServerPort: 443},
+-		UUID:                        "b831381d-6324-4d53-ad4f-8cda48b30811",
+-		UDPRelayMode:                mode,
+-		OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{TLS: &option.OutboundTLSOptions{Enabled: true, ServerName: "example.com"}},
++		Server: "127.0.0.1", ServerPort: 443,
++		UUID:         "b831381d-6324-4d53-ad4f-8cda48b30811",
++		UDPRelayMode: mode,
++		TLS:          &option.OutboundTLSOptions{Enabled: true, ServerName: "example.com"},
+ 	}
+ }
+ 
+diff --git a/protocol/tuic/outbound.go b/protocol/tuic/outbound.go
+index abfa33a73fd4a366f9376283f4c6f0fa74812572..aeee607ef271609f938235f919d6a7847b2e26a3 100644
+--- a/protocol/tuic/outbound.go
++++ b/protocol/tuic/outbound.go
+@@ -60,11 +60,11 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
+ 		return nil, E.New("udp_over_stream is conflict with udp_relay_mode")
+ 	}
+ 	switch options.UDPRelayMode {
+-	case "", "native": //H
++	case "", "native": // H
+ 	case "quic":
+ 		tuicUDPStream = true
+-	default: //H: a misspelt mode used to mean native silently
+-		return nil, E.New("unknown udp_relay_mode: ", options.UDPRelayMode, " (expected native or quic)") //H
++	default: // H: a misspelt mode used to mean native silently
++		return nil, E.New("unknown udp_relay_mode: ", options.UDPRelayMode, " (expected native or quic)") // H
+ 	}
+ 	outboundDialer, err := dialer.New(ctx, options.DialerOptions, options.ServerIsDomain())
+ 	if err != nil {
+@@ -163,12 +163,6 @@ func (h *Outbound) CloseIdleConnections() {
+ 	h.client.CloseIdleConnections()
+ }
+ 
+-func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+-	if stage != adapter.StartStateInitialize {
+-		return nil
+-	}
+-	scope.Add(func() error {
+-		return h.client.CloseWithError(os.ErrClosed)
+-	})
+-	return nil
++func (h *Outbound) Close() error {
++	return h.client.CloseWithError(os.ErrClosed)
+ }

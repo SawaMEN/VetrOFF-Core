@@ -1,0 +1,25 @@
+diff --git a/common/wholepacket/wholepacket.go b/common/wholepacket/wholepacket.go
+index 275f0c70ae0802c387266d2fa8c415324bc082aa..1dc53c955c72877542056a4f19bd4d0595af7f7a 100644
+--- a/common/wholepacket/wholepacket.go
++++ b/common/wholepacket/wholepacket.go
+@@ -19,7 +19,7 @@ import (
+ // maxUDPPacket is the largest UDP payload.
+ const maxUDPPacket = 65535
+ 
+-var buffers = sync.Pool{New: func() any { return make([]byte, maxUDPPacket) }}
++var buffers = sync.Pool{New: func() any { return new([maxUDPPacket]byte) }}
+ 
+ // Wrap returns conn reading whole packets in ReadFrom. A UDP socket, or a connection already
+ // wrapped, is returned as it is; the buffer-based packet methods are kept.
+@@ -38,9 +38,9 @@ func readWhole(conn net.PacketConn, p []byte) (int, net.Addr, error) {
+ 	if len(p) >= maxUDPPacket {
+ 		return conn.ReadFrom(p)
+ 	}
+-	buffer := buffers.Get().([]byte)
++	buffer := buffers.Get().(*[maxUDPPacket]byte)
+ 	defer buffers.Put(buffer)
+-	n, addr, err := conn.ReadFrom(buffer)
++	n, addr, err := conn.ReadFrom(buffer[:])
+ 	return copy(p, buffer[:n]), addr, err
+ }
+ 

@@ -1,0 +1,324 @@
+diff --git a/experimental/cachefile/cache.go b/experimental/cachefile/cache.go
+index beff54a92ea5dd2cbf01e259d06ca110e6284f2a..e5068b74f12cc5e11de0a3406bbeb8c5fde25d35 100644
+--- a/experimental/cachefile/cache.go
++++ b/experimental/cachefile/cache.go
+@@ -68,6 +68,8 @@ type CacheFile struct {
+ 	flushAccess       sync.Mutex
+ 	flushTimer        *time.Timer
+ 	flushSignal       chan struct{}
++	done              chan struct{}
++	closeOnce         sync.Once
+ }
+ 
+ type saveCacheKey struct {
+@@ -117,8 +119,8 @@ func New(ctx context.Context, logger logger.Logger, options option.CacheFileOpti
+ 		cacheIDText:       options.CacheID,
+ 		storeFakeIP:       options.StoreFakeIP,
+ 		storeRDRC:         storeRDRC,
+-		storeWARPConfig:   storedUnlessOff(options.StoreWARPConfig),   //H
+-		storeMASQUEConfig: storedUnlessOff(options.StoreMASQUEConfig), //H
++		storeWARPConfig:   options.StoreWARPConfig,
++		storeMASQUEConfig: options.StoreMASQUEConfig,
+ 		storeDNS:          options.StoreDNS,
+ 		rdrcTimeout:       rdrcTimeout,
+ 		bufferSize:        bufferSize,
+@@ -126,6 +128,7 @@ func New(ctx context.Context, logger logger.Logger, options option.CacheFileOpti
+ 		pending:           newPendingWrites(),
+ 		flushTimer:        flushTimer,
+ 		flushSignal:       make(chan struct{}, 1),
++		done:              make(chan struct{}),
+ 	}
+ }
+ 
+@@ -156,22 +159,8 @@ func (c *CacheFile) Start(stage adapter.StartStage, scope *adapter.Scope) error
+ 		if err != nil {
+ 			return err
+ 		}
+-		scope.Add(func() error {
+-			return c.database().Close()
+-		})
+-		scope.Add(func() error {
+-			c.flushTimer.Stop()
+-			c.Flush()
+-			return nil
+-		})
+-		var flushGroup sync.WaitGroup
+-		scope.Add(func() error {
+-			flushGroup.Wait()
+-			return nil
+-		})
+-		flushGroup.Go(func() {
+-			c.loopFlush(scope.Context())
+-		})
++		scope.Add(c.Close) // H: c.start already launches loopFlush
++
+ 	case adapter.StartStateStart:
+ 		c.startCacheCleanup(scope.Context())
+ 	}
+@@ -263,9 +252,25 @@ func (c *CacheFile) start() error {
+ 		return err
+ 	}
+ 	c.DB = db
++	go c.loopFlush()
+ 	return nil
+ }
+ 
++func (c *CacheFile) Close() error {
++	c.closeOnce.Do(func() {
++		close(c.done)
++	})
++	c.flushTimer.Stop()
++	c.dbAccess.RLock()
++	db := c.DB
++	c.dbAccess.RUnlock()
++	if db == nil {
++		return nil
++	}
++	c.Flush()
++	return db.Close()
++}
++
+ func checkDatabase(db *bbolt.DB) error {
+ 	return db.View(func(tx *bbolt.Tx) error {
+ 		var checkErr error
+@@ -306,8 +311,7 @@ func (c *CacheFile) batch(fn func(tx *bbolt.Tx) error) (err error) {
+ 		}
+ 	}()
+ 	err = db.Batch(fn)
+-	var panicErr bbolt.PanickedError
+-	if errors.As(err, &panicErr) {
++	if panicErr, ok := errors.AsType[bbolt.PanickedError](err); ok {
+ 		c.resetDB(db, panicErr.Reason)
+ 		return E.New("database corrupted: ", panicErr.Reason)
+ 	}
+diff --git a/experimental/cachefile/dns_cache.go b/experimental/cachefile/dns_cache.go
+index 0a7e44797dd91f954968ae42f14f8a424843c09b..65f128dedf7b791b2a51643be3fc9689c5bc09a3 100644
+--- a/experimental/cachefile/dns_cache.go
++++ b/experimental/cachefile/dns_cache.go
+@@ -100,7 +100,7 @@ func (c *CacheFile) loopCacheCleanup(ctx context.Context, interval time.Duration
+ 	defer ticker.Stop()
+ 	for {
+ 		select {
+-		case <-ctx.Done():
++		case <-c.done:
+ 			return
+ 		case <-ticker.C:
+ 			cleanupFunc()
+diff --git a/experimental/cachefile/h_cache_test.go b/experimental/cachefile/h_cache_test.go
+index a80dbe5d2c3325b39d9d6365f51a32b32dc159e2..6b0fcd01a2d58533b060bf9fefec8395593e26e6 100644
+--- a/experimental/cachefile/h_cache_test.go
++++ b/experimental/cachefile/h_cache_test.go
+@@ -2,7 +2,6 @@ package cachefile
+ 
+ import (
+ 	"context"
+-	"github.com/sagernet/sing-box/adapter/htest"
+ 	"path/filepath"
+ 	"testing"
+ 	"time"
+@@ -16,24 +15,23 @@ import (
+ 
+ func openTestCache(t *testing.T, options option.CacheFileOptions) *CacheFile {
+ 	c := New(context.Background(), log.NewNOPFactory().NewLogger("cache"), options)
+-	require.NoError(t, htest.Start(c, adapter.StartStateInitialize))
++	require.NoError(t, c.Start(adapter.StartStateInitialize, adapter.NewScope(context.Background(), log.NewNOPFactory().NewLogger("cache"))))
+ 	return c
+ }
+ 
+ func TestH_CacheFileWARPMASQUEFlags(t *testing.T) {
+ 	dir := t.TempDir()
+ 	c := New(context.Background(), log.NewNOPFactory().NewLogger("cache"), option.CacheFileOptions{Path: filepath.Join(dir, "a.db")})
+-	require.True(t, c.StoreWARPConfig(), "stored unless turned off")
+-	require.True(t, c.StoreMASQUEConfig(), "stored unless turned off")
++	require.False(t, c.StoreWARPConfig())
++	require.False(t, c.StoreMASQUEConfig())
+ 
+-	off := false
+ 	c = New(context.Background(), log.NewNOPFactory().NewLogger("cache"), option.CacheFileOptions{
+ 		Path:              filepath.Join(dir, "b.db"),
+-		StoreWARPConfig:   &off,
+-		StoreMASQUEConfig: &off,
++		StoreWARPConfig:   true,
++		StoreMASQUEConfig: true,
+ 	})
+-	require.False(t, c.StoreWARPConfig())
+-	require.False(t, c.StoreMASQUEConfig())
++	require.True(t, c.StoreWARPConfig())
++	require.True(t, c.StoreMASQUEConfig())
+ 
+ 	var _ adapter.CacheFile = c
+ }
+@@ -58,10 +56,10 @@ func TestH_CacheFileBinaryRoundTrip(t *testing.T) {
+ 
+ 	require.NoError(t, c.SaveBinary("outbound_monitoring_history", &adapter.SavedBinary{Content: []byte("v2")}))
+ 	require.Equal(t, []byte("v2"), c.LoadBinary("outbound_monitoring_history").Content)
+-	require.NoError(t, htest.Close(c))
++	require.NoError(t, c.Close())
+ 
+ 	c = openTestCache(t, option.CacheFileOptions{Path: path})
+-	defer htest.Close(c)
++	defer c.Close()
+ 	require.Equal(t, []byte("v2"), c.LoadBinary("outbound_monitoring_history").Content, "persisted across reopen")
+ }
+ 
+@@ -69,13 +67,13 @@ func TestH_CacheFileBinaryWithCacheID(t *testing.T) {
+ 	path := filepath.Join(t.TempDir(), "cache.db")
+ 	c := openTestCache(t, option.CacheFileOptions{Path: path, CacheID: "profile-1"})
+ 	require.NoError(t, c.SaveBinary("k", &adapter.SavedBinary{Content: []byte("one")}))
+-	require.NoError(t, htest.Close(c))
++	require.NoError(t, c.Close())
+ 
+ 	c = openTestCache(t, option.CacheFileOptions{Path: path, CacheID: "profile-2"})
+ 	require.Nil(t, c.LoadBinary("k"), "binaries are scoped by cache id")
+-	require.NoError(t, htest.Close(c))
++	require.NoError(t, c.Close())
+ 
+ 	c = openTestCache(t, option.CacheFileOptions{Path: path, CacheID: "profile-1"})
+-	defer htest.Close(c)
++	defer c.Close()
+ 	require.Equal(t, []byte("one"), c.LoadBinary("k").Content)
+ }
+diff --git a/experimental/cachefile/h_dns_cache_flush_test.go b/experimental/cachefile/h_dns_cache_flush_test.go
+index c93c1363749a8e9372ee5fa44160cbc7eb443df7..8f563ad990991d6b9921097d93f3f1cd18a59139 100644
+--- a/experimental/cachefile/h_dns_cache_flush_test.go
++++ b/experimental/cachefile/h_dns_cache_flush_test.go
+@@ -47,4 +47,3 @@ func TestH_DNSCacheFlushFailurePreservesPendingValue(t *testing.T) {
+ 	require.Equal(t, rawMessage, actualMessage)
+ 	require.Equal(t, expireAt.Unix(), actualExpireAt.Unix())
+ }
+-
+diff --git a/experimental/cachefile/h_store_defaults.go b/experimental/cachefile/h_store_defaults.go
+index ff894242fc118611c6e100f3b6ea4250d8b6e249..57a55864ddb7294cd02ccdd353c581d9a79d20e3 100644
+--- a/experimental/cachefile/h_store_defaults.go
++++ b/experimental/cachefile/h_store_defaults.go
+@@ -1,8 +1 @@
+ package cachefile
+-
+-// storedUnlessOff is a store_* switch of Hiddify's that is on by default: WARP and MASQUE devices
+-// are registered with Cloudflare, and registering again at every start is slow and rate limited,
+-// so the cache file keeps them unless the option is false.
+-func storedUnlessOff(option *bool) bool {
+-	return option == nil || *option
+-}
+diff --git a/experimental/cachefile/pending.go b/experimental/cachefile/pending.go
+index c1882e0de1042e8a6526e871bdfe0de01e6bb7c0..72d0cb77fd70d2e77952158ffc8076232555924f 100644
+--- a/experimental/cachefile/pending.go
++++ b/experimental/cachefile/pending.go
+@@ -1,7 +1,6 @@
+ package cachefile
+ 
+ import (
+-	"context"
+ 	"encoding/binary"
+ 	"net/netip"
+ 	"time"
+@@ -50,10 +49,10 @@ func (c *CacheFile) enqueueLocked(added bool, sizeDelta int) {
+ 	}
+ }
+ 
+-func (c *CacheFile) loopFlush(ctx context.Context) {
++func (c *CacheFile) loopFlush() {
+ 	for {
+ 		select {
+-		case <-ctx.Done():
++		case <-c.done:
+ 			return
+ 		case <-c.flushTimer.C:
+ 		case <-c.flushSignal:
+@@ -81,58 +80,48 @@ func (c *CacheFile) Flush() {
+ 		c.logger.Warn("save cache: ", err)
+ 	}
+ 	c.pendingAccess.Lock()
+-	if err != nil { //H: keep what failed to save, or it is neither on disk nor in memory
+-		c.restorePendingLocked(writing) //H
+-	} //H
++	if err != nil {
++		// A failed transaction must not evict cached entries. Keep newer writes
++		// made during the flush, and requeue older values only when absent.
++		for key, entry := range writing.dnsCache {
++			if _, exists := c.pending.dnsCache[key]; !exists {
++				c.pending.dnsCache[key] = entry
++				c.pending.count++
++				c.pending.size += len(key.QuestionName) + len(entry.value)
++			}
++		}
++		for key := range writing.rdrc {
++			if _, exists := c.pending.rdrc[key]; !exists {
++				c.pending.rdrc[key] = struct{}{}
++				c.pending.count++
++				c.pending.size += len(key.QuestionName)
++			}
++		}
++		for addr, domain := range writing.fakeIPDomain {
++			if _, exists := c.pending.fakeIPDomain[addr]; !exists {
++				c.pending.fakeIPDomain[addr] = domain
++				c.pending.count++
++				c.pending.size += len(domain)
++			}
++		}
++		for domain, addr := range writing.fakeIPAddress4 {
++			if _, exists := c.pending.fakeIPAddress4[domain]; !exists {
++				c.pending.fakeIPAddress4[domain] = addr
++			}
++		}
++		for domain, addr := range writing.fakeIPAddress6 {
++			if _, exists := c.pending.fakeIPAddress6[domain]; !exists {
++				c.pending.fakeIPAddress6[domain] = addr
++			}
++		}
++		if c.pending.fakeIPMetadata == nil {
++			c.pending.fakeIPMetadata = writing.fakeIPMetadata
++		}
++	}
+ 	c.writing = nil
+ 	c.pendingAccess.Unlock()
+ }
+ 
+-// restorePendingLocked puts the writes of a failed flush back, under any newer write of the
+-// same key. From reF1nd/sing-box 1d089fcb. //H
+-func (c *CacheFile) restorePendingLocked(writing *pendingWrites) { //H
+-	wasEmpty := c.pending.count == 0           //H
+-	for key, entry := range writing.dnsCache { //H
+-		if _, loaded := c.pending.dnsCache[key]; loaded { //H
+-			continue //H
+-		} //H
+-		c.pending.dnsCache[key] = entry                            //H
+-		c.pending.count++                                          //H
+-		c.pending.size += len(key.QuestionName) + len(entry.value) //H
+-	} //H
+-	for key := range writing.rdrc { //H
+-		if _, loaded := c.pending.rdrc[key]; loaded { //H
+-			continue //H
+-		} //H
+-		c.pending.rdrc[key] = struct{}{}        //H
+-		c.pending.count++                       //H
+-		c.pending.size += len(key.QuestionName) //H
+-	} //H
+-	for address, domain := range writing.fakeIPDomain { //H
+-		if _, loaded := c.pending.fakeIPDomain[address]; loaded { //H
+-			continue //H
+-		} //H
+-		if _, loaded := c.pending.fakeIPAddress(domain, address.Is6()); loaded { //H
+-			continue //H
+-		} //H
+-		c.pending.fakeIPDomain[address] = domain //H
+-		if address.Is4() {                       //H
+-			c.pending.fakeIPAddress4[domain] = address //H
+-		} else { //H
+-			c.pending.fakeIPAddress6[domain] = address //H
+-		} //H
+-		c.pending.count++             //H
+-		c.pending.size += len(domain) //H
+-	} //H
+-	if c.pending.fakeIPMetadata == nil && writing.fakeIPMetadata != nil { //H
+-		c.pending.fakeIPMetadata = writing.fakeIPMetadata //H
+-		c.pending.count++                                 //H
+-	} //H
+-	if wasEmpty && c.pending.count > 0 && c.flushInterval > 0 { //H
+-		c.flushTimer.Reset(c.flushInterval) //H
+-	} //H
+-} //H
+-
+ func (c *CacheFile) writePending(tx *bbolt.Tx, pending *pendingWrites) error {
+ 	if len(pending.dnsCache) > 0 {
+ 		bucket, err := c.createBucket(tx, bucketDNSCache)

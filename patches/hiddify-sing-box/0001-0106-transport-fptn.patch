@@ -1,0 +1,489 @@
+diff --git a/transport/fptn/LICENSE b/transport/fptn/LICENSE
+new file mode 100644
+index 0000000000000000000000000000000000000000..550284f1f42b42ab4b26c586f1527567a1b8db5f
+--- /dev/null
++++ b/transport/fptn/LICENSE
+@@ -0,0 +1,21 @@
++MIT License
++
++Copyright (c) 2024 Stas Skokov
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
+diff --git a/transport/fptn/obfuscation.go b/transport/fptn/obfuscation.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..df79766dbe5aed69403667e766b5976bda67210e
+--- /dev/null
++++ b/transport/fptn/obfuscation.go
+@@ -0,0 +1,115 @@
++// Wire-compatible implementation of FPTN TlsObfuscator2 (FPTN 0.4.6).
++// Protocol reference: fptn-project/fptn, MIT, Copyright 2024–2026 Stas Skokov.
++package fptn
++
++import (
++	"crypto/rand"
++	"encoding/binary"
++	"fmt"
++	"io"
++	"net"
++	"sync/atomic"
++	"time"
++)
++
++type obfuscatedConn struct {
++	net.Conn
++	enabled atomic.Bool
++	pending []byte
++}
++
++func newObfuscatedConn(c net.Conn) *obfuscatedConn {
++	r := &obfuscatedConn{Conn: c}
++	r.enabled.Store(true)
++	return r
++}
++
++func (c *obfuscatedConn) Write(p []byte) (int, error) {
++	if !c.enabled.Load() {
++		return c.Conn.Write(p)
++	}
++	total := 0
++	for len(p) > 0 {
++		n := min(len(p), 8175)
++		var random [3]byte
++		if _, e := rand.Read(random[:]); e != nil {
++			return total, e
++		}
++		padding := 4095 + int(binary.BigEndian.Uint16(random[:2]))%4098
++		b := make([]byte, 22+n+padding)
++		if _, e := rand.Read(b); e != nil {
++			return total, e
++		}
++		b[0] = 0x17
++		b[1] = 3
++		b[2] = 3
++		binary.BigEndian.PutUint16(b[3:5], uint16(len(b)-5))
++		binary.BigEndian.PutUint32(b[13:17], uint32(time.Now().Unix()))
++		b[17] = random[2]
++		binary.BigEndian.PutUint16(b[18:20], uint16(n))
++		binary.BigEndian.PutUint16(b[20:22], uint16(padding))
++		for i := range n {
++			b[22+i] = p[i] ^ b[17]
++		}
++		if e := writeFull(c.Conn, b); e != nil {
++			return total, e
++		}
++		total += n
++		p = p[n:]
++	}
++	return total, nil
++}
++
++func (c *obfuscatedConn) Read(p []byte) (int, error) {
++	if len(p) == 0 {
++		return 0, nil
++	}
++	if len(c.pending) > 0 {
++		n := copy(p, c.pending)
++		c.pending = c.pending[n:]
++		return n, nil
++	}
++	if !c.enabled.Load() {
++		return c.Conn.Read(p)
++	}
++	var hdr [5]byte
++	if _, e := io.ReadFull(c.Conn, hdr[:]); e != nil {
++		return 0, e
++	}
++	size := int(binary.BigEndian.Uint16(hdr[3:]))
++	if size > 32768 || size < 17 || hdr[0] != 0x17 || hdr[1] != 3 || hdr[2] != 3 {
++		return 0, fmt.Errorf("fptn: invalid obfuscation record")
++	}
++	b := make([]byte, size)
++	if _, e := io.ReadFull(c.Conn, b); e != nil {
++		return 0, e
++	}
++	stamp := int64(binary.BigEndian.Uint32(b[8:12]))
++	if delta := time.Now().Unix() - stamp; delta < -120 || delta > 120 {
++		return 0, fmt.Errorf("fptn: invalid obfuscation timestamp")
++	}
++	n := int(binary.BigEndian.Uint16(b[13:15]))
++	padding := int(binary.BigEndian.Uint16(b[15:17]))
++	if n == 0 || n+padding+17 != size {
++		return 0, fmt.Errorf("fptn: invalid obfuscation lengths")
++	}
++	for i := range n {
++		b[17+i] ^= b[12]
++	}
++	c.pending = b[17 : 17+n]
++	return c.Read(p)
++}
++
++func writeFull(w io.Writer, p []byte) error {
++	for len(p) > 0 {
++		n, e := w.Write(p)
++		if e != nil {
++			return e
++		}
++		if n == 0 {
++			return io.ErrShortWrite
++		}
++		p = p[n:]
++	}
++	return nil
++}
+diff --git a/transport/fptn/protobuf.go b/transport/fptn/protobuf.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1115846b418761ac12b1f79ab4806714e0781515
+--- /dev/null
++++ b/transport/fptn/protobuf.go
+@@ -0,0 +1,124 @@
++package fptn
++
++import (
++	"fmt"
++	"net/netip"
++
++	"google.golang.org/protobuf/encoding/protowire"
++)
++
++func bytesField(b []byte, n protowire.Number, data []byte) []byte {
++	b = protowire.AppendTag(b, n, protowire.BytesType)
++	return protowire.AppendBytes(b, data)
++}
++
++func message(kind uint64, field protowire.Number, data []byte) []byte {
++	b := []byte{8, 1, 16}
++	b = protowire.AppendVarint(b, kind)
++	return bytesField(b, field, data)
++}
++
++func EncodePacket(packet []byte) []byte {
++	inner := message(1, 4, bytesField(nil, 1, packet))
++	batch := bytesField(nil, 1, inner)
++	return message(3, 6, batch)
++}
++
++func fields(b []byte) (map[protowire.Number][][]byte, map[protowire.Number]uint64, error) {
++	data := map[protowire.Number][][]byte{}
++	nums := map[protowire.Number]uint64{}
++	if len(b) > 256*1024 {
++		return nil, nil, fmt.Errorf("fptn: oversized message")
++	}
++	for len(b) > 0 {
++		num, typ, n := protowire.ConsumeTag(b)
++		if n < 0 {
++			return nil, nil, fmt.Errorf("fptn: malformed protobuf")
++		}
++		b = b[n:]
++		switch typ {
++		case protowire.BytesType:
++			v, n := protowire.ConsumeBytes(b)
++			if n < 0 {
++				return nil, nil, fmt.Errorf("fptn: invalid protobuf length")
++			}
++			data[num] = append(data[num], v)
++			b = b[n:]
++		case protowire.VarintType:
++			v, n := protowire.ConsumeVarint(b)
++			if n < 0 {
++				return nil, nil, fmt.Errorf("fptn: invalid protobuf integer")
++			}
++			nums[num] = v
++			b = b[n:]
++		default:
++			n := protowire.ConsumeFieldValue(num, typ, b)
++			if n < 0 {
++				return nil, nil, fmt.Errorf("fptn: invalid protobuf field")
++			}
++			b = b[n:]
++		}
++	}
++	return data, nums, nil
++}
++
++func one(m map[protowire.Number][][]byte, n protowire.Number) []byte {
++	if len(m[n]) == 0 {
++		return nil
++	}
++	return m[n][len(m[n])-1]
++}
++
++func DecodeAssignment(b []byte) ([]netip.Addr, error) {
++	d, n, e := fields(b)
++	if e != nil {
++		return nil, e
++	}
++	if n[1] != 1 || n[2] != 2 {
++		return nil, fmt.Errorf("fptn: IP assignment expected")
++	}
++	d, _, e = fields(one(d, 5))
++	if e != nil {
++		return nil, e
++	}
++	a4, e := netip.ParseAddr(string(one(d, 1)))
++	if e != nil || !a4.Is4() {
++		return nil, fmt.Errorf("fptn: invalid assigned IPv4")
++	}
++	a6, e := netip.ParseAddr(string(one(d, 2)))
++	if e != nil || !a6.Is6() {
++		return nil, fmt.Errorf("fptn: invalid assigned IPv6")
++	}
++	return []netip.Addr{a4, a6}, nil
++}
++
++func DecodePackets(b []byte) ([][]byte, error) {
++	d, n, e := fields(b)
++	if e != nil {
++		return nil, e
++	}
++	if n[1] != 1 || n[2] != 3 {
++		return nil, fmt.Errorf("fptn: invalid packet message")
++	}
++	batch, _, e := fields(one(d, 6))
++	if e != nil {
++		return nil, e
++	}
++	var packets [][]byte
++	for _, inner := range batch[1] {
++		d, n, e = fields(inner)
++		if e != nil || n[1] != 1 || n[2] != 1 {
++			return nil, fmt.Errorf("fptn: invalid inner packet")
++		}
++		p, _, e := fields(one(d, 4))
++		if e != nil {
++			return nil, e
++		}
++		data := one(p, 1)
++		if len(data) < 20 || len(data) > 65535 {
++			return nil, fmt.Errorf("fptn: invalid IP packet length")
++		}
++		packets = append(packets, data)
++	}
++	return packets, nil
++}
+diff --git a/transport/fptn/tls.go b/transport/fptn/tls.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f3030dddf621c94d29f4091d307bdbb06afb67c
+--- /dev/null
++++ b/transport/fptn/tls.go
+@@ -0,0 +1,149 @@
++package fptn
++
++import (
++	"context"
++	"crypto/md5"
++	"crypto/rand"
++	"crypto/sha1"
++	"crypto/x509"
++	"encoding/binary"
++	"encoding/hex"
++	"fmt"
++	"net"
++	"time"
++
++	utls "github.com/metacubex/utls"
++)
++
++func sessionID(offset int) ([]byte, error) {
++	b := make([]byte, 32)
++	if _, e := rand.Read(b); e != nil {
++		return nil, e
++	}
++	var stamp [4]byte
++	binary.BigEndian.PutUint32(stamp[:], uint32(time.Now().Unix()))
++	sum := sha1.Sum(stamp[:])
++	copy(b[offset:offset+4], sum[:4])
++	return b, nil
++}
++
++func setSession(c *utls.UConn, offset int) error {
++	if e := c.BuildHandshakeState(); e != nil {
++		return e
++	}
++	id, e := sessionID(offset)
++	if e != nil {
++		return e
++	}
++	c.HandshakeState.Hello.SessionId = id
++	for _, e := range c.Extensions {
++		if a, ok := e.(*utls.ALPNExtension); ok {
++			a.AlpnProtocols = []string{"http/1.1"}
++		}
++	}
++	return c.MarshalClientHello()
++}
++
++// decoyHandshake sends a browser ClientHello bearing FPTN's offset-14 marker,
++// drains the server flight, then switches at the CCS boundary as upstream does.
++func decoyHandshake(ctx context.Context, raw net.Conn, sni string) error {
++	c := utls.UClient(raw, &utls.Config{ServerName: sni, InsecureSkipVerify: true}, utls.HelloChrome_Auto)
++	if e := setSession(c, 14); e != nil {
++		return e
++	}
++	hello := c.HandshakeState.Hello.Raw
++	record := make([]byte, 5+len(hello))
++	copy(record, []byte{22, 3, 1})
++	binary.BigEndian.PutUint16(record[3:5], uint16(len(hello)))
++	copy(record[5:], hello)
++	if e := writeFull(raw, record); e != nil {
++		return e
++	}
++	deadline := time.Now().Add(6 * time.Second)
++	var data []byte
++	complete := false
++	for {
++		if complete {
++			raw.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
++		} else {
++			raw.SetReadDeadline(deadline)
++		}
++		buf := make([]byte, 4096)
++		n, e := raw.Read(buf)
++		if n > 0 {
++			data = append(data, buf[:n]...)
++			if len(data) > 65536 {
++				return fmt.Errorf("fptn: oversized decoy response")
++			}
++			if len(data) >= 5 && data[0] == 22 && len(data) >= 5+int(binary.BigEndian.Uint16(data[3:5])) {
++				complete = true
++			}
++		}
++		if e != nil {
++			if timeout, ok := e.(net.Error); ok && timeout.Timeout() && complete {
++				break
++			}
++			return fmt.Errorf("fptn: decoy handshake failed")
++		}
++	}
++	raw.SetReadDeadline(time.Time{})
++	if e := writeFull(raw, []byte{20, 3, 3, 0, 1, 1}); e != nil {
++		return e
++	}
++	return transitionPause(ctx)
++}
++
++func DialTLS(ctx context.Context, raw net.Conn, sni, fingerprint, bypass string) (net.Conn, error) {
++	stop := context.AfterFunc(ctx, func() { raw.Close() })
++	defer stop()
++	raw.SetDeadline(time.Now().Add(20 * time.Second))
++	if bypass == "sni-spoofing" {
++		if e := decoyHandshake(ctx, raw, sni); e != nil {
++			raw.Close()
++			return nil, e
++		}
++	}
++	wire := newObfuscatedConn(raw)
++	conf := &utls.Config{ServerName: sni, MinVersion: utls.VersionTLS12, InsecureSkipVerify: true, VerifyPeerCertificate: func(certs [][]byte, _ [][]*x509.Certificate) error {
++		if len(certs) == 0 {
++			return fmt.Errorf("fptn: missing server certificate")
++		}
++		sum := md5.Sum(certs[0])
++		if hex.EncodeToString(sum[:]) != fingerprint {
++			return fmt.Errorf("fptn: certificate fingerprint mismatch")
++		}
++		return nil
++	}}
++	c := utls.UClient(wire, conf, utls.HelloChrome_Auto)
++	if e := setSession(c, 28); e != nil {
++		raw.Close()
++		return nil, e
++	}
++	if e := c.HandshakeContext(ctx); e != nil {
++		raw.Close()
++		return nil, fmt.Errorf("fptn: TLS handshake failed")
++	}
++	wire.enabled.Store(false)
++	if e := transitionPause(ctx); e != nil {
++		raw.Close()
++		return nil, e
++	}
++	raw.SetDeadline(time.Time{})
++	if ctx.Err() != nil {
++		raw.Close()
++		return nil, ctx.Err()
++	}
++	return c, nil
++}
++
++// The upstream server switches its stream wrapper between handshake phases.
++func transitionPause(ctx context.Context) error {
++	timer := time.NewTimer(150 * time.Millisecond)
++	defer timer.Stop()
++	select {
++	case <-ctx.Done():
++		return ctx.Err()
++	case <-timer.C:
++		return nil
++	}
++}
+diff --git a/transport/fptn/wire_test.go b/transport/fptn/wire_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..67ae3791b847d7c83084fc2c8064c6b70f19b8a2
+--- /dev/null
++++ b/transport/fptn/wire_test.go
+@@ -0,0 +1,50 @@
++package fptn
++
++import (
++	"bytes"
++	"crypto/sha1"
++	"encoding/binary"
++	"io"
++	"net"
++	"testing"
++	"time"
++)
++
++func TestSessionIDMarker(t *testing.T) {
++	for _, offset := range []int{14, 28} {
++		id, e := sessionID(offset)
++		if e != nil {
++			t.Fatal(e)
++		}
++		var b [4]byte
++		binary.BigEndian.PutUint32(b[:], uint32(time.Now().Unix()))
++		hash := sha1.Sum(b[:])
++		if len(id) != 32 || !bytes.Equal(id[offset:offset+4], hash[:4]) {
++			t.Fatal("FPTN SHA1 timestamp marker mismatch")
++		}
++	}
++}
++
++func TestTLS2WireRecord(t *testing.T) {
++	a, b := net.Pipe()
++	defer a.Close()
++	defer b.Close()
++	go func() { c := newObfuscatedConn(a); c.Write([]byte("fptn")) }()
++	var h [22]byte
++	if _, e := io.ReadFull(b, h[:]); e != nil {
++		t.Fatal(e)
++	}
++	payload := int(binary.BigEndian.Uint16(h[18:20]))
++	padding := int(binary.BigEndian.Uint16(h[20:22]))
++	if payload != 4 || padding < 4095 || padding > 8192 || int(binary.BigEndian.Uint16(h[3:5])) != 17+payload+padding || !bytes.Equal(h[:3], []byte{23, 3, 3}) {
++		t.Fatal("wire does not match packed C++ TLSAppDataRecordHeader")
++	}
++	body := make([]byte, payload+padding)
++	io.ReadFull(b, body)
++	for i := range payload {
++		body[i] ^= h[17]
++	}
++	if string(body[:payload]) != "fptn" {
++		t.Fatal("XOR payload mismatch")
++	}
++}

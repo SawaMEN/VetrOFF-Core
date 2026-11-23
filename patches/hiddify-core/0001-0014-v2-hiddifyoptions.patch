@@ -1,0 +1,13 @@
+diff --git a/v2/hiddifyoptions/hiddify_options.go b/v2/hiddifyoptions/hiddify_options.go
+index d7af23954ce2559222ce0e1f32c9e43412979666..33bff6b877fd2aad4a0691aaaa8aa6cfb89fcf59 100644
+--- a/v2/hiddifyoptions/hiddify_options.go
++++ b/v2/hiddifyoptions/hiddify_options.go
+@@ -166,7 +166,7 @@ func GetOverridableHiddifyOptions(overrides map[string][]string) *HiddifyOptions
+ 
+ 	// Use reflection to iterate over the fields of HiddifyOptions
+ 	v := reflect.ValueOf(&overrideHiddify).Elem()
+-	t := reflect.TypeOf(overrideHiddify)
++	t := v.Type()
+ 
+ 	// Recursively set the fields that are marked as overridable
+ 	setOverridableFields(v, t, nestedOverrides)
