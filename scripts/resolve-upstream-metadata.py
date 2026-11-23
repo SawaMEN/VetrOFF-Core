@@ -392,4 +392,78 @@ marker = b"// scaleMarks is marks"
 assert new.count(addition) == 1 and new.count(marker) == 1
 assert new[:new.index(marker)].replace(addition, b"").rstrip() == own.rstrip()
 resolutions[path] = new
+# Coordinate the main monitor with the previously reviewed registry, join,
+# settle and staged implementations. The upstream file is the base for the
+# candidate, including lazy outbounds and early group subscriptions.
+path = "common/monitoring/outbound_monitoring.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("d27cc83028faec8b05140900291132a5ae583d46",
+     "05914a8b8712a9fd23e29a62f6319f792c0f3a5e",
+     "3b933447bf2de2776d299eaf0c3f01c2c1b21be1")))
+def replace_once(blob, before, after):
+    assert blob.count(before) == 1, (path, before)
+    return blob.replace(before, after, 1)
+def function_blob(blob, signature):
+    start = blob.index(signature)
+    end = blob.index(b"\n}\n", start) + 3
+    return blob[start:end]
+candidate = new
+# Atomic started remains the contract for the fork's registry and tests.
+candidate = replace_once(candidate, b"\tstarted          bool\n", b"\tstarted          atomic.Bool\n")
+candidate = replace_once(candidate, b"\t\tstarted:         false,\n", b"")
+candidate = replace_once(candidate, b"if !m.started {", b"if !m.started.Load() || m.closed {")
+candidate = replace_once(candidate, b"m.started = true", b"m.started.Store(true)")
+candidate = replace_once(candidate, b"m.closed = true   //H", b"m.closed = true   //H\n\t\tm.started.Store(false)")
+# Cancel before joining workers, preserving the upstream closed guard.
+candidate = replace_once(candidate, b"\t\tm.access.Unlock() //H\n\t\tm.stopTimerWorkers()", b"\t\tm.access.Unlock() //H\n\t\tm.cancel()\n\t\tm.stopTimerWorkers()")
+candidate = replace_once(candidate, b"\t\tm.cancel()\n\t\tm.workerWG.Wait()", b"\t\tm.workerWG.Wait()")
+candidate = replace_once(candidate, b"if !m.started || m.closed {", b"if !m.started.Load() || m.closed || m.ctx.Err() != nil {")
+# Keep each execution's completion channel rather than closing a later run.
+start = candidate.index(b"\tstate.testDone = make(chan struct{}) //H")
+end = candidate.index(b"\tif task.waits < dependencyWaits", start)
+fork_start = own.index(b"\ttask.testDone = make(chan struct{})")
+fork_end = own.index(b"\tif task.waits < dependencyWaits", fork_start)
+candidate = candidate[:start] + own[fork_start:fork_end] + candidate[end:]
+candidate = replace_once(candidate, b"type testTask struct {\n", b"type testTask struct {\n\ttestDone chan struct{} // H: completion belongs to this execution\n")
+# Snapshot history under its lock and keep the fork's IP provider interface;
+# preserve the upstream timeout scaling and lazy-outbound acquisition.
+candidate = replace_once(candidate, b"\tidx := m.currentLinkIndex.Load()\n\tfactor :=", b"\tout.mu.Lock()\n\tprevious := out.history\n\tout.mu.Unlock()\n\tidx := m.currentLinkIndex.Load()\n\tfactor :=")
+candidate = replace_once(candidate, b"(out.history.IPv6 == nil || out.history.IPv6FromCache)", b"(previous.IPv6 == nil || previous.IPv6FromCache)")
+candidate = replace_once(candidate, b"if out.history.IpInfo == nil || out.history.IpInfoFromCache", b"if previous.IpInfo == nil || previous.IpInfoFromCache")
+start = own.index(b"\t\tvar newip *ipinfo.IpInfo")
+end = own.index(b"\t\tif err == nil {", start)
+candidate = replace_once(candidate, b"\t\tnewip, t, err := ipinfo.GetIpInfo(m.logger, ctx, out.outbound, m.ipInfoURL)\n", own[start:end])
+candidate = replace_once(candidate, b"mergeIpInfo(out.history.IpInfo, newip)", b"mergeIpInfo(previous.IpInfo, newip)")
+# Retain queue rollback on saturation, and immutable history snapshots.
+signature = b"func (m *OutboundMonitoring) enqueueTask("
+candidate = replace_once(candidate, function_blob(candidate, signature), function_blob(own, signature))
+candidate = replace_once(candidate, b"m.history.StoreURLTestHistory(outcome.outboundTag, &state.history)", b"snapshot := state.history // H: immutable history snapshot\n\tm.history.StoreURLTestHistory(outcome.outboundTag, &snapshot)")
+candidate = replace_once(candidate, b"return &state.history", b"return &snapshot")
+# Keep the upstream cycle ordering and LastGood behavior, as they are
+# coordinated with its added cycleOrder implementation and cache semantics.
+assert b"return cycleOrder(tags, delays)" in candidate
+assert b"state.history.LastGood = outcome.history.Delay" in candidate
+assert b"m.abandon(task, errNotRegistered)" in candidate
+assert b"m.keepTop.options = options.KeepTop" in candidate
+assert b"adapter.AcquireOutbound(out.outbound)" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Preserve existing JSON key while accepting the new upstream spelling.
+path = "option/monitoring.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("2c87d244f56196c077753db369b18acdb46ae26d",
+     "6828eaea76501f9bfbec1dddd62de4a65bbd4a13",
+     "91ccb9d81257250daffe4417e60795055223b397")))
+assert b'json:"ip_info_url,omitempty"' in own
+assert b'json:"ipinfo_url,omitempty"' in new
+candidate = replace_once(new, b'json:"ipinfo_url,omitempty"', b'json:"ip_info_url,omitempty"')
+needle = b"\tWorkers"
+candidate = replace_once(candidate, needle, b'\tLegacyIpInfoURL string \x60json:"ipinfo_url,omitempty"\x60 // H: upstream spelling\n' + needle)
+assert b"KeepTop *KeepTopOptions" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+path = "common/monitoring/outbound_monitoring.go"
+candidate = replace_once(resolutions[path], b"\tonDemand := onDemandTimeouts(options.OnDemandTimeouts)", b"\tif options.IpInfoURL == \"\" {\n\t\toptions.IpInfoURL = options.LegacyIpInfoURL\n\t}\n\tonDemand := onDemandTimeouts(options.OnDemandTimeouts)")
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 apply_reviewed(data, resolutions)
