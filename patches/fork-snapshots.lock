@@ -1,0 +1,5 @@
+# Audited fork HEAD revisions used to generate the original patch series.
+# These are NOT upstream Git submodule pins. Keep the two concepts separate.
+HIDDIFY_CORE_FORK_SHA=a5662c60c181090d860f165bffe9734c896bae23
+SING_BOX_FORK_SHA=45814844d5b80af5b43ac5c17d45c0ed3a42bcd0
+RAY2SING_FORK_SHA=7aac8dcf42b6284cf6993c992db8dcf259a4b98f
