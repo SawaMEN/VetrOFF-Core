@@ -1365,4 +1365,55 @@ plain = replace_once(own, b' "sync/atomic"\n', b"")
 plain = plain[:plain.index(b"type masqueLinkState struct")].rstrip() + b"\n"
 assert plain == new
 resolutions[path] = subprocess.check_output(["gofmt"], input=own)
+# WARP session ownership and failover are a coupled change. Keep the
+# conditional MASQUE capability interface from the fork.
+path = "protocol/warp/h_mode.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("da93a833fd7932e924d9b14c4969cf51bdab5f18",
+     "b20826a3360eccf34325468c4ccf88a5a10a9c51",
+     "0ec8a961fa9672f968252b42fd94ee0e838a0339")))
+assert new.count(b"if masqueIncluded {") == 3
+candidate = new.replace(b"if masqueIncluded {", b"if w.masqueLinkState.included() {")
+for signature in (b"func warpMode(", b"func (w *WARPEndpoint) activeMode(", b"func (w *WARPEndpoint) clearFailedModes(", b"func (w *WARPEndpoint) modeFailed(", b"func modeKind(", b"func (w *WARPEndpoint) currentProfile("):
+    assert balancer_code(function_blob(own, signature)) == balancer_code(function_blob(new, signature)), signature
+assert b"<-previous.finished" in candidate
+assert b"session.finished" in candidate
+assert b"w.publish(done," in candidate
+assert b"s.cancel()" in candidate
+# Do not start work for a session canceled while waiting for its predecessor.
+candidate = replace_once(candidate, b"\t\t<-previous.finished\n\t}\n\tmode := w.mode",
+    b"\t\t<-previous.finished\n\t}\n\tif session.ctx.Err() != nil {\n\t\treturn\n\t}\n\tmode := w.mode")
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "protocol/warp/h_failover.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("2f318fc87f08b1a20acbbfa249d1845cb5ebd929",
+     "ebe375dae0a3b56c8b7f3d70cf0cdb01a2f2c774",
+     "076c363b904a935b7eeee86db28092bd7914b156")))
+for signature in (b"func (w *WARPEndpoint) scannerEnabled(", b"func (f *warpFailover) currentNetwork(", b"func (w *WARPEndpoint) probeNoise(", b"func (w *WARPEndpoint) probe(", b"func (f *warpFailover) currentNoise(", b"func (w *WARPEndpoint) currentFailover(", b"func peerStatus("):
+    assert balancer_code(function_blob(own, signature)) == balancer_code(function_blob(new, signature)), signature
+assert b"func (w *WARPEndpoint) connect(session *warpSession" in new
+assert b"w.publish(done," in new
+assert b"session.ctx" in new
+resolutions[path] = subprocess.check_output(["gofmt"], input=new)
+
+path = "protocol/warp/endpoint_warp_masque_stub.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("6113190b3301fa7ab6d4abc86b34c17232e3f3d7",
+     "77c8e92ae2945bb44f8904fb1303e13ed6bc1b7c",
+     "d1c9420ec8cbf334a2ae154c0353ba6cb1842a90")))
+candidate = replace_once(own, b"connectMASQUE(done <-chan struct{}, profile *warpProfile)",
+                         b"connectMASQUE(session *warpSession, profile *warpProfile)")
+assert b"func (*masqueLinkState) included() bool { return false }" in candidate
+assert b"type masqueLinkState struct{}" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# The nonconflicting MASQUE implementation must expose the same new signature
+# and retain the fork's build-dependent capability method.
+masque = git("show", data["tentative_tree"] + ":protocol/warp/endpoint_warp_masque.go")
+assert b"connectMASQUE(session *warpSession" in masque
+assert b"func (*masqueLinkState) included() bool" in masque
 apply_reviewed(data, resolutions)
