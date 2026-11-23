@@ -49,4 +49,5 @@ audit_merge hiddify-core "$WORK" "$CORE_SHA" "$core" "$CORE_TREE"
 sing=$(git -C "$WORK" rev-parse "$core:hiddify-sing-box")
 audit_merge hiddify-sing-box "$WORK/hiddify-sing-box" "$SING_SHA" "$sing" "$SING_TREE"
 python3 "$ROOT/scripts/resolve-upstream-metadata.py" "$WORK" "$report"
+python3 "$ROOT/scripts/prepare-dependency-candidates.py" "$WORK" "$report"
 echo "Read-only diagnostic complete; no stable patch files or gitlinks modified."
