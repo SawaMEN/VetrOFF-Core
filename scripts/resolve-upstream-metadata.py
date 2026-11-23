@@ -866,4 +866,50 @@ candidate = replace_once(own, b'// H: "", "hybrid" or "classical"',
 for field in (b"Mldsa65Seed", b"Mldsa65Verify", b"LimitFallbackUpload", b"LimitFallbackDownload", b"TLSFragment"):
     assert field in candidate
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+# Reconcile the uTLS caller with the new ECH helper and padding API.
+# Preserve the fork's cipher-suite validation and native fingerprint aliases.
+path = "common/tls/utls_client.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("94f31726853dcafdb4e4af9d0165865920b9a730",
+     "b71ae6c8ccd658dabbae5a418fdc5a09e919f039",
+     "b5a51672ada4128acb7d9ffe2addb8295372d2ab")))
+helper = checked_blob(data["upstream"], "common/tls/h_utls_ech.go",
+                      "17b05e748b82335dcd814dcbfd97748f0331be04")
+padding = checked_blob(data["upstream"], "common/tls/h_tls_tricks_utls.go",
+                       "34452543bba1f683d954f6332bf9bbfb1c62597b")
+for name, sha in (
+    ("common/tls/h_utls_ech.go", "17b05e748b82335dcd814dcbfd97748f0331be04"),
+    ("common/tls/h_tls_tricks_utls.go", "34452543bba1f683d954f6332bf9bbfb1c62597b"),
+):
+    checked_blob(data["tentative_tree"], name, sha)
+assert b"func (c *UTLSClientConfig) hUClient(" in helper
+assert b"applyTLSTricksPadding(&spec, c.tricks)" in helper
+assert b"func applyTLSTricksPadding(spec *utls.ClientHelloSpec, tricks *tlsTricks)" in padding
+native_common = checked_blob(data["patched_tree"], "replace/utls-native/common.go",
+                             "68974e2f863f50518456c30241beaf2f88b53d70")
+native_names = checked_blob(data["patched_tree"], "replace/utls-native/u_common.go",
+                            "a3254582db15c31b4a10f7d78a1db649a102a40c")
+native_ech = checked_blob(data["patched_tree"], "replace/utls-native/u_ech.go",
+                          "f2576e4293fd559b803b12ec6dba8549ffd0bd46")
+assert b"ECHAccepted bool" in native_common
+assert b"HelloChrome_Auto        = HelloChrome_155" in native_names
+assert b"type EncryptedClientHelloExtension interface" in native_ech
+assert b"func BoringGREASEECH()" in native_ech
+
+candidate = own
+signature = b"func (c *UTLSClientConfig) Client(conn net.Conn)"
+candidate = replace_once(candidate, function_blob(own, signature), function_blob(new, signature))
+needle = b"\t\tTLSUnique:                   state.TLSUnique,\n"
+addition = b"\t\tECHAccepted:                 state.ECHAccepted,\n"
+candidate = replace_once(candidate, needle, needle + addition)
+needle = b"\t\tconfig, err = parseECHClientConfig(ctx, config.(ECHCapableConfig), options)"
+addition = b"\t\tconfig.(*UTLSClientConfig).id = hECHClientHelloID(logger, options.UTLS.Fingerprint, id)\n"
+candidate = replace_once(candidate, needle, addition + needle)
+assert b"resolveCipherSuites(options.CipherSuites)" in candidate
+assert b"Explicitly enabled legacy TLS cipher suites (weaker security)" in candidate
+assert b'"chrome_133", "hellochrome_133"' in candidate
+assert b'case "randomizednoalpn":' in candidate
+assert b"tf.NewConn(" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 apply_reviewed(data, resolutions)
