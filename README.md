@@ -1,6 +1,6 @@
 # VetrOFF-Core
 
-VetrOFF-Core 0.0.2 is a standalone CLI built from [Hiddify Core](https://github.com/hiddify/hiddify-core), [Hiddify sing-box](https://github.com/hiddify/hiddify-sing-box), and [ray2sing](https://github.com/hiddify/ray2sing).
+VetrOFF-Core 0.0.3 is a standalone CLI built from [Hiddify Core](https://github.com/hiddify/hiddify-core), [Hiddify sing-box](https://github.com/hiddify/hiddify-sing-box), and [ray2sing](https://github.com/hiddify/ray2sing).
 
 The three original projects appear at the root as Git submodules. Each submodule links to the exact original commit used for stable builds. The `.gitmodules` file records their clone URLs.
 
@@ -10,7 +10,7 @@ The three original projects appear at the root as Git submodules. Each submodule
 | [`hiddify-sing-box`](hiddify-sing-box) | [`patches/hiddify-sing-box`](patches/hiddify-sing-box/) | `45814844d5b80af5b43ac5c17d45c0ed3a42bcd0` |
 | [`ray2sing`](ray2sing) | [`patches/ray2sing`](patches/ray2sing/) | `7aac8dcf42b6284cf6993c992db8dcf259a4b98f` |
 
-The stable sing-box commit matches the original Core gitlink. The stable ray2sing submodule uses the current original commit because its patch recreates the same audited source tree. The build reads all three pins from the VetrOFF-Core Git checkout, stages the upstream sources in `.build/`, and checks each patched Git tree against its `expected-tree` file. The audited trees preserve the forks' tracked runtime sources, tests, build definitions and dependency changes. The original workflows and contributor instructions are retained, and Core keeps the original submodule definitions and pointers. The fork's checked-in Core archive is omitted and the VetrOFF CLI version patch is applied.
+The stable sing-box commit matches the original Core gitlink. The ray2sing submodule is pinned independently to the official revision `a722bf1`, incorporating two upstream AmneziaVPN / AmneziaWG changes. Its patch recreates the verified three-way merge of the previously audited fork tree and the new original revision. The build reads all three pins from the VetrOFF-Core Git checkout, stages the upstream sources in `.build/`, and checks each patched Git tree against its `expected-tree` file. The audited trees preserve the forks' tracked runtime sources, tests, build definitions and dependency changes. The original workflows and contributor instructions are retained, and Core keeps the original submodule definitions and pointers. The fork's checked-in Core archive is omitted and the VetrOFF CLI version patch is applied.
 
 ## Builds
 
@@ -44,9 +44,9 @@ When a personal fork advances, review its new commits, regenerate the affected p
 
 ### Ordered subsystem patches
 
-The original Core and sing-box baseline diffs are split into 16 and 126 ordered subsystem patches respectively. The four later Core patches and the ray2sing series are unchanged. Each `series` file specifies the application order; the numbered pieces preserve complete Git diff sections, including binary changes. Do not sort or reorder these files independently of `series`: related changes may span more than one subsystem.
+The original Core and sing-box baseline diffs are split into 16 and 126 ordered subsystem patches respectively. The four later Core patches were preserved during the split; ray2sing remains a separate single-patch series. Each `series` file specifies the application order; the numbered pieces preserve complete Git diff sections, including binary changes. Do not sort or reorder these files independently of `series`: related changes may span more than one subsystem.
 
-The initial split was verified against the original byte streams and all three existing `expected-tree` values. When regenerating an unsplit baseline, `python3 scripts/split-baseline-patches.py` performs the same lossless subdivision (Python 3 is only needed for maintenance). Always run `bash scripts/prepare.sh` and the compatibility tests before accepting a changed patch series. A structural split is not itself a rebase, and the official source pins remain unchanged.
+The initial split was verified against the original byte streams and all three existing `expected-tree` values. When regenerating an unsplit baseline, `python3 scripts/split-baseline-patches.py` performs the same lossless subdivision (Python 3 is only needed for maintenance). Always run `bash scripts/prepare.sh` and the compatibility tests before accepting a changed patch series. A structural split is not itself a rebase; source pin upgrades are reviewed separately.
 
 Patch files use Git binary diff format with full blob IDs for three-way application. After resolving a candidate conflict against the newer original sources, regenerate the affected patch and update the submodule pointers and corresponding `expected-tree` files.
 

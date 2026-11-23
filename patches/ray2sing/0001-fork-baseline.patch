@@ -1503,10 +1503,10 @@ index 0000000000000000000000000000000000000000..e0a5a92f85f848f50dbe22b0bb8d0cb1
 +	}
 +}
 diff --git a/ray2sing/awg.go b/ray2sing/awg.go
-index aaac04ae9471635b2fc27082696ae85b85b26ee1..9ecfa99f2eb4df32acbab66123e27e740fbc214a 100644
+index 409ac252f235ea0778cfac309f055ceeef7bde36..4e76fb5b438082f25374c0b00426873f6f690401 100644
 --- a/ray2sing/awg.go
 +++ b/ray2sing/awg.go
-@@ -52,17 +52,17 @@ func setAwg3Option(awg *T.AwgOptions, key, value string) bool {
+@@ -67,17 +67,17 @@ func setAwg3Option(awg *T.AwgOptions, key, value string) bool {
  	case "headerprotectionkey":
  		awg.HeaderProtectionKey = awgHeaderProtectionKey(value)
  	case "contentpaddingaddition":
@@ -1530,7 +1530,7 @@ index aaac04ae9471635b2fc27082696ae85b85b26ee1..9ecfa99f2eb4df32acbab66123e27e74
  	case "randomtrailers":
  		awg.RandomTrailers = awgBool(value)
  	case "disablecookies":
-@@ -261,7 +261,7 @@ func AWGSingboxTxt(content string) (*T.Endpoint, error) {
+@@ -275,7 +275,7 @@ func AWGSingboxTxt(content string) (*T.Endpoint, error) {
  				Port:                        peer.Port,
  				PreSharedKey:                peer.PresharedKey,
  				PublicKey:                   peer.PublicKey,
@@ -1539,7 +1539,7 @@ index aaac04ae9471635b2fc27082696ae85b85b26ee1..9ecfa99f2eb4df32acbab66123e27e74
  				PersistentKeepaliveInterval: peer.PersistentKeepaliveInterval,
  				Reserved:                    reserved,
  			},
-@@ -416,7 +416,7 @@ func AWGSingbox(raw string) (*T.Endpoint, error) {
+@@ -430,7 +430,7 @@ func AWGSingbox(raw string) (*T.Endpoint, error) {
  				Port:                        peer.Port,
  				PreSharedKey:                peer.PresharedKey,
  				PublicKey:                   peer.PublicKey,
@@ -1549,7 +1549,7 @@ index aaac04ae9471635b2fc27082696ae85b85b26ee1..9ecfa99f2eb4df32acbab66123e27e74
  			},
  		},
 diff --git a/ray2sing/convert.go b/ray2sing/convert.go
-index 4d0e891ec135f09f5edd82eeddee468d96eec08f..c2d3e7c809fd9de124ed9a9d13c739dd732f143e 100644
+index b642d36a3467f3ac04625d212f0efccb31d64f21..1ff2fa943ba6373ce0586095afee522f2d6fcbf4 100644
 --- a/ray2sing/convert.go
 +++ b/ray2sing/convert.go
 @@ -4,8 +4,6 @@ import (
@@ -1561,7 +1561,7 @@ index 4d0e891ec135f09f5edd82eeddee468d96eec08f..c2d3e7c809fd9de124ed9a9d13c739dd
  
  	"strconv"
  	"strings"
-@@ -74,16 +72,6 @@ var xrayConfigTypes = map[string]ParserFunc{
+@@ -75,16 +73,6 @@ var xrayConfigTypes = map[string]ParserFunc{
  	"direct://": DirectXray,
  }
  
@@ -1578,7 +1578,7 @@ index 4d0e891ec135f09f5edd82eeddee468d96eec08f..c2d3e7c809fd9de124ed9a9d13c739dd
  type OutEnd struct {
  	outbound *T.Outbound
  	endpoint *T.Endpoint
-@@ -93,10 +81,7 @@ func processSingleConfig(config string, useXrayWhenPossible bool) (outend *OutEn
+@@ -94,10 +82,7 @@ func processSingleConfig(config string, useXrayWhenPossible bool) (outend *OutEn
  	defer func() {
  		if r := recover(); r != nil {
  			outend = nil
@@ -1590,7 +1590,7 @@ index 4d0e891ec135f09f5edd82eeddee468d96eec08f..c2d3e7c809fd9de124ed9a9d13c739dd
  		}
  	}()
  	// configDecoded := decodeUrlBase64IfNeeded(config)
-@@ -147,7 +132,7 @@ func processSingleConfig(config string, useXrayWhenPossible bool) (outend *OutEn
+@@ -148,7 +133,7 @@ func processSingleConfig(config string, useXrayWhenPossible bool) (outend *OutEn
  }
  
  func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options, error) {
@@ -1599,7 +1599,7 @@ index 4d0e891ec135f09f5edd82eeddee468d96eec08f..c2d3e7c809fd9de124ed9a9d13c739dd
  	if isOpenVPNProfile(input) {
  		endpoint, err := ParseOVPN(input, "", "", "")
  		if err != nil {
-@@ -161,45 +146,51 @@ func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options
+@@ -162,45 +147,51 @@ func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options
  
  	var outbounds []T.Outbound
  	var endpoints []T.Endpoint
@@ -1672,7 +1672,7 @@ index 4d0e891ec135f09f5edd82eeddee468d96eec08f..c2d3e7c809fd9de124ed9a9d13c739dd
  				if dialerOpt, ok := outend.outbound.Options.(T.DialerOptionsWrapper); ok {
  					d := dialerOpt.TakeDialerOptions()
  					d.Detour = detourTag
-@@ -208,12 +199,16 @@ func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options
+@@ -209,12 +200,16 @@ func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options
  				if detourTag != "" {
  					disableMasqueScanner(outend.outbound)
  				}
@@ -1694,7 +1694,7 @@ index 4d0e891ec135f09f5edd82eeddee468d96eec08f..c2d3e7c809fd9de124ed9a9d13c739dd
  				if dialerOpt, ok := outend.endpoint.Options.(T.DialerOptionsWrapper); ok {
  					d := dialerOpt.TakeDialerOptions()
  					d.Detour = detourTag
-@@ -222,19 +217,32 @@ func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options
+@@ -223,19 +218,32 @@ func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options
  				if detourTag != "" {
  					warpBehindDetour(outend.endpoint)
  				}
@@ -1733,7 +1733,7 @@ index 4d0e891ec135f09f5edd82eeddee468d96eec08f..c2d3e7c809fd9de124ed9a9d13c739dd
  		return nil, E.New("No outbounds found")
  	}
  
-@@ -243,7 +251,6 @@ func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options
+@@ -244,7 +252,6 @@ func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options
  		Endpoints: endpoints,
  	}
  	declareIPv6(&fullConfig, declaredIPv6)
@@ -1741,7 +1741,7 @@ index 4d0e891ec135f09f5edd82eeddee468d96eec08f..c2d3e7c809fd9de124ed9a9d13c739dd
  	return &fullConfig, nil
  }
  
-@@ -262,10 +269,7 @@ func Ray2SingboxOptions(ctx context.Context, configs string, useXrayWhenPossible
+@@ -263,10 +270,7 @@ func Ray2SingboxOptions(ctx context.Context, configs string, useXrayWhenPossible
  	defer func() {
  		if r := recover(); r != nil {
  			out = nil
