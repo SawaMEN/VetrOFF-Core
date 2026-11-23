@@ -1442,6 +1442,9 @@ old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
 plain = replace_once(new, b"b.warp().Status()", b"adapter.OutboundStatus(b.warp())")
 plain = replace_once(plain, b'const hWARPLivePassword = "warp-live-password"\nconst hWARPLiveUUID = "b831381d-6324-4d53-ad4f-8cda48b30811"',
     b'const (\n\thWARPLivePassword = "warp-live-password"\n\thWARPLiveUUID = "b831381d-6324-4d53-ad4f-8cda48b30811"\n)')
+plain = replace_once(plain,
+    b'func() bool { return instance.ready() && instance.displayType() == "WARP \xc2\xb7 MASQUE" && instance.traceOK() },',
+    b'func() bool {\n\t\t\t\t\treturn instance.ready() && instance.displayType() == "WARP \xc2\xb7 MASQUE" && instance.traceOK()\n\t\t\t\t},')
 assert balancer_code(plain) == balancer_code(own)
 resolutions[path] = own
 
@@ -1476,5 +1479,25 @@ assert b"deferDomainPeers(options)" in candidate
 assert b"o.startResolvingPeers()" in candidate
 assert b"peerUsers.Lookup(source.Addr)" in candidate
 assert b'logger.Debug("AWG IPC configuration prepared")' in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+# Retain the existing base64 key regression test. The fork's option fields
+# remain strings, so number-form JSON is not assumed to be supported.
+path = "protocol/awg/h_endpoint_test.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("1953ccb757dd7604e754c755084d566196a2c4c4",
+     "fe9df075f319b38f7e34ad053ac1b0063a996027",
+     "a0be732144e9920cbadf691d153cd02de2e0bd5e")))
+candidate = new
+if not b"type AwgRange string" in opts:
+    candidate = replace_once(candidate, b'"rekey_after_time": 120', b'"rekey_after_time": "120"')
+    candidate = replace_once(candidate, b'"reject_after_time": 180, "keepalive_timeout": 10', b'"reject_after_time": "180", "keepalive_timeout": "10"')
+# Keep the actual device acceptance tests active; the merged dependency
+# must prove compatibility rather than hide failures with the old skip.
+candidate += b"\n" + function_blob(own, b"func TestH_GenIpcConfigAWG3AcceptedByDevice(") + b"\n"
+assert b"func TestH_GenIpcConfigS3S4AcceptedByDevice(" in candidate
+assert b"func TestH_PeerAddresses(" in candidate
+assert b"func TestH_EndpointListenPortConflictsWithDetour(" in candidate
+assert b"t.Skip(" not in candidate
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 apply_reviewed(data, resolutions)
