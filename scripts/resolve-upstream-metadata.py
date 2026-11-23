@@ -785,4 +785,85 @@ for file, hashes in (
     assert balancer_code(candidate) == balancer_code(own), path
     resolutions[path] = own
 
+# Keep the native uTLS snapshots and the shared name used by upstream helpers.
+path = "common/tls/h_utls_xray_names.go"
+own, new = added_pair(path, "0755cefbb731e38299cf48b86b0489597c7b2823",
+                      "2ca6a71f642d671bb9566e49f7fd5e15ef026bc4")
+start = new.index(b"// hChromeFingerprint is")
+end = new.index(b"// xrayFingerprints", start)
+candidate = new[:start] + b"// hChromeFingerprint is the canonical Chrome snapshot of native uTLS.\nvar hChromeFingerprint = utls.HelloChrome_155\n\n" + new[end:]
+plain = new[:start] + new[end:]
+plain = replace_once(plain, b'\t"hellochrome_155":                  utls.HelloChrome_155,\n', b"")
+plain = replace_once(plain, b'\t"hellochrome_auto":                 hChromeFingerprint,', b'\t"hellochrome_auto":                 utls.HelloChrome_Auto,')
+assert plain == own
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "common/tls/h_utls_xray_names_test.go"
+own, new = added_pair(path, "b0f802247b98643ec025213e864d08e69c07aaf9",
+                      "b00e57187932358a711487c30277b957be1f697e")
+start = new.index(b'\tid, err = uTLSClientHelloID("hellochrome_auto")')
+end = new.index(b'\t_, err = uTLSClientHelloID("hellochrome_999")', start)
+plain = new[:start] + new[end:]
+assert plain.replace(b'utls.HelloChrome_155, id, "sing-box', b'utls.HelloChrome_Auto, id, "sing-box') == own
+resolutions[path] = new
+
+path = "common/tls/h_utls_fingerprint_test.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("dc2a93a1b40be1de2fe9128c93cd1d1abea34eca",
+     "6e3bc6f61896307f35fa78aa7886627e22ed782b",
+     "106053cb7cca34ca0ecf6be6bd101d298c0441e5")))
+assert balancer_code(own) == balancer_code(new)
+resolutions[path] = own
+
+# REALITY: retain the fork's ML-DSA-65 verification, clock source and version.
+# Integrate the official configuration lifecycle without removing verification.
+path = "common/tls/reality_client.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("5fe0949be2cccfed45d7a65cf0f1f004afc821ca",
+     "be24834b13cbc6d5223972c99882e72f29db34cd",
+     "195cf59d3779d9e5d53433ee4a2f077c65fec004")))
+candidate = own
+candidate = replace_once(candidate, b"\tmldsa65Verify *mldsa65.PublicKey\n}\n\nfunc NewRealityClient",
+    b"\tmldsa65Verify *mldsa65.PublicKey\n\tauto *realityKeyShareAuto\n\tlogger logger.ContextLogger\n}\n\nfunc NewRealityClient")
+start = new.index(b"\tvar classical bool")
+end = new.index(b"\tvar config Config", start)
+own_start = candidate.index(b"\tvar classical bool")
+own_end = candidate.index(b"\tverify, err := parseRealityMLDSAPublicKey", own_start)
+candidate = candidate[:own_start] + new[start:end] + candidate[own_end:]
+candidate = replace_once(candidate,
+    b"&RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID, classical, verify}",
+    b"&RealityClientConfig{ctx: ctx, uClient: uClient.(*UTLSClientConfig), publicKey: publicKey, shortID: shortID, classical: classical, mldsa65Verify: verify, auto: auto, logger: logger}")
+signature = b"func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn) (aTLS.Conn, error) {"
+start = new.index(signature)
+end = new.index(b"\n\tverifier :=", start)
+candidate = replace_once(candidate, signature, new[start:end])
+candidate = replace_once(candidate,
+    b"realityClientHelloSpec(e.uClient.id, uConfig, e.classical)",
+    b"realityClientHelloSpec(e.uClient.id, uConfig, classical)")
+assert b"return nil, errRealityVerificationFailed" in new
+candidate = replace_once(candidate, b'return nil, E.New("reality verification failed")',
+                         b"return nil, errRealityVerificationFailed")
+candidate = replace_once(candidate, b"\t\te.mldsa65Verify,\n\t}\n}",
+    b"\t\te.mldsa65Verify,\n\t\te.auto,\n\t\te.logger,\n\t}\n}")
+assert b"mldsa65.Verify(" in candidate and b"len(certs) == 0" in candidate
+assert b"[3]byte{26, 11, 9}" in candidate
+assert b"uint32(nowTime.Unix())" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Retain all of the fork's TLS fields and legacy JSON compatibility.
+# The newly supported key_share value is reflected in the option documentation.
+path = "option/tls.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("ee1e4ef7014960c940a3f6698dceb5fb3318dfaa",
+     "55a7ec3977b563319dc54367f5203e33cfe62318",
+     "96a49a4dbbe4d03d2e22c4921f5284995260447c")))
+assert b'case "auto":' in resolutions["common/tls/reality_client.go"]
+candidate = replace_once(own, b'// H: "", "hybrid" or "classical"',
+                         b'// H: "", "hybrid", "classical" or "auto"')
+for field in (b"Mldsa65Seed", b"Mldsa65Verify", b"LimitFallbackUpload", b"LimitFallbackDownload", b"TLSFragment"):
+    assert field in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 apply_reviewed(data, resolutions)
