@@ -490,4 +490,66 @@ for path, hashes in (
     else:
         assert candidate == own
     resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+# DNS pool files were independently added to both source branches.
+def added_pair(path, fork_sha, upstream_sha):
+    assert subprocess.run(["git", "-C", str(repo), "cat-file", "-e",
+                           data["base"] + ":" + path], capture_output=True).returncode != 0
+    return (checked_blob(data["patched_tree"], path, fork_sha),
+            checked_blob(data["upstream"], path, upstream_sha))
+
+def normalize_imports(blob):
+    start = blob.index(b"import (\n") + len(b"import (\n")
+    end = blob.index(b"\n)", start)
+    imports = sorted(line.strip() for line in blob[start:end].splitlines() if line.strip())
+    return blob[:start] + b"\n".join(imports) + blob[end:]
+
+path = "common/dnspool/resolvers.go"
+own, new = added_pair(path, "03b5c3dfbee1044f24fabd644762c43935a4e907",
+                      "6ef2e415230cba7214f48db4a10eba2aad913984")
+assert normalize_imports(own) == normalize_imports(new)
+resolutions[path] = new
+
+# Upstream consolidated the exact same bounded score arithmetic into rating.
+path = "common/dnspool/history.go"
+own, new = added_pair(path, "52880d6d98b4cb51276c0b3c9a591c5d4b231d94",
+                      "1dfe3ddfd44cd8f392ca3de7d2d3a583d025d30e")
+rating = checked_blob(data["upstream"], "hiddify/rating/rating.go",
+                      "b9d78e0211a69baf8165db6933da2f926bb8016c")
+assert b"Min Score = -10" in rating and b"Max Score = 10" in rating
+assert b"if delta > 0 && s < 0 {" in rating
+assert b"return Clamp(int(s) + delta)" in rating
+assert b"return Score(min(max(value, int(Min)), int(Max)))" in rating
+assert b"score := int(rating.Score(h.ResolverRate[address]).Add(delta))" in new
+# The cache format, locking, sorting and all other functions stay the same.
+for signature in (b"func NewHistory(", b"func LoadHistory(", b"func (h *History) Save(",
+                  b"func (h *History) Score(", b"func (h *History) Sort("):
+    assert function_blob(own, signature) == function_blob(new, signature)
+resolutions[path] = new
+
+# Keep the fork's bounded retries for UDP/TCP port collisions on Windows and
+# other platforms. Verify the remainder is exactly the upstream implementation.
+path = "common/dnspool/pool.go"
+own, new = added_pair(path, "dab47b6d587a355580f54f5523509e4ee35e4ac0",
+                      "b4954717fb5365b5c41b7e827855352ad54a9b2d")
+start = own.index(b"// The resolver library reserves a UDP port")
+end = own.index(b"// Addr is the local", start)
+plain = own[:start] + own[end:]
+plain = replace_once(plain,
+    b"startLocalWithRetry(managerOptions(logger, tag, options), multidns.StartLocal)",
+    b"multidns.StartLocal(managerOptions(logger, tag, options))")
+for imp in (b'\t"errors"\n', b'\t"runtime"\n', b'\t"syscall"\n'):
+    plain = replace_once(plain, imp, b"")
+assert normalize_imports(plain) == normalize_imports(new)
+resolutions[path] = own
+
+# Retain the removed legacy service options because existing fork profiles
+# still use them. The service and its registration will be reconciled separately.
+path = "option/smart_dns_pool.go"
+old = checked_blob(data["base"], path, "d8de3e1d9b22a904d499a090c6858bb5623ed1de")
+own = checked_blob(data["patched_tree"], path, "400805d62bd313388a4861a5f19b271955e5535f")
+assert subprocess.run(["git", "-C", str(repo), "cat-file", "-e",
+                       data["upstream"] + ":" + path], capture_output=True).returncode != 0
+assert b"type SmartDNSPoolServiceOptions struct" in own
+assert b"type SmartDNSPoolUpstreamOptions struct" in own
+resolutions[path] = own
 apply_reviewed(data, resolutions)
