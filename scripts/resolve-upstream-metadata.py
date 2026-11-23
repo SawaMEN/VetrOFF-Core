@@ -119,7 +119,14 @@ def apply_reviewed(data, resolutions):
             print(f"Reviewed resolution: {component}/{path} -> {sha}")
         tree = git("write-tree", env=env).decode().strip()
         delta = git("diff", "--name-only", "-z", data["tentative_tree"], tree)
-        assert set(os.fsdecode(p) for p in delta.split(b"\0") if p) == set(resolutions)
+        # A modify/delete conflict may already contain the selected version in
+        # merge-tree's provisional tree. It is resolved even with zero diff.
+        changed = set(os.fsdecode(p) for p in delta.split(b"\0") if p)
+        assert changed <= set(resolutions), ("unexpected changes", changed - set(resolutions))
+        for path, content in resolutions.items():
+            assert git("show", tree + ":" + path) == content
+        for path in sorted(set(resolutions) - changed):
+            print(f"Reviewed unchanged provisional entry: {component}/{path}")
         (report / (component + "-reviewed-resolutions.patch")).write_bytes(
             git("diff", "--binary", "--full-index", data["tentative_tree"], tree)
         )
