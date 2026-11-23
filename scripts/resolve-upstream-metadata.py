@@ -58,12 +58,22 @@ assert sep and prefix.startswith(b"## (unreleased) Native client compatibility\n
 assert new.startswith(sep)
 # Verify all nonblank fork additions outside the custom heading are present
 # in the updated upstream changelog, including wrapped lines.
-from difflib import ndiff
-for line in ndiff(old.decode().splitlines(), (sep + rest).decode().splitlines()):
-    if line.startswith("+ ") and line[2:].strip():
-        assert line[2:].encode() in new.splitlines(), line
-    if line.startswith("- ") and line[2:].strip():
-        raise ValueError("Fork changelog removes an existing line; review required")
+marker = b"\nv4.0.0 (2026-02-13)"
+def split_history(blob):
+    top, separator, tail = blob.partition(marker)
+    assert separator
+    return [line for line in top.splitlines() if line.strip()], separator + tail
+
+def is_subsequence(earlier, later):
+    sequence = iter(later)
+    return all(any(candidate == line for candidate in sequence) for line in earlier)
+
+old_top, old_tail = split_history(old)
+own_top, own_tail = split_history(sep + rest)
+new_top, new_tail = split_history(new)
+assert old_tail == own_tail == new_tail, "Historical changelog changed"
+assert is_subsequence(old_top, own_top), "Fork removed or reordered older entries"
+assert is_subsequence(own_top, new_top), "Upstream omitted fork changelog entries"
 resolutions[path] = prefix + new
 
 assert set(resolutions) <= set(data["conflicts"])
