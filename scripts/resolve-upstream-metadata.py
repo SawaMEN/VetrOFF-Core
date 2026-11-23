@@ -1207,7 +1207,7 @@ old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
     ("24e0b6dd4b17ed43ce64340c35dbdfe618b46341",
      "e835d541777ec50f2764406b500b9984cf712b22",
      "08050447bcd72ba924d7df08ca9eb525e3ebb0a4")))
-assert subprocess.check_output(["gofmt"], input=own) == subprocess.check_output(["gofmt"], input=new) or own.split() == new.split()
+assert normalize_imports(own) == normalize_imports(new)
 resolutions[path] = own
 # WireGuard uses the official single-flight, cancelable dial path. Keep the
 # fork's pause-aware retry behavior and detach the socket before closing it.
@@ -1288,4 +1288,41 @@ for file, hashes in (
         assert b"bind.abort()" in candidate
         assert b"d.path.useTun(tun)" in candidate
     resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+# WireGuard endpoint: keep on-demand startup, pause wake notification,
+# and the fork's idempotent shutdown, integrating upstream MTU tracking.
+path = "transport/wireguard/endpoint.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("2bb2a12c3b212c998b4d03f604af06bbacc6e9e5",
+     "ef1449d97f5effd414327780d6721dc271677010",
+     "b80223b11ee9b64ee93d78ec76ccb40bab9f5f47")))
+candidate = own
+# New connections are tracked only if the merged MTU implementation exposes
+# its upstream tracking method. Check the actual merged blob rather than assume.
+mtu = subprocess.check_output(["git", "-C", str(repo), "show", data["tentative_tree"] + ":transport/wireguard/h_mtu_discovery.go"])
+assert b"func (p *mtuProber) track(" in mtu
+candidate = replace_once(candidate, b"\t\treturn e.tunDevice.DialContext(dialCtx, network, destination)",
+                         b"\t\tconnection, err := e.tunDevice.DialContext(dialCtx, network, destination)\n\t\treturn e.mtuProbe.track(network, connection, err)")
+candidate = replace_once(candidate, b"\treturn e.tunDevice.DialContext(ctx, network, destination)",
+                         b"\tconnection, err := e.tunDevice.DialContext(ctx, network, destination)\n\treturn e.mtuProbe.track(network, connection, err)")
+# Stop the bind permanently before waiting for any device operation.
+candidate = replace_once(candidate, b"\t\tif e.bind != nil {\n\t\t\t_ = e.bind.Close()\n\t\t} // H: release stalled sends before waiting for device locks",
+                         b"\t\tif clientBind, ok := e.bind.(*ClientBind); ok {\n\t\t\tclientBind.hAbort()\n\t\t} else if e.bind != nil {\n\t\t\t_ = e.bind.Close()\n\t\t}")
+# Discovery and fallback workers can call into the device; stop them outside
+# stateAccess so their shutdown cannot wait on a lock held by Close.
+candidate = replace_once(candidate, b"\t\te.stateAccess.Lock()\n\t\tdefer e.stateAccess.Unlock()\n\t\tif e.mtuProbe != nil {",
+                         b"\t\tif e.mtuProbe != nil {")
+candidate = replace_once(candidate, b"\t\twgDevice := e.device.Swap(nil)",
+                         b"\t\te.stateAccess.Lock()\n\t\tdefer e.stateAccess.Unlock()\n\t\twgDevice := e.device.Swap(nil)")
+# Refresh path information after BindUpdate without holding stateAccess.
+signature = b"func (e *Endpoint) BindUpdate() error"
+body = function_blob(candidate, signature)
+body2 = replace_once(body, b"\te.stateAccess.Lock()\n\tdefer e.stateAccess.Unlock()\n",
+                     b"\te.pathChanged()\n\te.stateAccess.Lock()\n\tdefer e.stateAccess.Unlock()\n")
+candidate = replace_once(candidate, body, body2)
+assert b"func (e *Endpoint) waitNetworkActive(" in candidate
+assert b"func (e *Endpoint) ensureDeviceStarted(" in candidate
+assert b"e.closeOnce.Do(" in candidate
+assert b"e.tunDevice.SetDevice(wgDevice, nil)" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 apply_reviewed(data, resolutions)
