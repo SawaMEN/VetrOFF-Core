@@ -559,4 +559,58 @@ assert subprocess.run(["git", "-C", str(repo), "cat-file", "-e",
 assert b"type SmartDNSPoolServiceOptions struct" in own
 assert b"type SmartDNSPoolUpstreamOptions struct" in own
 resolutions[path] = own
+# Preserve regression tests for local UDP/TCP port collisions and all common
+# upstream tests. The fork fixtures bind TCP first and retry shared ports.
+path = "common/dnspool/h_dnspool_fill_test.go"
+own, new = added_pair(path, "fa2ae6642b3c8a8dc8c33ce738c7dfbee482bcd9",
+                      "a254bd89dfd3fc9ffbe66f504b96d17095b685c1")
+assert normalize_imports(own) == normalize_imports(new)
+resolutions[path] = new
+
+path = "common/dnspool/h_dnspool_test.go"
+own, new = added_pair(path, "719f51cc0bb92e1f274d9f85faaf1c0197b36276",
+                      "14cebed96ba60fcce52e60e4663dc13bcdeb186e")
+start = own.index(b"\t// Bind TCP first:")
+end = own.index(b"\tudp := &dns.Server", start)
+new_start = new.index(b'\tpc, err := net.ListenPacket("udp", "127.0.0.1:0")')
+new_end = new.index(b"\tudp := &dns.Server", new_start)
+plain = own[:start] + new[new_start:new_end] + own[end:]
+plain = plain[:plain.index(b"func TestH_DnspoolLocalBindRetry(")].rstrip() + b"\n"
+for imp in (b'\t"errors"\n', b'\t"fmt"\n', b'\t"runtime"\n', b'\t"syscall"\n'):
+    plain = replace_once(plain, imp, b"")
+assert normalize_imports(plain) == normalize_imports(new)
+resolutions[path] = own
+
+path = "common/monitoring/h_settle_test.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("ac509b513c7d58ab68ae0bfe640934cad4bd528a",
+     "b61df673bea0f13739b37fa35517ebc1a1dfe046",
+     "6c061c5d6f6057a02d84085c81bd08977b62eb0d")))
+# Restore the upstream equivalent for verification only; retain the fork's
+# synchronized checks and wait for completion in the actual resolution.
+plain = own.replace(
+    b'\trequire.Eventually(t, func() bool {\n\t\tstate := m.reg().outbounds["stuck"]\n\t\tstate.mu.Lock()\n\t\tdefer state.mu.Unlock()\n\t\treturn !state.testing\n\t}, time.Second, 10*time.Millisecond,',
+    b'\trequire.Eventually(t, func() bool { return !m.reg().outbounds["stuck"].testing }, time.Second, 10*time.Millisecond,')
+start = plain.index(b"\t// An answer is published before all bookkeeping")
+end = plain.index(b"\twaitForProbeToSettle(1)\n", start) + len(b"\twaitForProbeToSettle(1)\n")
+plain = plain[:start] + plain[end:]
+plain = replace_once(plain, b"\twaitForProbeToSettle(2)\n", b"")
+adapted = re.sub(rb'&fakeGroup\{fakeOutbound: fakeOutbound\{tag: ("[^"]+")\},', rb'&fakeGroup{tag: \1,', new)
+assert normalize_imports(plain) == normalize_imports(adapted)
+resolutions[path] = own
+
+path = "dns/transport/multiplexer_test.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("9ab3ab8b5f88a7100553ccb3345d9baccebcd0f2",
+     "de752071e258a5b3671f4149f6ea8d2ee68af23d",
+     "a65119144b509fdfef8b9b946568078341b29030")))
+candidate = replace_once(new,
+    b"\tfor i := 0; i < queries; i++ {\n\t\twg.Add(1)\n\t\tgo func() {\n\t\t\tdefer wg.Done()\n",
+    b"\tfor range queries {\n\t\twg.Go(func() {\n")
+candidate = replace_once(candidate, b"\t\t\terrs <- exchangeErr\n\t\t}()\n",
+                         b"\t\t\terrs <- exchangeErr\n\t\t})\n")
+assert normalize_imports(candidate) == normalize_imports(own)
+resolutions[path] = own
 apply_reviewed(data, resolutions)
