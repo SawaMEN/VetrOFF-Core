@@ -1,6 +1,6 @@
 # VetrOFF-Core
 
-VetrOFF-Core 0.0.1 is a standalone CLI built from [Hiddify Core](https://github.com/hiddify/hiddify-core), [Hiddify sing-box](https://github.com/hiddify/hiddify-sing-box), and [ray2sing](https://github.com/hiddify/ray2sing).
+VetrOFF-Core 0.0.2 is a standalone CLI built from [Hiddify Core](https://github.com/hiddify/hiddify-core), [Hiddify sing-box](https://github.com/hiddify/hiddify-sing-box), and [ray2sing](https://github.com/hiddify/ray2sing).
 
 The three original projects appear at the root as Git submodules. Each submodule links to the exact original commit used for stable builds. The `.gitmodules` file records their clone URLs.
 
