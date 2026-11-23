@@ -76,7 +76,7 @@ assert is_subsequence(old_top, own_top), "Fork removed or reordered older entrie
 assert is_subsequence(own_top, new_top), "Upstream omitted fork changelog entries"
 resolutions[path] = prefix + new
 
-def checksum_union(data, hashes):
+def checksum_union(data, hashes, path="go.sum"):
     def records(blob):
         result = {}
         for line in blob.splitlines():
@@ -88,7 +88,7 @@ def checksum_union(data, hashes):
         return result
 
     original, fork, official = (
-        records(checked_blob(data[key], "go.sum", expected))
+        records(checked_blob(data[key], path, expected))
         for key, expected in zip(("base", "patched_tree", "upstream"), hashes)
     )
     combined = dict(fork)
@@ -100,7 +100,7 @@ def checksum_union(data, hashes):
     # sides stay absent. Final ordering/pruning belongs to go mod tidy after
     # the go.mod and dependency/API conflicts are resolved.
     assert set(fork) | set(official) == set(combined)
-    print(f'{data["component"]}: go.sum fork={len(fork)}, upstream={len(official)}, union={len(combined)}')
+    print(f'{data["component"]}: {path} fork={len(fork)}, upstream={len(official)}, union={len(combined)}')
     return b"".join(b" ".join((*key, combined[key])) + b"\n" for key in sorted(combined))
 
 def apply_reviewed(data, resolutions):
@@ -113,7 +113,9 @@ def apply_reviewed(data, resolutions):
             sha = git("hash-object", "-w", "--stdin", payload=content).decode().strip()
             git("update-index", "--cacheinfo", f"100644,{sha},{path}", env=env)
             assert git("show", ":" + path, env=env) == content
-            (report / (component + "-resolved-" + path)).write_bytes(content)
+            output = report / (component + "-resolved") / path
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(content)
             print(f"Reviewed resolution: {component}/{path} -> {sha}")
         tree = git("write-tree", env=env).decode().strip()
         delta = git("diff", "--name-only", "-z", data["tentative_tree"], tree)
@@ -134,6 +136,19 @@ resolutions["go.sum"] = checksum_union(data, (
     "b8a3aa629a919306b11557a435891361b5bec8fc",
     "a97d6509396b5dea6e670ad6b4e1428a53a78459",
 ))
+# Both sides remove the five-second sleep. Preserve upstream documentation
+# and the fork's formatting of non-string panic values.
+path = "v2/config/debug.go"
+old = checked_blob(base, path, "6e2bbab65fb3b018555cb821e7d20b490e5f4176")
+own = checked_blob(patched, path, "7453e371f34c58bf8a61b87d9a2f3ef3134c03d8")
+new = checked_blob(upstream, path, "648d11db091e60da729f3fca2a26dda21ede6f89")
+assert old.count(b"<-time.After(5 * time.Second)") == 1
+assert b"time.After" not in own and b"time.After" not in new
+assert own.count(b"%s panic: %v") == 1 and new.count(b"%s panic: %s") == 1
+assert own.split(b"func DeferPanicToError")[0] == new.split(b"// DeferPanicToError")[0]
+resolutions[path] = new.replace(b"%s panic: %s", b"%s panic: %v", 1)
+formatted = subprocess.check_output(["gofmt"], input=resolutions[path])
+assert formatted == resolutions[path], "Unexpected formatting in debug.go"
 apply_reviewed(data, resolutions)
 
 repo = repo / "hiddify-sing-box"
@@ -144,4 +159,8 @@ apply_reviewed(data, {"go.sum": checksum_union(data, (
     "82eb63f703d7d2a94cae5ad2cfda749e206edadf",
     "46d0ed1b661edf3e8fd4eb3442a4452f77617bf4",
     "2d48f0a740e05e60a6fbb008c0a75526a4e5ea78",
-))})
+)), "test/go.sum": checksum_union(data, (
+    "481125699ae1e1752bb28ba2c7dd198d97da936d",
+    "40c5123068c74a41e075116d7f685ef0c3a0af64",
+    "40a4cd2213f5ac3ee3866d319baa2c7c426de329",
+), "test/go.sum")})
