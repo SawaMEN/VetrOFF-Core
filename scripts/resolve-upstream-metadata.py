@@ -338,4 +338,58 @@ candidate = new.replace(
     b"dials.Load() == 2", b"dials.Load() >= 2")
 assert candidate == own
 resolutions[path] = own
+# Monitoring changes are one coordinated group: preserve the fork's
+# synchronization and immutable snapshots while incorporating upstream scheduling.
+path = "common/monitoring/h_registry.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("3a07d1dc2d3c989c1af2d20ce8f1a03bbdc93212",
+     "152fb846992bbba858e6391786777f32e61763f6",
+     "de3fbc729477b4352aedf24b73c3e516980b592f")))
+assert own.count(b"if m.started.Load() {") == 2
+assert new.count(b"if m.started {") == 2
+candidate = new.replace(b"if m.started {", b"if m.started.Load() {")
+assert b"m.keepTopReload(registry)" in candidate and b"func (m *OutboundMonitoring) earlyObserver(" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "common/monitoring/h_join.go"
+# This file was independently added by both sides.
+assert subprocess.run(["git", "-C", str(repo), "cat-file", "-e", data["base"] + ":" + path], capture_output=True).returncode != 0
+own = checked_blob(data["patched_tree"], path, "7f19c29d4ad0b2a4af2565ac0496fa2efe001444")
+new = checked_blob(data["upstream"], path, "a7e0c273ffdb99c7ef70b6c72070dda1353408bd")
+marker = b"// finishRunningTest publishes"
+assert own.count(marker) == 1 and marker not in new
+assert own[:own.index(marker)].rstrip() == new.replace(
+    b"\t// keep top asked for this test after the other one had told it its result: it is the answer\n\t// to this one too\n\tm.keepTopNoted(task.outboundTag)\n", b"").rstrip()
+resolutions[path] = subprocess.check_output(["gofmt"], input=new.rstrip() + b"\n\n" + own[own.index(marker):])
+
+path = "common/monitoring/h_settle.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("7f56ff7fd435e7ddd10cb65c168e6ebfe2496696",
+     "29050e753b9cecd97854ddf89f873938c61877b2",
+     "18e33dc2c41798780d29e7e72aedef60b45acf4d")))
+needle = b"\tm.handResult(task, outcome)\n"
+assert new.count(needle) == 1
+assert b"m.finishRunningTest(state, task.testDone)" in own
+candidate = new.replace(needle,
+    b"\tm.finishRunningTest(state, task.testDone) // H: the next stage must start a fresh test\n" + needle)
+needle = b"\t\tm.history.StoreURLTestHistory(task.outboundTag, &state.history)"
+assert candidate.count(needle) == 1
+candidate = candidate.replace(needle,
+    b"\t\tsnapshot := state.history // H: storage readers own an immutable snapshot\n\t\tm.history.StoreURLTestHistory(task.outboundTag, &snapshot)")
+assert b"func (m *OutboundMonitoring) abandon(" in candidate and b"m.keepTopNoted(task.outboundTag)" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "common/monitoring/h_staged.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("77fb7ca007d74d24b695b05e4e532aaddb0427fc",
+     "a61ca080f55b33f86191826da2e0b0e2adad009f",
+     "b1c01a291fed315b1154b45efcac269432395fc5")))
+addition = b"\tif factor := m.timeoutFactor(out); factor != 1 {\n\t\tmarks = scaleMarks(marks, factor)\n\t}\n"
+marker = b"// scaleMarks is marks"
+assert new.count(addition) == 1 and new.count(marker) == 1
+assert new[:new.index(marker)].replace(addition, b"").rstrip() == own.rstrip()
+resolutions[path] = new
 apply_reviewed(data, resolutions)
