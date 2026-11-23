@@ -1,6 +1,6 @@
 # VetrOFF-Core
 
-VetrOFF-Core 0.0.2 is a standalone CLI built from [Hiddify Core](https://github.com/hiddify/hiddify-core), [Hiddify sing-box](https://github.com/hiddify/hiddify-sing-box), and [ray2sing](https://github.com/hiddify/ray2sing).
+VetrOFF-Core 0.0.3 is a standalone CLI built from [Hiddify Core](https://github.com/hiddify/hiddify-core), [Hiddify sing-box](https://github.com/hiddify/hiddify-sing-box), and [ray2sing](https://github.com/hiddify/ray2sing).
 
 The three original projects appear at the root as Git submodules. Each submodule links to the exact original commit used for stable builds. The `.gitmodules` file records their clone URLs.
 
@@ -10,7 +10,7 @@ The three original projects appear at the root as Git submodules. Each submodule
 | [`hiddify-sing-box`](hiddify-sing-box) | [`patches/hiddify-sing-box`](patches/hiddify-sing-box/) | `45814844d5b80af5b43ac5c17d45c0ed3a42bcd0` |
 | [`ray2sing`](ray2sing) | [`patches/ray2sing`](patches/ray2sing/) | `7aac8dcf42b6284cf6993c992db8dcf259a4b98f` |
 
-The stable sing-box commit matches the original Core gitlink. The stable ray2sing submodule uses the current original commit because its patch recreates the same audited source tree. The build reads all three pins from the VetrOFF-Core Git checkout, stages the upstream sources in `.build/`, and checks each patched Git tree against its `expected-tree` file. The audited trees preserve the forks' tracked runtime sources, tests, build definitions and dependency changes. The original workflows and contributor instructions are retained, and Core keeps the original submodule definitions and pointers. The fork's checked-in Core archive is omitted and the VetrOFF CLI version patch is applied.
+The stable sing-box commit matches the original Core gitlink. The ray2sing submodule is pinned independently to the official revision `a722bf1`, which incorporates the two upstream AmneziaVPN / AmneziaWG fixes. Its patch recreates the verified three-way merge of the previously audited fork tree and the new original revision. The build reads all three pins from the VetrOFF-Core Git checkout, stages the upstream sources in `.build/`, and checks each patched Git tree against its `expected-tree` file. The audited trees preserve the forks' tracked runtime sources, tests, build definitions and dependency changes. The original workflows and contributor instructions are retained, and Core keeps the original submodule definitions and pointers. The fork's checked-in Core archive is omitted and the VetrOFF CLI version patch is applied.
 
 ## Builds
 
