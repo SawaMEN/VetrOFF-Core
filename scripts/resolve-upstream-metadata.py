@@ -76,28 +76,72 @@ assert is_subsequence(old_top, own_top), "Fork removed or reordered older entrie
 assert is_subsequence(own_top, new_top), "Upstream omitted fork changelog entries"
 resolutions[path] = prefix + new
 
-assert set(resolutions) <= set(data["conflicts"])
-with tempfile.TemporaryDirectory() as tmp:
-    env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "index"))
-    git("read-tree", data["tentative_tree"], env=env)
-    for path, content in resolutions.items():
-        sha = git("hash-object", "-w", "--stdin", payload=content).decode().strip()
-        git("update-index", "--cacheinfo", f"100644,{sha},{path}", env=env)
-        assert git("show", ":" + path, env=env) == content
-        (report / ("resolved-" + path)).write_bytes(content)
-        print(f"Reviewed resolution: {path} -> {sha}")
-    tree = git("write-tree", env=env).decode().strip()
-    delta = git("diff", "--name-only", "-z", data["tentative_tree"], tree)
-    assert set(os.fsdecode(p) for p in delta.split(b"\0") if p) == set(resolutions)
-    (report / "core-metadata-resolutions.patch").write_bytes(
-        git("diff", "--binary", "--full-index", data["tentative_tree"], tree)
+def checksum_union(data, hashes):
+    def records(blob):
+        result = {}
+        for line in blob.splitlines():
+            module, version, digest = line.split()
+            assert digest.startswith(b"h1:"), "Unsupported checksum"
+            key = (module, version)
+            assert key not in result, f"Duplicate checksum: {key!r}"
+            result[key] = digest
+        return result
+
+    original, fork, official = (
+        records(checked_blob(data[key], "go.sum", expected))
+        for key, expected in zip(("base", "patched_tree", "upstream"), hashes)
     )
-remaining = sorted(set(data["conflicts"]) - set(resolutions))
-data.update(reviewed_tree=tree, reviewed_resolutions=sorted(resolutions), remaining_conflicts=remaining)
-(report / "hiddify-core-reviewed.json").write_text(json.dumps(data, indent=2) + "\n")
-print(f"Core: {len(resolutions)} reviewed resolutions, {len(remaining)} unresolved paths")
-for component in ("hiddify-core", "hiddify-sing-box"):
-    current = json.loads((report / (component + ".json")).read_text())
-    print(f"Conflict paths for {component}:")
-    for path in current["conflicts"]:
+    combined = dict(fork)
+    for key, digest in official.items():
+        if key in combined and combined[key] != digest:
+            raise ValueError(f"Checksum mismatch for {key!r}; manual review required")
+        combined[key] = digest
+    # Never discard a checksum from either active side. Entries removed by both
+    # sides stay absent. Final ordering/pruning belongs to go mod tidy after
+    # the go.mod and dependency/API conflicts are resolved.
+    assert set(fork) | set(official) == set(combined)
+    print(f'{data["component"]}: go.sum fork={len(fork)}, upstream={len(official)}, union={len(combined)}')
+    return b"".join(b" ".join((*key, combined[key])) + b"\n" for key in sorted(combined))
+
+def apply_reviewed(data, resolutions):
+    component = data["component"]
+    assert set(resolutions) <= set(data["conflicts"])
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "index"))
+        git("read-tree", data["tentative_tree"], env=env)
+        for path, content in resolutions.items():
+            sha = git("hash-object", "-w", "--stdin", payload=content).decode().strip()
+            git("update-index", "--cacheinfo", f"100644,{sha},{path}", env=env)
+            assert git("show", ":" + path, env=env) == content
+            (report / (component + "-resolved-" + path)).write_bytes(content)
+            print(f"Reviewed resolution: {component}/{path} -> {sha}")
+        tree = git("write-tree", env=env).decode().strip()
+        delta = git("diff", "--name-only", "-z", data["tentative_tree"], tree)
+        assert set(os.fsdecode(p) for p in delta.split(b"\0") if p) == set(resolutions)
+        (report / (component + "-reviewed-resolutions.patch")).write_bytes(
+            git("diff", "--binary", "--full-index", data["tentative_tree"], tree)
+        )
+    remaining = sorted(set(data["conflicts"]) - set(resolutions))
+    data.update(reviewed_tree=tree, reviewed_resolutions=sorted(resolutions),
+                remaining_conflicts=remaining)
+    (report / (component + "-reviewed.json")).write_text(json.dumps(data, indent=2) + "\n")
+    print(f"{component}: {len(resolutions)} reviewed resolutions, {len(remaining)} unresolved paths")
+    for path in remaining:
         print("  " + path)
+
+resolutions["go.sum"] = checksum_union(data, (
+    "7a9f62770c5505d8e73600a4c82a190bf423cd3f",
+    "b8a3aa629a919306b11557a435891361b5bec8fc",
+    "a97d6509396b5dea6e670ad6b4e1428a53a78459",
+))
+apply_reviewed(data, resolutions)
+
+repo = repo / "hiddify-sing-box"
+data = json.loads((report / "hiddify-sing-box.json").read_text())
+assert data["base"] == "004371d6be2395ee4379054a8cf113f339dbe231"
+assert data["upstream"] == "a26e58b376987a3305b201ec87fbc8918f620ad3"
+apply_reviewed(data, {"go.sum": checksum_union(data, (
+    "82eb63f703d7d2a94cae5ad2cfda749e206edadf",
+    "46d0ed1b661edf3e8fd4eb3442a4452f77617bf4",
+    "2d48f0a740e05e60a6fbb008c0a75526a4e5ea78",
+))})
