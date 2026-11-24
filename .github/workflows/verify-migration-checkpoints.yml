@@ -1,0 +1,26 @@
+name: Verify migration checkpoints
+on:
+  push:
+    branches: [rebase/core-4e5a9a3-checkpoint]
+    paths:
+      - 'migration/**'
+      - 'scripts/verify-migration-checkpoints.py'
+      - '.github/workflows/verify-migration-checkpoints.yml'
+permissions:
+  contents: read
+jobs:
+  replay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Replay saved patches and verify recorded Git indexes
+        run: python3 scripts/verify-migration-checkpoints.py --report .build/migration-checkpoint-report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: migration-checkpoint-report
+          path: .build/migration-checkpoint-report.json
+          if-no-files-found: error
+          retention-days: 21
