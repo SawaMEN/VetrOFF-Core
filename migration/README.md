@@ -864,3 +864,19 @@ paths, records shared-source discrepancies, MasterDNS overlay and
 integration status, and explicitly disables stable promotion. A failed
 integration does not turn a materialized source choice into a verified
 release. The new pipeline is pending CI; stable pins unchanged.
+
+### 0.0.4 candidate desktop build matrix
+
+Combined run 45500283071 (8cff05d) passed all integration probes; the
+later candidate with all five final tree resolutions is not yet fully
+verified. Its source-stage audit 45501843695 passed. Introduce a manual
+candidate-only build matrix for linux amd64/arm64, windows amd64 and
+Darwin amd64/arm64. It accepts a successful final combined run ID and
+exact head SHA, reproduces the audited source checkpoint, applies final
+binary patches to temporary indexes, compares resulting tree IDs, verifies
+all nested gitlinks and the MasterDNS overlay, and checks exact final
+manifest/schema bytes. The source archive is checksummed. Matrix builds
+use readonly modules and refuse manifest drift; Linux amd64 has a native
+version smoke test. Output artifacts are explicitly candidate CLI builds,
+not published releases or native GUI libraries. The workflow is untested
+until final integration evidence exists. VERSION and stable pins unchanged.
