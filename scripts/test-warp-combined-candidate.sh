@@ -68,3 +68,6 @@ CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=5m -tags "$tags" -ldflags
 CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=4m -tags "$tags" -ldflags '-checklinkname=0' \
   -run '^TestH_OutboundDropsPacketsToDomains$' -v ./protocol/masque 2>&1 | tee "$report/warp-combined-packet-test.log"
 grep -Fq -- '--- PASS: TestH_OutboundDropsPacketsToDomains' "$report/warp-combined-packet-test.log"
+# Execute WARP package regressions, not just compilation.
+CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=5m -tags "$tags" -ldflags '-checklinkname=0' \
+  ./protocol/warp 2>&1 | tee "$report/warp-runtime-test.log"

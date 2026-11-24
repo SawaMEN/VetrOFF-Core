@@ -2190,6 +2190,54 @@ resolutions[endpoint] = subprocess.check_output(["gofmt"], input=replace_once(
     resolutions[endpoint], function_blob(resolutions[endpoint], signature), legacy))
 compat[path] = new
 
+
+# VLESS: preserve reverse, testpre/testseed and XDrive, plus the fork's
+# cancellable close-once encryption handshake. Adopt upstream early
+# Vision validation, kTLS compatibility metadata and scoped cleanup.
+path = "protocol/vless/outbound.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("e901f7c5d40dc7d749ec5cfab20ab8d23af0f256",
+     "930ff4fd7106a68e8f82b3ef6484b45f384e0510",
+     "9c975b36e776696c17a2b8429037a80c1104bd3c")))
+candidate = own
+i = new.index(b"\t\toutbound.tlsConfig, err = tls.NewClientWithOptions(")
+j = new.index(b"\n\t\tif err != nil", i)
+candidate = replace_once(candidate,
+    b"\t\toutbound.tlsConfig, err = tls.NewClient(ctx, logger, options.Server, common.PtrValueOrDefault(options.TLS))",
+    new[i:j])
+candidate = replace_once(candidate, b"\tmuxOpts := common.PtrValueOrDefault(options.Multiplex)",
+    b"\tflow := options.Flow\n\tmuxOpts := common.PtrValueOrDefault(options.Multiplex)")
+i = new.index(b"\tif outbound.vision && outbound.tlsConfig == nil && outbound.encryption == nil")
+j = new.index(b"\n\toutbound.multiplexDialer", i)
+candidate = replace_once(candidate, b"\toutbound.multiplexDialer, err = mux.NewClientWithOptions",
+    new[i:j] + b"\n\toutbound.multiplexDialer, err = mux.NewClientWithOptions")
+candidate = replace_once(candidate, b"\treverse         *reverseBridge\n",
+    b"\treverse         *reverseBridge\n\tcloseOnce sync.Once\n\tcloseErr error\n")
+candidate = replace_once(candidate, b"func (h *Outbound) Start(stage adapter.StartStage, _ *adapter.Scope) error {\n",
+    b"func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {\n\tif stage == adapter.StartStateInitialize {\n\t\tscope.Add(h.Close)\n\t}\n")
+candidate = replace_once(candidate, function_blob(own, b"func (h *Outbound) Close("), b'''func (h *Outbound) Close() error {
+	h.closeOnce.Do(func() {
+		if h.reverse != nil {
+			h.reverse.close()
+		}
+		if h.preconnect != nil {
+			h.preconnect.Close()
+		}
+		h.closeErr = common.Close(common.PtrOrNil(h.multiplexDialer), h.transport)
+	})
+	return h.closeErr
+}
+''')
+candidate = replace_once(candidate, b"\treturn conn, baseConn, err\n}",
+    b"\tif err != nil {\n\t\t_ = common.Close(conn)\n\t\treturn nil, nil, err\n\t}\n\treturn conn, baseConn, nil\n}")
+for marker in (b"SetVisionTestseed(options.Testseed)", b"newPreconnectPool(", b"newReverseBridge(",
+               b"XDrive requires VLESS encryption", b"DialEarlyReverseConnWithOptions(",
+               b"destination.IsDomain()", b"handshakeOnceConn", b"scope.Add(h.Close)"):
+    assert marker in candidate, marker
+assert candidate.count(b"context.AfterFunc(ctx, closeRaw)") == 2
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"

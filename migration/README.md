@@ -221,3 +221,16 @@ The AWG endpoint and helper each defined singlePeer; keep the fork's exact
 validation in the endpoint and the upstream helper without duplication.
 These are additional clean-tree compatibility adjustments, not new conflict
 counts. Candidate verification remains required; stable pins unchanged.
+
+### VLESS and WARP runtime verification
+
+Audit 45468473285 passed all existing gates (127 resolutions, eight
+clean-tree adjustments), including Shadowsocks, SSH and combined WARP
+compilation. Stable build and checkpoint replay also passed. The combined
+WARP gate now executes its package regression tests. VLESS reconciliation
+preserves fork XDrive, reverse, testpre and testseed, close-once encryption
+and cancellation, and adopts upstream early Vision validation, kTLS
+compatibility metadata and scoped cleanup. Explicit Close shares that
+cleanup. The outbound is tested with locked fork dependencies and new
+upstream close tests. Full candidate integration remains required; stable
+pins unchanged.
