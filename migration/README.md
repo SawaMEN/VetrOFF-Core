@@ -880,3 +880,13 @@ use readonly modules and refuse manifest drift; Linux amd64 has a native
 version smoke test. Output artifacts are explicitly candidate CLI builds,
 not published releases or native GUI libraries. The workflow is untested
 until final integration evidence exists. VERSION and stable pins unchanged.
+
+### Automatic candidate matrix after the final integration
+
+The exact final combined integration run 45501843656 at
+ce43716bb022c8f042a74490841303e9bc23d92d was still queued when checked.
+Enable a workflow_run trigger on completion, restricted to this run ID,
+head SHA and successful conclusion. Reuse the existing API identity and
+artifact validation before building. Failed or unrelated runs cannot
+start the matrix; manual dispatch remains available for later candidates.
+No automatic stable release, source promotion, version bump or tag.

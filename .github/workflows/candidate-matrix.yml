@@ -1,5 +1,9 @@
 name: VetrOFF-Core 0.0.4 candidate matrix
 on:
+  workflow_run:
+    workflows: ['Combined candidate integration']
+    branches: [main]
+    types: [completed]
   workflow_dispatch:
     inputs:
       run_id:
@@ -15,6 +19,13 @@ permissions:
   actions: read
 jobs:
   source:
+    # Auto-build only the explicitly approved final integration revision.
+    # Manual dispatch remains available for later verified candidates.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.id == 45501843656 &&
+       github.event.workflow_run.head_sha == 'ce43716bb022c8f042a74490841303e9bc23d92d')
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -28,8 +39,8 @@ jobs:
       - name: Verify run identity
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ inputs.run_id }}
-          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          RUN_ID: ${{ inputs.run_id || github.event.workflow_run.id }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha || github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           [[ "$RUN_ID" =~ ^[0-9]+$ ]]
@@ -49,11 +60,11 @@ jobs:
         with:
           name: combined-candidate-diagnostics
           path: evidence
-          run-id: ${{ inputs.run_id }}
+          run-id: ${{ inputs.run_id || github.event.workflow_run.id }}
           github-token: ${{ github.token }}
       - name: Replay exact final source trees
         env:
-          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha || github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=1 origin "$CANDIDATE_SHA"
