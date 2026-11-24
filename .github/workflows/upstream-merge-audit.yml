@@ -13,6 +13,7 @@ on:
       - 'scripts/test-reviewed-tunnel-transports.sh'
       - 'scripts/test-tailscale-candidate.sh'
       - 'scripts/test-reviewed-dns.sh'
+      - 'scripts/test-reviewed-route.sh'
       - 'scripts/test-reviewed-masterdns.sh'
       - 'scripts/test-reviewed-protocols.sh'
       - 'scripts/test-reviewed-vless.sh'
@@ -102,39 +103,7 @@ jobs:
         id: network_reset
         if: ${{ !cancelled() && steps.merge_audit.outcome == 'success' && steps.setup_go.outcome == 'success' }}
         timeout-minutes: 12
-        run: |
-          source scripts/_common.sh
-          report="$ROOT/.build/upstream-merge-audit"
-          sing="$WORK/hiddify-sing-box"
-          tmp=$(mktemp -d)
-          cp "$sing/go.mod" "$tmp/go.mod"
-          cp "$sing/go.sum" "$tmp/go.sum"
-          trap 'cp "$tmp/go.mod" "$sing/go.mod"; cp "$tmp/go.sum" "$sing/go.sum"; rm -rf "$tmp"' EXIT
-          python3 - "$sing" "$report" "$tmp" <<'PY'
-          import json, subprocess, sys
-          from pathlib import Path
-          sing, report, tmp = map(Path, sys.argv[1:])
-          meta = json.loads((report / "hiddify-sing-box-reviewed.json").read_text())
-          paths = ("route/network.go", "route/router.go", "route/conn.go", "route/dns.go", "route/h_network_reset_test.go", "route/h_read_pace.go", "route/h_read_pace_test.go", "route/h_wake_pace.go", "route/h_wake_pace_test.go", "route/h_wake_pace_unix.go", "route/h_wake_pace_unix_test.go", "route/h_wake_pace_other.go", "route/h_path_rtt.go")
-          assert set(paths[:3]) <= set(meta["reviewed_resolutions"])
-          assert not set(paths) & set(meta["remaining_conflicts"])
-          files = {}
-          for path in paths:
-              target = tmp / path
-              target.parent.mkdir(parents=True, exist_ok=True)
-              target.write_bytes(subprocess.check_output(["git", "-C", str(sing), "show", meta["reviewed_tree"] + ":" + path]))
-              files[str(sing / path)] = str(target)
-          (tmp / "overlay.json").write_text(json.dumps({"Replace": files}))
-          PY
-          cd "$sing"
-          CGO_ENABLED=1 go test -race -mod=mod -overlay "$tmp/overlay.json" -count=1 -timeout=3m -ldflags '-checklinkname=0' \
-            -run '^TestH_(NetworkResetReachesTheDNSServers|ReadPace|WakePace|PacedRawConn|TrackedDatagramSocket|TrackedSockets|PathRoundTrip|BusyDatagramSocket)' -v ./route 2>&1 | tee "$report/network-reset-candidate-test.log"
-          for test in TestH_NetworkResetReachesTheDNSServers TestH_TrackedDatagramSocketKeepsItsReader TestH_WakePaceNeedsALongPath TestH_ReadPaceLeavesAnExchangeAlone TestH_PacedRawConnWaitsAfterAWakeUp; do
-            grep -Fq -- "--- PASS: $test" "$report/network-reset-candidate-test.log"
-          done
-          HIDDIFY_NO_READ_PACE=1 CGO_ENABLED=1 go test -race -mod=mod -overlay "$tmp/overlay.json" -count=1 -timeout=3m -ldflags '-checklinkname=0' \
-            -run '^TestH_ReadPaceLeavesASlowConnectionAlone$' -v ./route 2>&1 | tee "$report/pacing-disabled-candidate-test.log"
-          grep -Fq -- '--- PASS: TestH_ReadPaceLeavesASlowConnectionAlone' "$report/pacing-disabled-candidate-test.log"
+        run: bash scripts/test-reviewed-route.sh
       - name: Probe Tailscale candidate against locked dependencies
         if: ${{ !cancelled() && steps.merge_audit.outcome == 'success' && steps.setup_go.outcome == 'success' }}
         run: bash scripts/test-tailscale-candidate.sh
