@@ -16,7 +16,8 @@ meta = json.loads((report / "hiddify-sing-box-reviewed.json").read_text())
 tree = meta["reviewed_tree"]
 def git(*args):
     return subprocess.check_output(["git", "-C", str(sing), *args])
-groups = ("protocol/hiddify/dnstt", "protocol/shadowsocks", "transport/simple-obfs", "protocol/ssh")
+groups = ("protocol/hiddify/dnstt", "protocol/shadowsocks", "transport/simple-obfs", "protocol/ssh",
+          "hiddify/readahead", "common/wholepacket")
 extra = ("option/shadowsocks.go", "option/dnstt.go", "option/ssh.go")
 # Some option filenames differ by revision: only include paths that exist.
 extra = tuple(p for p in extra if git("ls-tree", tree, "--", p))
@@ -32,6 +33,8 @@ with tempfile.TemporaryDirectory() as tmp:
     dest.mkdir()
     subprocess.run(["tar", "-xf", str(archive), "-C", str(dest)], check=True)
     backup = tmp / "backup"
+    touched = []
+    manifests = {p: (sing / p).read_bytes() for p in ("go.mod", "go.sum")}
     try:
         for path in (*groups, *extra):
             original = sing / path
@@ -39,13 +42,14 @@ with tempfile.TemporaryDirectory() as tmp:
             saved.parent.mkdir(parents=True, exist_ok=True)
             if original.exists():
                 original.rename(saved)
+            touched.append(path)
             if (dest / path).is_dir():
                 shutil.copytree(dest / path, original)
             else:
                 shutil.copyfile(dest / path, original)
         env = dict(os.environ, CGO_ENABLED="1")
         failed = []
-        for name, package in (("dnstt", "./protocol/hiddify/dnstt"), ("shadowsocks", "./protocol/shadowsocks"), ("ssh", "./protocol/ssh")):
+        for name, package in (("readahead", "./hiddify/readahead"), ("wholepacket", "./common/wholepacket"), ("dnstt", "./protocol/hiddify/dnstt"), ("shadowsocks", "./protocol/shadowsocks"), ("ssh", "./protocol/ssh")):
             with (report / (name + "-candidate-test.log")).open("wb") as log:
                 result = subprocess.run(["go", "test", "-race", "-mod=mod", "-count=1",
                     "-timeout=5m", "-ldflags", "-checklinkname=0", package], cwd=sing, env=env,
@@ -56,7 +60,7 @@ with tempfile.TemporaryDirectory() as tmp:
         if failed:
             raise SystemExit("candidate tests failed: " + ", ".join(failed))
     finally:
-        for path in (*groups, *extra):
+        for path in reversed(touched):
             original = sing / path
             saved = backup / path
             if original.is_dir():
@@ -65,4 +69,6 @@ with tempfile.TemporaryDirectory() as tmp:
                 original.unlink()
             if saved.exists():
                 saved.rename(original)
+        for path, content in manifests.items():
+            (sing / path).write_bytes(content)
 PY

@@ -57,17 +57,7 @@ cp "$ROOT/migration/tests/adapter_detour_compat_test.go" "$sing/adapter/vetroff_
 cd "$sing"
 tags=with_gvisor,with_masque,with_awg
 CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=2m -tags "$tags" -ldflags '-checklinkname=0' \
-  -run '^TestVetrOFFPathStatusCompatibility
-go list -mod=mod -tags "$tags" -f '{{range .GoFiles}}{{println .}}{{end}}' ./protocol/warp > "$report/warp-combined-files.txt"
-grep -Fxq endpoint_warp_masque.go "$report/warp-combined-files.txt"
-grep -Fxq endpoint_warp_awg.go "$report/warp-combined-files.txt"
-CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=5m -tags "$tags" -ldflags '-checklinkname=0' \
-  -run '^$' ./protocol/warp ./protocol/masque ./hiddify/warpscan ./hiddify/edgescan ./transport/masque \
-  2>&1 | tee "$report/warp-combined-build.log"
-CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=4m -tags "$tags" -ldflags '-checklinkname=0' \
-  -run '^TestH_OutboundDropsPacketsToDomains$' -v ./protocol/masque 2>&1 | tee "$report/warp-combined-packet-test.log"
-grep -Fq -- '--- PASS: TestH_OutboundDropsPacketsToDomains' "$report/warp-combined-packet-test.log"
- -v ./adapter 2>&1 | tee "$report/adapter-detour-test.log"
+  -run '^TestVetrOFFPathStatusCompatibility$' -v ./adapter 2>&1 | tee "$report/adapter-detour-test.log"
 grep -Fq -- '--- PASS: TestVetrOFFPathStatusCompatibility' "$report/adapter-detour-test.log"
 go list -mod=mod -tags "$tags" -f '{{range .GoFiles}}{{println .}}{{end}}' ./protocol/warp > "$report/warp-combined-files.txt"
 grep -Fxq endpoint_warp_masque.go "$report/warp-combined-files.txt"

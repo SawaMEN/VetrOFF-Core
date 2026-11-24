@@ -194,3 +194,16 @@ with compatible inbound cleanup and a bounded lifetime for the blocked
 read fixture. The scoped protocol test now includes SSH. Combined WARP
 is attempted independently of the isolated MASQUE result once the shared
 edge scanner stage passes. Stable dependencies are not changed.
+
+### Candidate test harness corrections
+
+Run 45465371861 passed DNSTT under the race detector. Shadowsocks failed
+before compilation because the overlay omitted the local readahead package;
+include it and wholepacket, and test both helpers. The combined WARP gate
+failed at shell parsing (a duplicated tail inside a quoted test regex).
+Reconstruct the commands with exact quoted regexes and add a bash/Python
+syntax preflight before the expensive merge audit. Scoped package overlays
+now restore module manifests and only restore directories actually touched.
+The prior isolated MASQUE failure was a Go module proxy transport error,
+not a protocol failure; the subsequent run passed that regression. No
+release source or stable dependency pins were modified.
