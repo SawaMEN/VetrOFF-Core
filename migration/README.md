@@ -29,3 +29,11 @@ The current-baseline audit additionally reconciles MTU search, peer fallback
 and the device stack. The audit workflow runs a scoped race-detector check
 of these three reviewed files with locked dependencies. This is not a full
 WireGuard/AWG migration or a test of the combined upstream dependency set.
+
+The audit also verifies the complete reviewed transport packages (including
+cleanly merged tests) against the selected WireGuard-go and AWG revisions.
+WireGuard-go advances from `e678616` to `32f4b53` only after an ancestry check;
+AWG already uses `a2ae165`. Other dependencies remain locked for this scoped
+check. Tailscale requires separate reconciliation: its candidate and fork
+histories diverge, so it is not automatically replaced. This does not certify
+the complete upstream candidate or authorize promotion of stable pins.

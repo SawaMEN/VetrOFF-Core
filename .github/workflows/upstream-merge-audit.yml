@@ -9,6 +9,7 @@ on:
       - 'scripts/prepare-dependency-candidates.py'
       - '.github/workflows/upstream-merge-audit.yml'
       - 'scripts/test-reviewed-tunnel-helpers.sh'
+      - 'scripts/test-reviewed-tunnel-transports.sh'
       - 'migration/tests/**'
 permissions:
   contents: read
@@ -28,6 +29,8 @@ jobs:
           cache-dependency-path: .build/hiddify-core/hiddify-sing-box/go.sum
       - name: Test reviewed tunnel helpers with the race detector
         run: bash scripts/test-reviewed-tunnel-helpers.sh
+      - name: Test reviewed WireGuard and AWG transport packages
+        run: bash scripts/test-reviewed-tunnel-transports.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:

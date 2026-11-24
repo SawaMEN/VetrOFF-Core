@@ -1731,4 +1731,19 @@ candidate = replace_once(candidate, b"device.stack, err = newStack(options, devi
     b"device.stack, err = newStack(options, device.memoryTun)\n\tif err != nil {\n\t\tdevice.memoryTun.Close()\n\t\treturn nil, err")
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 
+
+# These transport files have identical code and comments after normalizing
+# only the exact marker spelling. Preserve the fork's comment formatting.
+for path, hashes in (
+    ("transport/call/common/http.go", ("f0d8ffdb036e3cde50bd30d91dbaba5fd1509c94", "8a6fddccc79264600afade85217a37ab99571ce2", "242820077e154c4e91780ad694b32b8c43afb170")),
+    ("transport/call/vk/vk_auth.go", ("029bed0d3f801e9439344a032210955aebf3ed18", "1ee660dbc7cb72e33f5401627d6a8227f36769d3", "f209c216fdd92e416fc734218cb2b12d3aac9f38")),
+    ("transport/simple-obfs/http.go", ("df38768ec53276505aebc5785c1986bc16a0be5f", "1c70b20a847e7408ec27e109bdeab5e97517ad88", "e0094eadb8bdfc33b075e2e1b88bdd7e04248835")),
+    ("transport/simple-obfs/server.go", ("7cf5dfc21d6a3608f13c5722b5e974861e301a04", "cab57217e1e9d39db686d9c4a70c7db2bc3db6fb", "aa17f1b3c12ffc3c90786d66c6fe282b8c776cca")),
+    ("transport/v2ray/transport.go", ("7c9a5a4379267fbeef461b99ec4017db1fb92fba", "b9bfdb20ade197227fb22f32163c83b5f2e6e991", "9a0d9303ddce6fbfb5723fc5d107b61cd8a5f7de")),
+):
+    old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+        ("base", "patched_tree", "upstream"), hashes))
+    assert new.replace(b"//H", b"// H") == own, path
+    resolutions[path] = own
+
 apply_reviewed(data, resolutions)
