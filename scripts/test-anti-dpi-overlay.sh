@@ -157,8 +157,11 @@ if [[ "$build" == true ]]; then
   for flag in anti-dpi-policy anti-dpi-selector anti-dpi-probe-url anti-dpi-interval anti-dpi-pool anti-dpi-mux anti-dpi-history anti-dpi-diagnostic anti-dpi-diagnostic-fingerprint anti-dpi-diagnostic-ip; do
     grep -Eq -- "--$flag([[:space:]]|$)" "$out/$name.help.txt"
   done
+  python3 "$ROOT/scripts/smoke-anti-dpi-cli.py" "$out/$name" | tee "$out/$name.smoke.txt"
+  cp "$ROOT/scripts/smoke-anti-dpi-cli.py" "$out/smoke-anti-dpi-cli.py"
   cp "$ROOT/migration/adaptive-connect/testdata/policy-v1.json" "$out/adaptive-connect-v1.disabled.json"
   cp "$ROOT/migration/adaptive-connect/README.md" "$out/ANTI-DPI.md"
+  cp "$ROOT/migration/adaptive-connect/TESTING-RU.md" "$out/TESTING-RU.md"
   cat > "$out/$name.sources.txt" <<PROVENANCE
 Experimental Anti-DPI CLI; not a stable release
 Version: $candidate_version

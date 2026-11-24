@@ -14,6 +14,7 @@ on:
       - 'scripts/prepare.sh'
       - 'scripts/test-adaptive-connect.sh'
       - 'scripts/test-anti-dpi-overlay.sh'
+      - 'scripts/smoke-anti-dpi-cli.py'
       - 'migration/anti-dpi-overlay/**'
       - '.github/workflows/adaptive-connect.yml'
   workflow_dispatch:
