@@ -15,6 +15,7 @@ on:
       - 'scripts/test-reviewed-masterdns.sh'
       - 'scripts/test-reviewed-warp.sh'
       - 'scripts/test-reviewed-masque.sh'
+      - 'scripts/test-warp-combined-candidate.sh'
       - 'migration/tests/**'
 permissions:
   contents: read
@@ -44,6 +45,8 @@ jobs:
         run: bash scripts/test-reviewed-warp.sh
       - name: Test MASQUE UDP destination regression
         run: bash scripts/test-reviewed-masque.sh
+      - name: Probe combined WARP MASQUE and edgescan candidate
+        run: bash scripts/test-warp-combined-candidate.sh
       - name: Probe Tailscale candidate against locked dependencies
         run: bash scripts/test-tailscale-candidate.sh
       - uses: actions/upload-artifact@v4

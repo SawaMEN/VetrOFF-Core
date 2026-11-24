@@ -1999,6 +1999,31 @@ assert b"iponly.NewPacketConn" in candidate
 assert b"scanner.Close()" in candidate
 resolutions[path] = normalized_masque(candidate)
 
+
+# The MasterDNS resolver admission change passed its scoped race tests.
+# Both translations only change the description of that check and add credits.
+import difflib
+for path, own_sha, new_sha, removed, inserted in (
+    ("docs/hiddify/features/protocols/masterdns.en.md",
+     "14f1cc2a27f3ed74ee068c1015b2b07f12a10972", "298d53a9445db0ac6c6dd9001e44b9a7fdaa61a1", 3, 6),
+    ("docs/hiddify/features/protocols/masterdns.fa.md",
+     "02a26996c195aecf5052155f0844cd34313daf1b", "99384c14168a6ba7795e171b1a1cb1fb56d26a97", 3, 5),
+):
+    own, new = added_pair(path, own_sha, new_sha)
+    en = path.endswith(".en.md")
+    credit = ("## Sources and credits" if en else "## منبع‌ها و قدردانی").encode()
+    related = ("## See also" if en else "## همچنین ببینید").encode()
+    i = new.index(credit)
+    j = new.index(related, i)
+    assert credit not in own and b"https://github.com/masterking32/MasterDnsVPN" in new[i:j]
+    left, right = own.splitlines(), (new[:i] + new[j:]).splitlines()
+    changes = [(a, b, c, d) for op, a, b, c, d in difflib.SequenceMatcher(None, left, right, autojunk=False).get_opcodes() if op != "equal"]
+    assert len(changes) == 2, (path, changes)
+    assert sum(b-a for a,b,c,d in changes) == removed
+    assert sum(d-c for a,b,c,d in changes) == inserted
+    assert all(b"pretest_" in b"\n".join(left[a:b]) for a,b,c,d in changes)
+    resolutions[path] = new
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"

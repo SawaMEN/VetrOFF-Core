@@ -37,6 +37,6 @@ assert git("rev-parse", tree + ":common/iponly/conn.go").decode().strip() == "86
 (report / "masque-packet-candidate.patch").write_bytes(git("diff", "--binary", "--full-index", "--", path))
 PY
 cd "$sing"
-CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=4m -ldflags '-checklinkname=0' \
+CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=4m -tags with_gvisor -ldflags '-checklinkname=0' \
   ./protocol/masque -run '^TestH_OutboundDropsPacketsToDomains$' -v 2>&1 | tee "$report/masque-packet-candidate-test.log"
 grep -Fq -- '--- PASS: TestH_OutboundDropsPacketsToDomains' "$report/masque-packet-candidate-test.log"

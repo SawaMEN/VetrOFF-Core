@@ -130,3 +130,17 @@ transformation asserts that all other original outbound behavior survives.
 The isolated regression overlays only the packet method and upstream test
 on the locked scanner. Full scanner lifecycle and WARP endpoint integration
 still require a combined candidate build; the stable pins are unchanged.
+
+### Combined WARP candidate and MasterDNS docs
+
+Run 45458222414 verified 120 resolutions and passed the earlier scoped
+checks; MASQUE's packet test failed at device creation because the test
+was built without `with_gvisor`. The test now explicitly enables it.
+The combined candidate gate copies the complete reviewed WARP, MASQUE,
+edge scanner and supporting packages and compiles with gVisor, MASQUE
+and AWG enabled. The adapter detour helper uses a probe-only readiness
+compatibility adjustment; remaining API mismatches must be addressed
+before integration. The compile-only pass is followed by the actual UDP
+regression test. The two MasterDNS translations now document the previously
+verified resolver admission behavior and restore attribution. No stable
+source pins are changed.
