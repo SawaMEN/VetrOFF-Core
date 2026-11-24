@@ -105,3 +105,16 @@ configs and documentation. Both the library and outbound package are tested
 with the race detector. The nested dependency gitlink remains unresolved
 until its full migration and compatibility are confirmed. No stable pin or
 release code changes in this stage.
+
+### MasterDNS and WARP follow-up
+
+Run 45453921715 verified 117 reviewed resolutions and passed DNS, transport,
+and MasterDnsVPN library race tests. The outbound probe failed to compile
+because its test overlay omitted the already-reviewed `common/dnspool/probe.go`.
+The overlay now includes that file explicitly. For WARP, the candidate uses
+upstream host classification with every locked range retained, and records
+the obsolete scanner as a reviewed deletion (the fork's sole change there
+was equivalent WaitGroup syntax). The actual scanning implementation now
+lives in edgescan. Scoped tests cover the shared engine and WARP host
+classification, not the complete WARP endpoint migration. The original
+stable dependency pins and source patch series are unchanged.

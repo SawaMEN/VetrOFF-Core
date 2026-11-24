@@ -22,11 +22,13 @@ def git(repo, *args):
     return subprocess.check_output(["git", "-C", str(repo), *args])
 meta = json.loads((report / "hiddify-sing-box-reviewed.json").read_text())
 tree = meta["reviewed_tree"]
-paths = ("protocol/hiddify/masterdns/outbound.go", "protocol/hiddify/masterdns/h_masterdns_test.go")
+paths = ("protocol/hiddify/masterdns/outbound.go", "protocol/hiddify/masterdns/h_masterdns_test.go",
+         "common/dnspool/probe.go")
 assert set(paths) <= set(meta["reviewed_resolutions"])
 assert not any(p.startswith("protocol/hiddify/masterdns/") for p in meta["remaining_conflicts"])
 for path in paths:
     (sing / path).write_bytes(git(sing, "show", tree + ":" + path))
+assert b"func Exchange(" in (sing / "common/dnspool/probe.go").read_bytes()
 files = {
     "lib/lib.go": ("6b50239c1dc86e0958d1e2010322075641a334eb", "f65f57ddbfe10d93070ff759b84c41b959e08f33"),
     "internal/client/h_tunnel_probe.go": (None, "e595fe03e193aee8c363653bb455c80fc656dc66"),

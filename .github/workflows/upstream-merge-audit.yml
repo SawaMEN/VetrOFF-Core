@@ -13,6 +13,7 @@ on:
       - 'scripts/test-tailscale-candidate.sh'
       - 'scripts/test-reviewed-dns.sh'
       - 'scripts/test-reviewed-masterdns.sh'
+      - 'scripts/test-reviewed-warp.sh'
       - 'migration/tests/**'
 permissions:
   contents: read
@@ -38,6 +39,8 @@ jobs:
         run: bash scripts/test-reviewed-dns.sh
       - name: Test MasterDNS resolver admission and library candidate
         run: bash scripts/test-reviewed-masterdns.sh
+      - name: Test shared edge scanner and WARP classification
+        run: bash scripts/test-reviewed-warp.sh
       - name: Probe Tailscale candidate against locked dependencies
         run: bash scripts/test-tailscale-candidate.sh
       - uses: actions/upload-artifact@v4

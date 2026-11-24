@@ -114,6 +114,11 @@ def apply_reviewed(data, resolutions, clean_adjustments=None):
         env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "index"))
         git("read-tree", data["tentative_tree"], env=env)
         for path, content in resolutions.items():
+            if content is None:
+                git("update-index", "--force-remove", "--", path, env=env)
+                assert not git("ls-files", "--", path, env=env)
+                print(f"Reviewed deletion: {component}/{path}")
+                continue
             sha = git("hash-object", "-w", "--stdin", payload=content).decode().strip()
             git("update-index", "--cacheinfo", f"100644,{sha},{path}", env=env)
             assert git("show", ":" + path, env=env) == content
@@ -128,7 +133,10 @@ def apply_reviewed(data, resolutions, clean_adjustments=None):
         changed = set(os.fsdecode(p) for p in delta.split(b"\0") if p)
         assert changed <= set(resolutions), ("unexpected changes", changed - set(resolutions))
         for path, content in resolutions.items():
-            assert git("show", tree + ":" + path) == content
+            if content is None:
+                assert not git("ls-tree", tree, "--", path)
+            else:
+                assert git("show", tree + ":" + path) == content
         for path in sorted(set(resolutions) - changed):
             print(f"Reviewed unchanged provisional entry: {component}/{path}")
         (report / (component + "-reviewed-resolutions.patch")).write_bytes(
@@ -136,7 +144,8 @@ def apply_reviewed(data, resolutions, clean_adjustments=None):
         )
     remaining = sorted(set(data["conflicts"]) - set(conflict_resolutions))
     data.update(reviewed_tree=tree, reviewed_resolutions=sorted(conflict_resolutions),
-                clean_adjustments=sorted(clean_adjustments), remaining_conflicts=remaining)
+                clean_adjustments=sorted(clean_adjustments), remaining_conflicts=remaining,
+                deleted_resolutions=sorted(path for path, content in resolutions.items() if content is None))
     (report / (component + "-reviewed.json")).write_text(json.dumps(data, indent=2) + "\n")
     print(f"{component}: {len(conflict_resolutions)} reviewed resolutions, {len(remaining)} unresolved paths")
     if clean_adjustments:
@@ -1927,6 +1936,42 @@ candidate = candidate[:i] + replace_once(candidate[i:], b"\toptions := validOpti
     b"\toptions := validOptions()\n\toptions.Key = key\n")
 assert candidate[candidate.index(b"\nfunc validOptions()"):] == new[new.index(b"\nfunc validOptions()"):]
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+
+# WARP host recognition: upstream expands the endpoint classification.
+# Confirm the fork's previously recognized ranges remain covered and no
+# other code changed. This does not change the scanner's target list.
+path = "common/cloudflare/h_warp_detect.go"
+own, new = added_pair(path, "70c79b71a67859c5b7a2a63ba21390b3021c9a3a",
+                      "133524d1ae2fd45bb6f2f2e169a3cbcb5bf9f19a")
+import ipaddress
+import re
+def warp_networks(blob):
+    return [ipaddress.ip_network(prefix.decode()) for prefix in
+            re.findall(rb'netip.MustParsePrefix\("([^"]+)"\)', blob)]
+old_ranges, new_ranges = warp_networks(own), warp_networks(new)
+assert len(old_ranges) == 10 and len(new_ranges) == 15
+assert all(any(a.version == b.version and a.subnet_of(b) for b in new_ranges) for a in old_ranges)
+marker = b"// IsWARPAddress reports"
+assert own[own.index(marker):] == new[new.index(marker):]
+resolutions[path] = new
+
+# Old warpscan implementation moved to edgescan. The only fork-specific
+# change was the WaitGroup.Go refactor and gofmt. Do not retain a second
+# Scan/Request/Result implementation alongside upstream's aliases.
+path = "hiddify/warpscan/scanner.go"
+old = checked_blob(data["base"], path, "5fcbf86aaaac5baf697729f1429e2c5c1c07566c")
+own = checked_blob(data["patched_tree"], path, "53e11750b43d91d85fbac0cf5dc6eff9dc1cceff")
+assert not git("ls-tree", data["upstream"], "--", path)
+candidate = replace_once(old, b"\t\twait.Add(1)\n\t\tgo func() {\n\t\t\tdefer wait.Done()\n",
+    b"\t\twait.Go(func() {\n")
+candidate = replace_once(candidate, b"\t\t}()\n\t}\nfeed:", b"\t\t})\n\t}\nfeed:")
+assert subprocess.check_output(["gofmt"], input=candidate) == subprocess.check_output(["gofmt"], input=own)
+engine = checked_blob(data["upstream"], "hiddify/warpscan/h_engine.go", "35885c10667a93d21064eabf602455c29cd79263")
+shared = checked_blob(data["upstream"], "hiddify/edgescan/scanner.go", "801388a62453ad0c295957139a5afe1b018cffb9")
+assert b"return edgescan.Scan(ctx, logger, request)" in engine
+assert b"wait.Add(1)" in shared and b"defer wait.Done()" in shared
+resolutions[path] = None
 
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
