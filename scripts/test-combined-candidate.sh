@@ -116,4 +116,44 @@ probe sing-modules go list -mod=mod -m all
 probe sing-tests go test -mod=mod -count=1 -timeout=6m -tags "$tags,with_xdrive" -ldflags '-checklinkname=0' \
   -run '^TestH_(NetworkResetReachesTheDNSServers|Psiphon|XDrive|EveryPeerBridgeHasTheSessionsHandlers)' \
   ./route ./protocol/psiphon ./transport/call/telemost ./transport/v2rayxdrive .
+# The checked-in schema is generated output. Regenerate from the actual
+# candidate's registries, not by merging JSON conflict markers. Validate
+# local references and the presence of the fork compatibility options.
+schema="$report/combined-schema.json"
+probe schema-generate go run -mod=mod -tags "$tags,with_xdrive" -ldflags '-checklinkname=0' ./cmd/sing-box schema -o "$schema"
+if [[ -s "$schema" ]]; then
+  probe schema-validate python3 - "$schema" <<'PY'
+import json, sys
+from pathlib import Path
+schema = json.loads(Path(sys.argv[1]).read_text())
+assert isinstance(schema, dict)
+names, refs = set(), set()
+def walk(value):
+    if isinstance(value, dict):
+        props = value.get("properties", {})
+        if isinstance(props, dict):
+            names.update(props)
+        if isinstance(value.get("$ref"), str):
+            refs.add(value["$ref"])
+        for child in value.values():
+            walk(child)
+    elif isinstance(value, list):
+        for child in value:
+            walk(child)
+walk(schema)
+required = {"conduit_pairing_id", "fallback_address", "final_mask",
+            "storage_dialer", "smart_pool", "keep_top"}
+assert required <= names, ("missing compatibility fields", sorted(required - names))
+for ref in refs:
+    if not ref.startswith("#/"):
+        continue
+    node = schema
+    for part in ref[2:].split("/"):
+        node = node[part.replace("~1", "/").replace("~0", "~")]
+print(f"Schema validated: {len(names)} property names, {len(refs)} references")
+PY
+else
+  failed=1
+  echo "Schema generation did not produce a JSON artifact" >&2
+fi
 exit "$failed"
