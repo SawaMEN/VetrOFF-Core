@@ -1003,3 +1003,20 @@ script. Restore the complete anchored pattern and one upload step.
 The four-commit test remains a separate candidate, with all three
 regressions mandatory and readonly Core compilation. No source pin or
 release change. Retry pending CI.
+
+### Promote the verified 0.0.4 release into the root build
+
+The user approved unifying the two build paths. The new promotion workflow
+reconstructs the exact successful 0.0.4 integration and generates ordered
+binary patch series against the official Core, sing-box and ray2sing pins.
+It separately persists the required MasterDNS overlay, verifies all four
+release tree IDs through scripts/prepare.sh, validates the regenerated root
+tree on all five desktop build targets, and runs the regular Core tests on
+Linux amd64. The final job can push the exact tested tree to main only if
+main still points at the original workflow commit (non-force push). The
+candidate updates VERSION, README and source pins, and retires the four
+baseline-specific workflows. Historical scripts and checkpoints remain.
+No release tag is rewritten. Until the promotion workflow passes, the
+root build is still 0.0.3. Partial v5 update testing separately exposed
+four duplicate import errors in sing-box test files; these require a
+follow-up fix, not an unreviewed change to the released 0.0.4 tree.

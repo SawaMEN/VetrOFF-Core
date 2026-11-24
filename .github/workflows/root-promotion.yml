@@ -1,0 +1,146 @@
+name: Unify verified 0.0.4 root sources
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/prepare-root-promotion.py'
+      - '.github/workflows/root-promotion.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: vetroff-root-promotion-004
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Verify exact released integration and matrix
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/45501843656" > integration.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/45506329292" > matrix.json
+          python3 - <<'PY'
+          import json, os
+          for file, path, sha in [
+              ("integration.json", "combined-candidate.yml", "ce43716bb022c8f042a74490841303e9bc23d92d"),
+              ("matrix.json", "candidate-matrix.yml", "d3b70cdc85d013f47a93e3105965b139b28486a6"),
+          ]:
+              with open(file) as f:
+                  run = json.load(f)
+              assert run["path"] == ".github/workflows/" + path
+              assert run["head_sha"] == sha and run["head_branch"] == "main"
+              assert run["head_repository"]["full_name"].lower() == os.environ["GITHUB_REPOSITORY"].lower()
+              assert run["status"] == "completed" and run["conclusion"] == "success"
+          PY
+      - uses: actions/download-artifact@v4
+        with:
+          name: combined-candidate-diagnostics
+          path: evidence
+          run-id: '45501843656'
+          github-token: ${{ github.token }}
+      - name: Generate new root pins and patch series
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin ce43716bb022c8f042a74490841303e9bc23d92d
+          git worktree add --detach "$RUNNER_TEMP/promotion-replay" ce43716bb022c8f042a74490841303e9bc23d92d
+          cd "$RUNNER_TEMP/promotion-replay"
+          bash scripts/audit-upstream-merge.sh 4e5a9a357003d0a995360586702fd24c53042e3f
+          cd "$GITHUB_WORKSPACE"
+          python3 scripts/prepare-root-promotion.py "$RUNNER_TEMP/promotion-replay/.build/hiddify-core" "$RUNNER_TEMP/promotion-replay/.build/upstream-merge-audit" evidence
+          git diff --cached --binary --full-index --no-renames --submodule=short > promotion.patch
+          git write-tree > promotion.tree
+          (sha256sum promotion.patch promotion.tree > promotion.sha256)
+          git -c user.name='VetrOFF CI' -c user.email='audit@example.invalid' commit -m 'Reproduce released 0.0.4 from root source pins'
+          test "$(git rev-parse HEAD^{tree})" = "$(cat promotion.tree)"
+          bash scripts/prepare.sh
+          grep -Fx 'CORE_TREE=e4823f0dda24d906354b09c6a919d366424216e7' .build/prepared-sources.lock
+          grep -Fx 'SING_TREE=f76b0611b09245e2f636692487b774c03a18d6c2' .build/prepared-sources.lock
+          grep -Fx 'RAY_TREE=578ece81ce7f02d4b40b56c821daac0d20ac75d7' .build/prepared-sources.lock
+          grep -Fx 'MASTERDNS_TREE=b63200821135df6286dedc5ba673e5ae8f3862c1' .build/prepared-sources.lock
+      - uses: actions/upload-artifact@v4
+        with:
+          name: root-promotion-patch
+          path: |
+            promotion.patch
+            promotion.tree
+            promotion.sha256
+          if-no-files-found: error
+          retention-days: 21
+  validate:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goos: linux, goarch: amd64}
+          - {goos: linux, goarch: arm64}
+          - {goos: windows, goarch: amd64}
+          - {goos: darwin, goarch: amd64}
+          - {goos: darwin, goarch: arm64}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: root-promotion-patch
+          path: promotion
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Verify unified tree and build through normal scripts
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+          GOWORK: 'off'
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          (cd promotion && sha256sum -c promotion.sha256)
+          git apply --index --binary --whitespace=nowarn promotion/promotion.patch
+          test "$(git write-tree)" = "$(cat promotion/promotion.tree)"
+          git -c user.name='VetrOFF CI' -c user.email='audit@example.invalid' commit -m 'Validate unified source pins'
+          bash scripts/prepare.sh
+          bash scripts/build.sh --reuse-sources
+          if [[ "$GOOS/$GOARCH" == linux/amd64 ]]; then
+            bash scripts/test.sh --reuse-sources
+          fi
+  promote:
+    needs: validate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: root-promotion-patch
+          path: promotion
+      - name: Promote only the exact validated tree
+        run: |
+          set -euo pipefail
+          (cd promotion && sha256sum -c promotion.sha256)
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$GITHUB_SHA"
+          git apply --index --binary --whitespace=nowarn promotion/promotion.patch
+          test "$(git write-tree)" = "$(cat promotion/promotion.tree)"
+          git -c user.name='VetrOFF CI' -c user.email='audit@example.invalid' commit -m 'Unify stable 0.0.4 source pins and patch stack'
+          git push origin HEAD:refs/heads/main
