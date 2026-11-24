@@ -968,6 +968,107 @@ assert b"func TestBuildConfigRemoteDNSLocal" in candidate
 assert b"func TestTCPFirstOrder" in candidate
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 
+# Config builder: preserve all fork privacy and adaptive-network policies,
+# serialized build snapshots and chain-stage handling. Integrate the
+# upstream router validation, IPv6-only host adaptation, cache persistence
+# and adaptive processor defaults without coupling monitoring to a public API.
+path = "v2/config/builder.go"
+own = checked_blob(patched, path, "4dffdcdcbf9000e3b380e229cd11f08f450dc9af")
+new = checked_blob(upstream, path, "6a72bfe009c4065ae605ec22a35f364e3c080404")
+candidate = own
+marker = b"\tinput, err := ReadSingOptions(ctx, inputOpt)"
+lifecycle_edit(marker, b'''	// Keep an explicit Android IPv4-only tunnel compatible with the platform
+	// interface; the host adaptation applies to native desktop/router modes.
+	ipv6Only := !C.IsAndroid && !C.IsIos && !hostHasIPv4()
+	hopts = forIPv6OnlyHost(hopts, ipv6Only)
+	hopts, err := forRouterMode(hopts)
+	if err != nil {
+		return nil, err
+	}
+
+''' + marker)
+lifecycle_edit(b"\tapplyRegionalPrivacy(&options, hopts)\n", b"\tif ipv6Only {\n\t\tuseIPv6Resolvers(&options)\n\t}\n\tapplyRegionalPrivacy(&options, hopts)\n")
+lifecycle_edit(b'\t\t\t\tPath:    "data/clash.db",\n', b'\t\t\t\tPath:    "data/clash.db",\n\t\t\t\tStoreFakeIP: hopt.EnableFakeDNS,\n')
+marker = b"\nfunc setLog(options *option.Options, opt *HiddifyOptions)"
+procs = lifecycle_section(new, b"// setProcs lets", marker)
+start = candidate.index(b"func setExperimental(")
+end = candidate.index(marker, start)
+section = candidate[start:end]
+assert section.rstrip().endswith(b"}")
+section = section.rstrip()[:-1] + b"\tsetProcs(options)\n}\n\n" + procs.rstrip() + b"\n"
+candidate = candidate[:start] + section + candidate[end:]
+lifecycle_edit(b"AutoRedirect: hopt.AutoRedirect && AutoRedirectAvailable(),", b"AutoRedirect: tunAutoRedirect(hopt),")
+# Router mode must not silently turn off its required auto_redirect when
+# the fork's per-device routing table is used.
+lifecycle_edit(b"opts.AutoRedirect = hopt.WifiVPNSharing", b"opts.AutoRedirect = hopt.WifiVPNSharing || hopt.RouterMode")
+# Native auto-routing should capture IPv6 even when DNS is IPv4-only;
+# Android/iOS need the TUN addresses to match their platform VPN builder.
+lifecycle_edit(b"\t\tif ipv6Enable {\n\t\t\topts.Address = append(opts.Address,", b"\t\tif ipv6Enable || (!C.IsAndroid && !C.IsIos && shouldEnableIPv6()) {\n\t\t\topts.Address = append(opts.Address,")
+# The retained sing-box fork uses []string IPCIDR in its raw rule API.
+assert b"IPCIDR: []string{" in candidate
+for marker in (b"buildConfigMu.Lock()", b"normalizeAppChain(hopts)", b"applyChainStage(ctx,", b"applyHandbookRouting(ctx,", b"applyRegionalPrivacy(&options,", b"hopts.AdaptiveNetwork", b"opts.ExcludeUID", b"proxyListeners(hopt, ipv6Enable)"):
+    assert marker in candidate, marker
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Update the older regression to distinguish the explicit mobile
+# interface contract from native desktop IPv6 route capture. The actual
+# platform VPN builder is still covered by its own integration tests.
+path = "v2/config/builder_tun_ipv6_test.go"
+own = checked_blob(patched, path, "123f18989a3d3e04d5a860d725b4dda7132013cb")
+assert git("show", data["tentative_tree"] + ":" + path) == own
+candidate = own
+lifecycle_edit(b"func TestTunIPv4OnlyDoesNotConfigureIPv6WithoutRoot(t *testing.T)", b"func TestTunIPv4OnlyPlatformAddressPolicy(t *testing.T)")
+lifecycle_edit(b"\t\tif len(tun.Address) != 1 || !tun.Address[0].Addr().Is4() {\n\t\t\tt.Fatalf(\"IPv4-only mode must configure only an IPv4 TUN address, got %v\", tun.Address)\n\t\t}", b'''		want := 1
+		if !C.IsAndroid && !C.IsIos && shouldEnableIPv6() {
+			want = 2
+		}
+		if len(tun.Address) != want || !tun.Address[0].Addr().Is4() || (want == 2 && !tun.Address[1].Addr().Is6()) {
+			t.Fatalf("platform TUN policy expected %d addresses, got %v", want, tun.Address)
+		}''')
+core_clean[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Build recipes: newer Windows launchers, Apple static Cronet linkage and
+# Linux runpath fix; keep pinned generators, Android API/arch targets,
+# native tests, web RPC build and non-mutating module preparation.
+path = "Makefile"
+own = checked_blob(patched, path, "ba7f7c5e72aba26f3e3c3e359c8a9c6117e23d56")
+new = checked_blob(upstream, path, "be37336605dad69802464d86c7c1ed713e860a73")
+candidate = new
+marker = b"# Standalone CLI binary"
+lifecycle_edit(marker, lifecycle_section(own, b"# Test native APIs without", marker) + marker)
+lifecycle_edit(lifecycle_section(new, b"CRONET_DIR=./cronet", b"\nios-full:"),
+               lifecycle_section(own, b"CRONET_DIR=./cronet", b"\nios-full:"))
+lifecycle_edit(b"\tgo mod tidy\n", b"\tgo mod download\n")
+# Keep the earlier filename for clients that have not migrated yet.
+marker = b'\tif [ ! -f $(BINDIR)/$(LIBNAME).dll -o ! -f $(BINDIR)/$(WIN_CLINAME).exe'
+lifecycle_edit(marker, b'\tcp $(BINDIR)/$(WIN_CLINAME).exe $(BINDIR)/$(CLINAME).exe\n' + marker)
+candidate = candidate.rstrip() + b"\n\n" + own[own.index(b"# Tested generators:"):].rstrip() + b"\n"
+for marker in (b"ANDROID_API ?= 24", b"android-arm64:", b"PROTOC_GEN_GO_VERSION=v1.36.12", b"web-rpc:", b"IOS_ADD_TAGS=with_dhcp,with_low_memory\n", b"DIAGNOSTICS_PUBLIC_KEY", b"-L./lib -l:$(LIBNAME).so"):
+    assert marker in candidate, marker
+resolutions[path] = candidate
+
+# Generated RPC docs: upstream retains all existing VetrOFF RPC names and
+# adds new fields. Verify every prior table entry by its section and name
+# rather than requiring unchanged descriptions or table layout.
+path = "docs/hiddifyrpc.md"
+own = checked_blob(patched, path, "ac81a944e7c60bb187fdfaee50018513f45a540a")
+new = checked_blob(upstream, path, "76eecbda28879d20753edaa7d9fc7a5fcf818885")
+def rpc_doc_members(blob):
+    section = b""
+    rows = set()
+    for line in blob.splitlines():
+        if line.startswith(b'<a name="'):
+            section = line
+        if line.startswith(b"| ") and b" |" in line:
+            name = line.split(b"|")[1].strip()
+            if name and name not in (b"Field", b"Name", b"Method", b"-----", b"----"):
+                rows.add((section, name))
+    return rows
+assert rpc_doc_members(own) <= rpc_doc_members(new), sorted(rpc_doc_members(own) - rpc_doc_members(new))
+resolutions[path] = new
+
+# go.mod intentionally remains open: the existing guarded dependency
+# candidate is valid syntactically but its combined build is not verified.
 apply_reviewed(data, resolutions, core_clean)
 
 repo = repo / "hiddify-sing-box"
