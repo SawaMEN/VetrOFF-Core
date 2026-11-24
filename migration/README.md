@@ -207,3 +207,17 @@ now restore module manifests and only restore directories actually touched.
 The prior isolated MASQUE failure was a Go module proxy transport error,
 not a protocol failure; the subsequent run passed that regression. No
 release source or stable dependency pins were modified.
+
+### Clean-merge semantic compatibility
+
+Run 45466889896 confirmed 127 resolved conflicts, stable build and all
+previous scoped checks. The readahead and wholepacket tests passed. The
+SSH regressions exposed three missing server-side fixes (network policy,
+malformed forward handling, and host-key algorithms); restore the upstream
+implementation with the fork's scoped cleanup. Shadowsocks lacked the
+shared obfsServer helper because a clean merge retained the fork's older
+helper and multi/relay callers; reconcile the coupled package and tests.
+The AWG endpoint and helper each defined singlePeer; keep the fork's exact
+validation in the endpoint and the upstream helper without duplication.
+These are additional clean-tree compatibility adjustments, not new conflict
+counts. Candidate verification remains required; stable pins unchanged.

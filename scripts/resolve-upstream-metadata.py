@@ -2139,6 +2139,57 @@ new_tests = set(re.findall(rb"(?m)^func (Test\w+)\(", candidate))
 assert len(old_tests) == 12 and len(new_tests) == 21 and old_tests <= new_tests
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 
+
+# Clean textual merges can still retain incompatible fork implementations.
+# The exact locked blobs below represent fork simplifications of upstream
+# behavior, not unresolved merge-tree conflicts. Restore the corresponding
+# upstream implementation together with its regression tests.
+compat = {}
+for path, own_sha, up_sha in (
+    ("protocol/ssh/inbound.go", "6f4984344968c0ad369b6b46df1dcb07eba19615", "c3211f89c72ef2101172f05a02e254fcf613d50c"),
+    ("protocol/shadowsocks/h_obfs.go", "9fbe0df7c80bdaaac95ec3093db3ceed206bb49a", "5c40547f9ecd478f779ad0a9eecf950881b17957"),
+    ("protocol/shadowsocks/inbound_multi.go", "2c4a74239d054094a3759d852716a10506005ce3", "e2f8a3ea3ea04001f23e7538776ec1e189001daa"),
+    ("protocol/shadowsocks/inbound_relay.go", "aa70f6ad2ecedc95c08be78d74bdac7de11e1aae", "04f8220d564f374fa63375d441ce0b93b76645b8"),
+    ("protocol/shadowsocks/h_obfs_test.go", "0d7412493fc267ad1a74959e6da9cce138b75e71", "1c4b5d4e8c4ccf82e47effa2db54134aa858f783"),
+):
+    own = checked_blob(data["patched_tree"], path, own_sha)
+    new = checked_blob(data["upstream"], path, up_sha)
+    assert checked_blob(data["base"], path, up_sha) == new
+    assert checked_blob(data["tentative_tree"], path, own_sha) == own
+    if path == "protocol/ssh/inbound.go":
+        for marker in (b"restrictHostKey(priv, options.HostKeyAlgorithms)", b"connectionRouter = router",
+                       b"continue // only this channel is refused", b"deadline.NewConn(", b"scope.Add(h.Close)"):
+            assert marker in new, marker
+        # Start-at-stage fixture and callers may begin directly at Start.
+        # Retain the fork's cleanup registration after successful start.
+        new = replace_once(new, b"\tif stage == adapter.StartStateInitialize {\n\t\tscope.Add(h.Close) // H: closed with the box\n\t}\n", b"")
+        old_start = function_blob(own, b"func (h *Inbound) Start(")
+        new = replace_once(new, function_blob(new, b"func (h *Inbound) Start("), old_start)
+    elif path.endswith("h_obfs_test.go"):
+        old_tests = set(re.findall(rb"(?m)^func (Test\w+)\(", own))
+        assert old_tests <= set(re.findall(rb"(?m)^func (Test\w+)\(", new))
+    elif path.endswith("h_obfs.go"):
+        assert b"func markAuthenticated(" in own and b"func markAuthenticated(" in new
+        assert b"func newObfsServer(" in new
+    else:
+        assert b"markAuthenticated(ctx)" in own and b"markAuthenticated(ctx)" in new
+        assert b"h.obfs.serve(" in new and b"scope.Add(" in new
+    compat[path] = subprocess.check_output(["gofmt"], input=new)
+
+# singlePeer moved into the upstream endpoint. Preserve the fork's exact
+# address validation there and remove its duplicate from the helper file.
+path = "protocol/awg/h_peer_fallback.go"
+own = checked_blob(data["tentative_tree"], path, "6bc3eed178a731945c8684d18bae1fc163049be5")
+new = checked_blob(data["upstream"], path, "ffc4e3b33be6b6c0cac2f7af4b4f647188218817")
+assert checked_blob(data["base"], path, "ffc4e3b33be6b6c0cac2f7af4b4f647188218817") == new
+signature = b"func singlePeer("
+legacy = function_blob(own, signature)
+assert b"".join(replace_once(own, legacy, b"").split()) == b"".join(new.split())
+endpoint = "protocol/awg/endpoint.go"
+resolutions[endpoint] = subprocess.check_output(["gofmt"], input=replace_once(
+    resolutions[endpoint], function_blob(resolutions[endpoint], signature), legacy))
+compat[path] = new
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"
@@ -2158,6 +2209,6 @@ clean = replace_once(clean, old_setup,
 # The revised server bind explicitly listens on its configured port.
 clean = replace_once(clean, b"DeviceOpts{Address: []netip.Prefix{serverAddress}, MTU: 1500}",
     b"DeviceOpts{Address: []netip.Prefix{serverAddress}, MTU: 1500, ListenPort: serverPort}")
-apply_reviewed(data, resolutions, {path: subprocess.check_output(["gofmt"], input=clean),
+apply_reviewed(data, resolutions, {**compat, path: subprocess.check_output(["gofmt"], input=clean),
                                   "adapter/h_detour.go": detour})
 
