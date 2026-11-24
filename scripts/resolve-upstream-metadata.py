@@ -3268,6 +3268,32 @@ assert b"r.network.ResetNetwork(r.ctx)" not in new
 assert b"r.httpClientManager.ResetNetwork()" in new and b"r.dns.ResetNetwork()" in new
 resolutions[path] = new
 
+# The connection manager's upstream version retains the fork's tracked
+# socket owner, IPv6 fallback, cached handshake counters and splice guard.
+# Adopt paced TCP/UDP wrappers, server-first handshake handling and failed
+# packet-dial history invalidation as a coordinated candidate. Do not
+# remove the runtime pacing opt-out or the regression tests.
+path = "route/conn.go"
+own = checked_blob(data["patched_tree"], path, "ac53c62b7bdc39c112df8b570ef3b584e28cd21c")
+new = checked_blob(data["upstream"], path, "89f23acb67f099fc60f16eb1259b0af5dc076294")
+for marker in (b"type socketOwner struct", b"func (o *socketOwner) Attach(", b"func (o *socketOwner) detach(", b"func (m *ConnectionManager) CloseAll(", b"hNewIPv6Connection(", b"metadata.TLSSpoof == \"\"", b"cachedBuffer.Release()", b"readCounters", b"writeCounters", b"m.deleteURLTestHistory(metadata.OutboundChain)"):
+    assert marker in own and marker in new, marker
+for marker in (b"tracked.hPace.init(conn)", b"tracked.wake.path.init(conn)", b"serverFirst := sniff.Skip(&metadata)", b"tlsspoof.NewConn(", b"c.hSyscallConn(syscallConn)", b"hPacedSyscallConn(syscallConn, &c.wake)", b"return c.stream || pacingDisabled"):
+    assert marker in new, marker
+assert new.count(b"m.deleteURLTestHistory(metadata.OutboundChain)") > own.count(b"m.deleteURLTestHistory(metadata.OutboundChain)")
+for helper_path, sha in (
+    ("route/h_read_pace.go", "85acf4679e1dc326cbd468fddf8d42787eaa8b06"),
+    ("route/h_wake_pace.go", "710be5ca8e6a800244c2d93d20026feeff864275"),
+    ("route/h_read_pace_test.go", "8288929bf1cdcf35650be98e681b1bb682188269"),
+    ("route/h_wake_pace_test.go", "51eec59d0726169970a8388d442045ee0b4176bb"),
+    ("route/h_wake_pace_unix_test.go", "f8a86faf2cbb06589e3f2b6d4b1767486f97b1d8"),
+):
+    helper = checked_blob(data["upstream"], helper_path, sha)
+    assert git("show", data["tentative_tree"] + ":" + helper_path) == helper, helper_path
+    if helper_path == "route/h_read_pace.go":
+        assert b"HIDDIFY_NO_READ_PACE" in helper
+resolutions[path] = new
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"
