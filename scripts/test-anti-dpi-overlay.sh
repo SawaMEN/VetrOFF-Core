@@ -3,7 +3,20 @@ set -Eeuo pipefail
 source "$(dirname "$0")/_common.sh"
 need go
 need python3
-if [[ "${1:-}" != "--reuse-sources" ]]; then
+reuse=false
+build=false
+for arg in "$@"; do
+  case "$arg" in
+    --reuse-sources) reuse=true ;;
+    --build-candidate) build=true ;;
+    *) echo "Unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
+if [[ "$build" == true && "$(uname -sm)" != "Linux x86_64" ]]; then
+  echo "Experimental candidate build currently requires Linux x86_64" >&2
+  exit 2
+fi
+if [[ "$reuse" != true ]]; then
   VETROFF_SOURCE_MODE=locked bash "$ROOT/scripts/prepare.sh"
 fi
 verify_prepared_sources
@@ -120,3 +133,45 @@ gofmt -w cmd/adaptive_cli*.go cmd/adaptive_mux*.go cmd/adaptive_diagnostic*.go c
 need make
 tags=$(cli_tags)
 go test -mod=mod -count=1 -tags "$tags" -ldflags '-checklinkname=0' ./cmd -run 'TestAntiDPICLI'
+
+# Build only after the same disposable overlay passes integration tests.
+# Never invoke the stable release builder or write into its output directory.
+if [[ "$build" == true ]]; then
+  need sha256sum
+  need git
+  version=$(< "$ROOT/VERSION")
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid VERSION' >&2; exit 1; }
+  revision=$(git -C "$ROOT" rev-parse HEAD)
+  short=${revision:0:12}
+  candidate_version="$version-anti-dpi.$short"
+  out="$ROOT/dist/anti-dpi/$revision"
+  mkdir -p "$out"
+  name="vetroff-core-anti-dpi-linux-amd64"
+  export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
+  go build -mod=mod -trimpath -buildvcs=false -tags "$tags" \
+    -ldflags "-s -w -checklinkname=0 -X github.com/hiddify/hiddify-core/v2/hcommon/constants.Version=$candidate_version" \
+    -o "$out/$name" ./cmd/main
+  "$out/$name" version > "$out/$name.version.txt"
+  grep -F "$candidate_version" "$out/$name.version.txt"
+  "$out/$name" srun --help > "$out/$name.help.txt"
+  for flag in anti-dpi-policy anti-dpi-selector anti-dpi-probe-url anti-dpi-interval anti-dpi-pool anti-dpi-mux anti-dpi-history anti-dpi-diagnostic anti-dpi-diagnostic-fingerprint anti-dpi-diagnostic-ip; do
+    grep -Eq -- "--$flag([[:space:]]|$)" "$out/$name.help.txt"
+  done
+  cp "$ROOT/migration/adaptive-connect/testdata/policy-v1.json" "$out/adaptive-connect-v1.disabled.json"
+  cp "$ROOT/migration/adaptive-connect/README.md" "$out/ANTI-DPI.md"
+  cat > "$out/$name.sources.txt" <<PROVENANCE
+Experimental Anti-DPI CLI; not a stable release
+Version: $candidate_version
+Repository revision: $revision
+Hiddify Core: $CORE_URL @ $CORE_SHA
+Hiddify sing-box: $SING_URL @ $SING_SHA
+ray2sing: $RAY_URL @ $RAY_SHA
+Patched baseline trees: core=$CORE_TREE sing-box=$SING_TREE ray2sing=$RAY_TREE
+Overlay: migration/anti-dpi-overlay and migration/adaptive-connect at $revision
+Build: linux/amd64 CGO_ENABLED=0
+CLI tags: $tags
+Toolchain: $(go version)
+PROVENANCE
+  (cd "$out" && sha256sum "$name" adaptive-connect-v1.disabled.json > SHA256SUMS && sha256sum -c SHA256SUMS)
+  echo "Experimental artifact prepared: $out"
+fi

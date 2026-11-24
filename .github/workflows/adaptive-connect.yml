@@ -4,6 +4,14 @@ on:
     branches: [Anti-DPI]
     paths:
       - 'migration/adaptive-connect/**'
+      - 'patches/**'
+      - 'hiddify-core'
+      - 'hiddify-sing-box'
+      - 'ray2sing'
+      - '.gitmodules'
+      - 'VERSION'
+      - 'scripts/_common.sh'
+      - 'scripts/prepare.sh'
       - 'scripts/test-adaptive-connect.sh'
       - 'scripts/test-anti-dpi-overlay.sh'
       - 'migration/anti-dpi-overlay/**'
@@ -25,7 +33,7 @@ jobs:
 
   integration:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - run: VETROFF_SOURCE_MODE=locked bash scripts/prepare.sh
@@ -33,4 +41,11 @@ jobs:
         with:
           go-version-file: .build/hiddify-core/hiddify-sing-box/go.mod
           cache: false
-      - run: bash scripts/test-anti-dpi-overlay.sh --reuse-sources
+      - run: bash scripts/test-anti-dpi-overlay.sh --reuse-sources --build-candidate
+      - name: Upload tested experimental CLI (not a release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vetroff-core-anti-dpi-linux-amd64-${{ github.sha }}
+          path: dist/anti-dpi/${{ github.sha }}/*
+          if-no-files-found: error
+          retention-days: 21

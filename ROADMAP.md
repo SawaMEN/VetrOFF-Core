@@ -58,4 +58,6 @@ Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Cli
 - [ ] Validate candidate builds and real network behavior before promotion.
 
 - [x] Add deterministic Go runtime report serialization and reverse panel policy contract tests.
-- [ ] Confirm cross-repository CI against the pinned core commit.
+- [x] Confirm cross-repository CI against the pinned core commit (3x-ui run 45489515079; repeated after synchronization in run 45490030662).
+- [x] Configure separately versioned Linux amd64 experimental CLI artifact build, smoke checks and checksums.
+- [ ] Confirm the candidate build job succeeds and perform practical testing.
