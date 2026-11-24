@@ -1621,8 +1621,11 @@ func (s *Outbound) Close() error {
 	return common.Close(clientConn)
 }
 '''
-for signature in (b"func (s *Outbound) IsReady(", b"func (s *Outbound) DisplayType("):
-    candidate += b"\n" + function_blob(own, signature) + b"\n"
+candidate += b"\n" + function_blob(own, b"func (s *Outbound) IsReady(") + b"\n"
+display = b"func (s *Outbound) DisplayType() string { return C.ProxyDisplayName(s.Type()) }"
+assert display in own
+assert b"func (s *Outbound) DisplayType(" not in candidate
+candidate += b"\n" + display + b"\n"
 assert b"adapter.ContextForMultiplexSession(ctx)" in candidate
 assert b"options.UDPOverTCP == nil || !options.UDPOverTCP.Enabled" in candidate
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
@@ -1635,4 +1638,41 @@ for path, own_sha, new_sha in (
     own, new = added_pair(path, own_sha, new_sha)
     assert normalize_imports(own) == normalize_imports(new)
     resolutions[path] = own
+# DNSTT: keep the fork's formatting and receiver names. Verify that every
+# other line is the same, including the resolver and tunnel behavior.
+for file, hashes in (
+    ("tester.go", ("e88be215e2be26f4af98fbdedaeb42c1e118dc18", "157619dbb04a201fd0a6217da046554833df9362", "f0b9a082f18dec3c91f0289f68743b7a0f18c5fb")),
+    ("tools.go", ("4f3bbe70949657fa263841ab04cfe7ece5118b87", "83edf9ded29037494119731809d26b7f4d31ec4d", "8c0136ada29c7c06c924f0bdf1ca82f686c29029")),
+    ("dnstt_func.go", ("f2dc3c58991c43ec98622476010d8ae56dbf0780", "602483d509c0d168e1d4c10d92160bc092c89546", "ef1f261cfb0b6cf53d3b08344a70765f89b2308b")),
+):
+    path = "protocol/hiddify/dnstt/" + file
+    old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+        ("base", "patched_tree", "upstream"), hashes))
+    plain = new
+    if file == "dnstt_func.go":
+        plain = re.sub(rb"\bc\.", b"h.", plain.replace(b"(c *Outbound)", b"(h *Outbound)"))
+    assert [l for l in normalize_imports(plain).splitlines() if l.strip()] == [l for l in normalize_imports(own).splitlines() if l.strip()], path
+    resolutions[path] = own
+
+path = "protocol/hiddify/dnstt/h_dnstt_test.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("da0cc0a1e982feb567dfcc6e02e1b783af383992",
+     "be60fdeb310b6783154abb417176cbc5667245d7",
+     "14d129cf4f002c09a5d3fef0c0b7f25d301676c5")))
+# Extend the existing test without comparing independently randomized
+# map iteration order. The built-in membership check remains intact.
+candidate = replace_once(own, b"\t\tseen := map[string]bool{}\n\t\tfor _, r := range resolvers[:len(resolvers)-1] {",
+    b"\t\tseen := map[string]bool{}\n\t\tseenAddresses := map[string]bool{}\n\t\tfor _, r := range resolvers[:len(resolvers)-1] {\n\t\t\trequire.False(t, seenAddresses[r.Resolver.ResolverAddr], r.Resolver.ResolverAddr)\n\t\t\tseenAddresses[r.Resolver.ResolverAddr] = true")
+assert b"require.Len(t, seen, len(builtin))" in candidate
+assert b"dnspool.TierDiscovery" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "protocol/hiddify/soar/outbound.go"
+own, new = added_pair(path, "ff490beebbb1706e090c0f3838bce8671efa0d0b",
+                      "5021d94df4bb5214777c59810f23f662e0e78d2a")
+plain = replace_once(new, b'for _, label := range strings.Split(zone, ".") {',
+                     b'for label := range strings.SplitSeq(zone, ".") {')
+assert [l for l in normalize_imports(plain).splitlines() if l.strip()] == [l for l in normalize_imports(own).splitlines() if l.strip()]
+resolutions[path] = own
 apply_reviewed(data, resolutions)
