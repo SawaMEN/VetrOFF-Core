@@ -973,7 +973,7 @@ resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 # upstream router validation, IPv6-only host adaptation, cache persistence
 # and adaptive processor defaults without coupling monitoring to a public API.
 path = "v2/config/builder.go"
-own = checked_blob(patched, path, "4dffdcdcbf9000e3b380e229cd11f08f450dc9af")
+own = checked_blob(patched, path, "58b252981b7d83a1c1f194be3b269990e3febb73")
 new = checked_blob(upstream, path, "6a72bfe009c4065ae605ec22a35f364e3c080404")
 candidate = own
 marker = b"\tinput, err := ReadSingOptions(ctx, inputOpt)"
@@ -988,7 +988,7 @@ lifecycle_edit(marker, b'''	// Keep an explicit Android IPv4-only tunnel compati
 
 ''' + marker)
 lifecycle_edit(b"\tapplyRegionalPrivacy(&options, hopts)\n", b"\tif ipv6Only {\n\t\tuseIPv6Resolvers(&options)\n\t}\n\tapplyRegionalPrivacy(&options, hopts)\n")
-lifecycle_edit(b'\t\t\t\tPath:    "data/clash.db",\n', b'\t\t\t\tPath:    "data/clash.db",\n\t\t\t\tStoreFakeIP: hopt.EnableFakeDNS,\n')
+assert candidate.count(b"StoreFakeIP: hopt.EnableFakeDNS,") == 1
 marker = b"\nfunc setLog(options *option.Options, opt *HiddifyOptions)"
 procs = lifecycle_section(new, b"// setProcs lets", marker)
 start = candidate.index(b"func setExperimental(")
