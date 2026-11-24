@@ -34,4 +34,6 @@ Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Cli
 - [x] Implement layered DNS/IPv4/IPv6/TCP/TLS/HTTPS connectivity diagnostics candidate.
 - [ ] Connect diagnostics to platform-bound DNS and sockets, uTLS profiles and connectivity report import.
 - [ ] Review and integrate additional DPI-CH-specific diagnostic tests.
+- [x] Add opt-in Adaptive MUX policy for validated preconfigured TCP profiles.
+- [ ] Integrate actual profile validation and mux lifecycle into the selector owner.
 - [ ] Validate candidate builds and real network behavior before promotion.
