@@ -611,3 +611,22 @@ remain provisional; no gitlink or stable version is promoted.
 202/210 source resolutions confirmed; 8 still outstanding (3 manifests,
 4 nested gitlinks and generated schema). ROADMAP 9/16. Running and pending
 combined jobs may be superseded by newer commits; inspect the latest run.
+
+### Second integrated compilation corrections
+
+Combined run 45487277566 failed on a duplicate option import in the
+cleanly merged balancer/common.go; Core CLI, Core tests and schema
+compilation were blocked by it. Psiphon's direct Android bootstrap test
+panicked in its fake network manager's unimplemented ProtectFunc, not
+in the actual platform binding. Scoped audit 45487671031 additionally
+failed the same two historical pacing regressions: exchange pacing did
+not disengage by 200 ms and the simulated busy socket never paced.
+Commit 873c825 removes the duplicate import, implements the missing test
+fake and runs the two timing-sensitive in-memory tests under Go synctest
+virtual time. All prior assertions are retained; production pacing is
+unchanged. The workflow explicitly requires both tests to pass, not skip.
+The new source and test gates are pending; the latest combined dependency
+probe 45488228887 was still running when checked. Do not infer a runtime
+fix or measured CPU gain until the tests pass. 202/210 original conflicts
+remain source-confirmed; eight outstanding; ROADMAP 9/16. Stable pins
+unchanged.
