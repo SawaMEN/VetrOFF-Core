@@ -630,3 +630,25 @@ probe 45488228887 was still running when checked. Do not infer a runtime
 fix or measured CPU gain until the tests pass. 202/210 original conflicts
 remain source-confirmed; eight outstanding; ROADMAP 9/16. Stable pins
 unchanged.
+
+### Third integrated regression checkpoint
+
+Scoped audit 45489649503 passed the source gate and the full Psiphon
+protocol group. Both formerly failing deterministic regressions passed:
+TestH_ReadPaceLeavesAnExchangeAlone and TestH_PacedRawConnWaitsAfterAWakeUp.
+The remaining failure was TestH_ReadPaceStopsWhenTheDownloadSlows (2 ms
+wait instead of zero). The proposed test correction separates the fast
+producer's queued data from the slow phase and uses synctest; production
+pacing is unchanged and the assertions are retained/strengthened.
+The common routing test script now runs the same race regressions in the
+scoped and combined trees, verifies the required PASS markers and executes
+both enabled and disabled pacing checks even when one fails.
+Combined run 45488228887 passed MasterDNS library/session tests, sing bufio
+and canceler tests, Soar and Tailscale tests, but was based on the older
+Balancer and Psiphon sources. Its test-module compilation exposed another
+failure: Docker v27.3.1 references sockets.DialPipe, removed in the resolved
+go-connections v0.7.0. The test-only manifest candidate now selects Docker
+v28.5.2, whose client uses its own context-aware dialPipeContext. The new
+SDK pairing still requires compilation; no production dependency is changed.
+202/210 source resolutions confirmed; eight outstanding. ROADMAP 9/16.
+No stable pin or release promotion until full combined gates pass.
