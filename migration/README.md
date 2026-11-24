@@ -934,3 +934,21 @@ tag restriction is a possible cause, not confirmed). Preserve the exact
 approved matrix and integration identities, binary checksums, and tested
 source trees in release notes. No rebuild, credentials escalation, or
 changes to the verified binaries. Success requires a new CI result.
+
+### Next upstream update after 0.0.4 (2026-11-25)
+
+Release v0.0.4 was published successfully by run 45510461958 with all
+five desktop binaries and one SHA256SUMS. Current official Core main is
+4e5a9a357003d0a995360586702fd24c53042e3f, and ray2sing main is
+a722bf1b184d7fcf10248dee45fc099d62646ca8 (already used as the locked
+ray2sing base). The active sing-box v5 branch advanced 21 commits from
+a26e58b376987a3305b201ec87fbc8918f620ad3 to
+1267fe6aac8d11f3a562e8feecad11d11f48f965 on 2026-11-22, including
+balancer connection lifecycle, hot-reload log level, Soar and sing
+submodule updates, libbox memory handling and IPv6 routing changes.
+The next update audit reuses the exact released sing-box tree, then
+performs a three-way merge against the previous official upstream base
+and the new target. It saves conflict paths, upstream and candidate
+patches, and the full commit list; conflict-free output still requires
+integration and cross-platform builds. It does not change stable pins
+or republish 0.0.4. New audit pending CI.
