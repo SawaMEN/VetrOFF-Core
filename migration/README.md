@@ -847,3 +847,20 @@ publishes a release. Push CI runs validator unit tests; manually dispatch
 Candidate evidence preflight with the successful run ID and exact head
 SHA when available. Older incomplete evidence is intentionally rejected.
 Stable pins unchanged; 205/210 source paths reviewed, 36/53 roadmap tasks.
+
+### Materialize the final five migration conflict choices
+
+Stage Tailscale at 4138b20dfb9f5852d043abd8bf9da6c29d5ee53b together
+with the six reviewed callers and all three parsed candidate manifests in
+separate Git indexes. Tailscale scoped audit 45496243142 and independent
+library tests 45496243106 passed; platform behavior remains a release gate.
+The original 205/210 reviewed-source checkpoint is retained for replay.
+The separate staged candidate has 209/210 choices; the last conflict is
+generated docs/schema.json. Combined CI now consumes those staged trees,
+checks exact manifest bytes and finalizes the generated schema plus the
+three effective go.mod/go.sum pairs into final Git trees and binary
+patches. The final report requires exact coverage of all 210 conflict
+paths, records shared-source discrepancies, MasterDNS overlay and
+integration status, and explicitly disables stable promotion. A failed
+integration does not turn a materialized source choice into a verified
+release. The new pipeline is pending CI; stable pins unchanged.

@@ -30,9 +30,13 @@ links = {
     "replace/soar": "e18587bc9fb62f326124d1f3eb0ceb31708bd077",
     "replace/tailscale": "4138b20dfb9f5852d043abd8bf9da6c29d5ee53b",
 }
-assert set(core["remaining_conflicts"]) <= {"go.mod"}
-allowed = {"README.md", "docs/schema.json", "go.mod", "test/go.mod"} | set(links)
-assert all(p in allowed or p.startswith("docs/") for p in sing["remaining_conflicts"]), sing["remaining_conflicts"]
+staged = json.loads((report / "staged-candidate-conflicts.json").read_text())["components"]
+assert staged["hiddify-core"]["remaining_conflicts"] == []
+assert staged["hiddify-sing-box"]["remaining_conflicts"] == ["docs/schema.json"]
+assert staged["hiddify-core"]["reviewed_tree"] == core["reviewed_tree"]
+assert staged["hiddify-sing-box"]["reviewed_tree"] == sing["reviewed_tree"]
+core_tree = staged["hiddify-core"]["tree"]
+sing_tree = staged["hiddify-sing-box"]["tree"]
 
 def git(repo, *args):
     return subprocess.check_output(["git", "-C", str(repo), *args])
@@ -46,12 +50,12 @@ def archive(repo, tree, destination):
 
 sing_src = work / "hiddify-sing-box"
 sing_dest = target / "hiddify-sing-box"
-archive(work, core["reviewed_tree"], target)
-archive(sing_src, sing["reviewed_tree"], sing_dest)
+archive(work, core_tree, target)
+archive(sing_src, sing_tree, sing_dest)
 # ray2sing is the verified patched revision, not yet a new release pin.
 archive(work / "ray2sing", ray_tree, target / "ray2sing")
 pins = {}
-for line in git(sing_src, "ls-tree", "-r", sing["reviewed_tree"]).decode().splitlines():
+for line in git(sing_src, "ls-tree", "-r", sing_tree).decode().splitlines():
     info, name = line.split("\t", 1)
     mode, kind, sha = info.split()
     if mode != "160000":
@@ -65,8 +69,9 @@ for line in git(sing_src, "ls-tree", "-r", sing["reviewed_tree"]).decode().split
             assert sing["reviewed_gitlinks"][name]["upstream"] == expected
             assert name not in sing["remaining_conflicts"]
         else:
-            assert name in sing["remaining_conflicts"], name
-            sha = expected
+            assert name == "replace/tailscale" and name in sing["remaining_conflicts"], name
+            assert sha == expected, (name, sha)
+            assert name not in staged["hiddify-sing-box"]["remaining_conflicts"]
     pins[name] = sha
 assert set(links) <= set(pins)
 for name, sha in sorted(pins.items()):
@@ -84,7 +89,7 @@ for name, sha in sorted(pins.items()):
                     "submodule", "update", "--init", "--recursive", "--jobs", "4"], check=True)
 for module, directory in (("hiddify-core", target), ("hiddify-sing-box", sing_dest), ("hiddify-sing-box-test", sing_dest / "test")):
     manifest = (report / (module + "-go.mod.candidate")).read_bytes()
-    (directory / "go.mod").write_bytes(manifest)
+    assert (directory / "go.mod").read_bytes() == manifest, module
     env = dict(os.environ, GOTOOLCHAIN="local", GOPROXY="off", GOSUMDB="off")
     parsed = json.loads(subprocess.check_output(["go", "mod", "edit", "-json"], cwd=directory, env=env))
     for replacement in parsed.get("Replace", []):
@@ -93,9 +98,10 @@ for module, directory in (("hiddify-core", target), ("hiddify-sing-box", sing_de
             local = (directory / path).resolve()
             assert local.is_relative_to(target.resolve()), path
             assert (local / "go.mod").is_file(), (module, path)
-summary = {"core_tree": core["reviewed_tree"], "sing_box_tree": sing["reviewed_tree"],
+summary = {"core_tree": core_tree, "sing_box_tree": sing_tree,
            "ray2sing_patched_tree": ray_tree, "candidate_dependency_pins": pins,
-           "unresolved_core": core["remaining_conflicts"], "unresolved_sing_box": sing["remaining_conflicts"],
+           "unresolved_core": staged["hiddify-core"]["remaining_conflicts"],
+           "unresolved_sing_box": staged["hiddify-sing-box"]["remaining_conflicts"],
            "required_dependency_overlays": sing.get("required_dependency_overlays", {}),
            "tailscale_caller_adjustments": sing.get("tailscale_caller_adjustments", []),
            "status": "experimental combined probe; not a release"}
@@ -300,4 +306,7 @@ fi
 # checkout is removed. A version discrepancy is diagnostic; unexpected
 # replacements are a hard failure.
 probe effective-dependencies python3 "$ROOT/scripts/verify-combined-dependencies.py" "$candidate" "$report"
+# Finalize the actual generated artifacts even if an unrelated test failed;
+# the report retains the failure and cannot authorize stable promotion.
+probe final-conflict-trees python3 "$ROOT/scripts/stage-final-conflicts.py" finalize "$WORK" "$report" "$failed"
 exit "$failed"

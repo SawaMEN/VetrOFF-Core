@@ -8,6 +8,8 @@ on:
       - 'scripts/resolve-upstream-metadata.py'
       - 'scripts/resolve-reviewed-gitlinks.py'
       - 'scripts/prepare-dependency-candidates.py'
+      - 'scripts/stage-final-conflicts.py'
+      - 'scripts/verify-candidate-evidence.py'
       - 'scripts/prepare-tailscale-callers.py'
       - '.github/workflows/upstream-merge-audit.yml'
       - 'scripts/test-reviewed-tunnel-helpers.sh'

@@ -11,6 +11,8 @@ on:
       - 'scripts/_common.sh'
       - 'scripts/prepare.sh'
       - 'scripts/prepare-dependency-candidates.py'
+      - 'scripts/stage-final-conflicts.py'
+      - 'scripts/verify-candidate-evidence.py'
       - 'scripts/prepare-tailscale-callers.py'
       - 'scripts/fix-masterdns-session-readiness.py'
       - 'scripts/audit-upstream-merge.sh'

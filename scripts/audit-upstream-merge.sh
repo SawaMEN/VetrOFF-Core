@@ -51,4 +51,5 @@ audit_merge hiddify-sing-box "$WORK/hiddify-sing-box" "$SING_SHA" "$sing" "$SING
 python3 "$ROOT/scripts/resolve-upstream-metadata.py" "$WORK" "$report"
 python3 "$ROOT/scripts/resolve-reviewed-gitlinks.py" "$WORK/hiddify-sing-box" "$report"
 python3 "$ROOT/scripts/prepare-dependency-candidates.py" "$WORK" "$report"
+python3 "$ROOT/scripts/stage-final-conflicts.py" prepare "$WORK" "$report"
 echo "Read-only diagnostic complete; no stable patch files or gitlinks modified."
