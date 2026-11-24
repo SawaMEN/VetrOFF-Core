@@ -43,5 +43,5 @@ func (s *Selector) AdaptivePhysicalSiberian(ctx context.Context,resolver Adaptiv
 	ctx,p,finish,err:=s.beginPhysicalDiagnostic(ctx,resolver,interfaceName,req.Consent)
 	if err!=nil {return ac.SiberianReport{},err}
 	defer finish()
-	return adaptiveDiagnosticTester.Check(ctx,p,req)
+	return adaptiveCheckSiberian(ctx,p,req)
 }

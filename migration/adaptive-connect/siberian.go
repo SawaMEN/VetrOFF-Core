@@ -33,6 +33,7 @@ type SiberianRequest struct {
 	Host string
 	ControlHost string
 	Consent bool // explicit local consent for this test
+	Fingerprint string // empty selects the standard Go TLS client
 }
 
 type DiagnosticAttempt struct {
@@ -116,7 +117,27 @@ func sharedDiagnosticIP(a,b []netip.Addr) (netip.Addr,error) {
 	return netip.Addr{},errors.New("no common IP")
 }
 
+// TLSHandshake is supplied only by the trusted core adapter. It must verify
+// the certificate and hostname and perform no additional socket dials.
+type TLSHandshake func(context.Context,net.Conn,string) error
+
+func standardDiagnosticHandshake(ctx context.Context,conn net.Conn,host string) error {
+	return tls.Client(conn,&tls.Config{ServerName:host,MinVersion:tls.VersionTLS12}).HandshakeContext(ctx)
+}
+
+func ValidDiagnosticFingerprint(name string) bool {
+	switch name {
+	case "", "go-standard", "utls-chrome-auto", "utls-firefox-auto", "utls-safari-auto":
+		return true
+	default:return false
+	}
+}
+
 func diagnosticAttempt(ctx context.Context,path DiagnosticPath,ip netip.Addr,host string) DiagnosticAttempt {
+	return diagnosticAttemptWithHandshake(ctx,path,ip,host,standardDiagnosticHandshake)
+}
+
+func diagnosticAttemptWithHandshake(ctx context.Context,path DiagnosticPath,ip netip.Addr,host string,handshake TLSHandshake) DiagnosticAttempt {
 	start:=time.Now()
 	ctx,cancel:=context.WithTimeout(ctx,4*time.Second)
 	defer cancel()
@@ -128,8 +149,7 @@ func diagnosticAttempt(ctx context.Context,path DiagnosticPath,ip netip.Addr,hos
 			err=errors.New("path returned no connection")
 		} else {
 			a.Stage="tls"
-			client:=tls.Client(conn,&tls.Config{ServerName:host,MinVersion:tls.VersionTLS12})
-			err=client.HandshakeContext(ctx)
+			err=handshake(ctx,conn,host)
 		}
 	}
 	if err!=nil {
@@ -166,6 +186,16 @@ func classifyDiagnostic(r SiberianReport) string {
 }
 
 func (t *SiberianTester) Check(ctx context.Context,path DiagnosticPath,req SiberianRequest) (SiberianReport,error) {
+	if req.Fingerprint!=""&&req.Fingerprint!="go-standard" {return SiberianReport{},errors.New("fingerprint adapter required")}
+	return t.CheckWithHandshake(ctx,path,req,standardDiagnosticHandshake)
+}
+
+// CheckWithHandshake uses the same bounded diagnostic and cooldown for a
+// named, explicitly requested diagnostic-only TLS client implementation.
+func (t *SiberianTester) CheckWithHandshake(ctx context.Context,path DiagnosticPath,req SiberianRequest,handshake TLSHandshake) (SiberianReport,error) {
+	fingerprint:=req.Fingerprint
+	if fingerprint=="" {fingerprint="go-standard"}
+	if !ValidDiagnosticFingerprint(fingerprint)||handshake==nil {return SiberianReport{},errors.New("unsupported diagnostic fingerprint")}
 	host:=strings.ToLower(strings.TrimSpace(req.Host))
 	control:=strings.ToLower(strings.TrimSpace(req.ControlHost))
 	if !req.Consent || path==nil || !diagnosticHost(host) || !diagnosticHost(control) || host==control {
@@ -186,7 +216,7 @@ func (t *SiberianTester) Check(ctx context.Context,path DiagnosticPath,req Siber
 		if path.Generation()!=generation || path.Scope()!=scope { return errors.New("diagnostic path changed") }
 		return nil
 	}
-	r:=SiberianReport{Version:1,Scope:scope,Host:host,ControlHost:control,Fingerprint:"go-standard",CheckedAt:time.Now().UTC(),Evidence:"inconclusive"}
+	r:=SiberianReport{Version:1,Scope:scope,Host:host,ControlHost:control,Fingerprint:fingerprint,CheckedAt:time.Now().UTC(),Evidence:"inconclusive"}
 	a,err:=path.LookupNetIP(ctx,"ip",host+".")
 	if err!=nil { return r,fmt.Errorf("target DNS: %w",err) }
 	if err=checkPath();err!=nil { return r,err }
@@ -198,7 +228,7 @@ func (t *SiberianTester) Check(ctx context.Context,path DiagnosticPath,req Siber
 	r.IP=ip.String()
 	for _,name:=range []string{host,control} {
 		if err=checkPath();err!=nil { return r,err }
-		r.Baseline=append(r.Baseline,diagnosticAttempt(ctx,path,ip,name))
+		r.Baseline=append(r.Baseline,diagnosticAttemptWithHandshake(ctx,path,ip,name,handshake))
 	}
 	if err=checkPath();err!=nil { return r,err }
 	for _,a:=range r.Baseline {
@@ -214,12 +244,12 @@ func (t *SiberianTester) Check(ctx context.Context,path DiagnosticPath,req Siber
 				r.Burst[i]=DiagnosticAttempt{Stage:"tcp",Outcome:"canceled"}
 				return
 			}
-			r.Burst[i]=diagnosticAttempt(ctx,path,ip,host)
+			r.Burst[i]=diagnosticAttemptWithHandshake(ctx,path,ip,host,handshake)
 		}(i)
 	}
 	wg.Wait()
 	if err=checkPath();err!=nil { return r,err }
-	result:=diagnosticAttempt(ctx,path,ip,control)
+	result:=diagnosticAttemptWithHandshake(ctx,path,ip,control,handshake)
 	r.Control=&result
 	if err=checkPath();err!=nil { return r,err }
 	r.Evidence=classifyDiagnostic(r)

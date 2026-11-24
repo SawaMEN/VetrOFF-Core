@@ -228,7 +228,7 @@ func (s *Selector) AdaptiveSiberian(ctx context.Context,resolver AdaptiveDNSReso
 	ctx,p,finish,err:=s.beginTunnelDiagnostic(ctx,resolver,req.Consent)
 	if err!=nil {return ac.SiberianReport{},err}
 	defer finish()
-	return adaptiveDiagnosticTester.Check(ctx,p,req)
+	return adaptiveCheckSiberian(ctx,p,req)
 }
 
 func (s *Selector) AdaptiveConnectivity(ctx context.Context,resolver AdaptiveDNSResolver,req ac.ConnectivityRequest)(ac.ConnectivityReport,error) {

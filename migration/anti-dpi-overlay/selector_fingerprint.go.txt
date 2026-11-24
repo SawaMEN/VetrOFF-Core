@@ -1,0 +1,36 @@
+package group
+
+import (
+	"context"
+	"errors"
+	"net"
+
+	utls "github.com/metacubex/utls"
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+)
+
+// The diagnostic-only client uses an existing pinned uTLS dependency.
+// No live transport configuration, SNI override, certificate bypass,
+// randomized fingerprint, or automatic fingerprint selection is performed.
+func adaptiveFingerprintHandshake(name string)(ac.TLSHandshake,error) {
+	var id utls.ClientHelloID
+	switch name {
+	case "utls-chrome-auto":id=utls.HelloChrome_Auto
+	case "utls-firefox-auto":id=utls.HelloFirefox_Auto
+	case "utls-safari-auto":id=utls.HelloSafari_Auto
+	default:return nil,errors.New("unsupported diagnostic TLS profile")
+	}
+	return func(ctx context.Context,conn net.Conn,host string)error{
+		client:=utls.UClient(conn,&utls.Config{ServerName:host,MinVersion:utls.VersionTLS12},id)
+		return client.HandshakeContext(ctx)
+	},nil
+}
+
+func adaptiveCheckSiberian(ctx context.Context,path ac.DiagnosticPath,req ac.SiberianRequest)(ac.SiberianReport,error) {
+	if req.Fingerprint==""||req.Fingerprint=="go-standard" {
+		return adaptiveDiagnosticTester.Check(ctx,path,req)
+	}
+	handshake,err:=adaptiveFingerprintHandshake(req.Fingerprint)
+	if err!=nil {return ac.SiberianReport{},err}
+	return adaptiveDiagnosticTester.CheckWithHandshake(ctx,path,req,handshake)
+}

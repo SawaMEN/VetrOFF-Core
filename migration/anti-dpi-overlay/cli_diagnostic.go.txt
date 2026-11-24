@@ -14,7 +14,7 @@ import (
 )
 
 type adaptiveDiagnosticOptions struct {
-	kind,scope,host,control,resolverIP,resolverName,iface,output string
+	kind,scope,host,control,resolverIP,resolverName,iface,output,fingerprint string
 	consent bool
 }
 
@@ -34,12 +34,13 @@ func init() {
 	f.StringVar(&adaptiveDiagnostic.resolverName,"anti-dpi-diagnostic-dns-name","","DNS-over-TLS certificate hostname")
 	f.StringVar(&adaptiveDiagnostic.iface,"anti-dpi-diagnostic-interface","","physical Linux interface (physical scope only)")
 	f.StringVar(&adaptiveDiagnostic.output,"anti-dpi-diagnostic-output","","new local JSON report file (never overwritten)")
+	f.StringVar(&adaptiveDiagnostic.fingerprint,"anti-dpi-diagnostic-fingerprint","","Siberian diagnostic only: go-standard or utls-chrome-auto, utls-firefox-auto, utls-safari-auto")
 	f.BoolVar(&adaptiveDiagnostic.consent,"anti-dpi-diagnostic-consent",false,"consent to test owned hosts on the selected path")
 }
 
 func (o adaptiveDiagnosticOptions) requested() bool {
 	return o.kind!=""||o.scope!=""||o.host!=""||o.control!=""||o.resolverIP!=""||
-		o.resolverName!=""||o.iface!=""||o.output!=""||o.consent
+		o.resolverName!=""||o.iface!=""||o.output!=""||o.fingerprint!=""||o.consent
 }
 
 func (o adaptiveDiagnosticOptions) validate()(group.AdaptiveDNSResolver,error) {
@@ -49,8 +50,9 @@ func (o adaptiveDiagnosticOptions) validate()(group.AdaptiveDNSResolver,error) {
 	}
 	switch o.kind {
 	case "connectivity":
-		if o.control!="" {return group.AdaptiveDNSResolver{},errors.New("control hostname is only for Siberian-style diagnosis")}
+		if o.control!=""||o.fingerprint!="" {return group.AdaptiveDNSResolver{},errors.New("control hostname and TLS profile are only for Siberian-style diagnosis")}
 	case "siberian":
+		if !ac.ValidDiagnosticFingerprint(o.fingerprint) {return group.AdaptiveDNSResolver{},errors.New("unsupported diagnostic TLS profile")}
 		if strings.TrimSpace(o.control)==""||strings.EqualFold(strings.TrimSpace(o.host),strings.TrimSpace(o.control)) {
 			return group.AdaptiveDNSResolver{},errors.New("two distinct owned test hostnames required")
 		}
@@ -107,7 +109,7 @@ func runAdaptiveDiagnostic(ctx context.Context,s *group.Selector,o adaptiveDiagn
 	var testErr error
 	switch o.kind {
 	case "siberian":
-		req:=ac.SiberianRequest{Host:o.host,ControlHost:o.control,Consent:true}
+		req:=ac.SiberianRequest{Host:o.host,ControlHost:o.control,Consent:true,Fingerprint:o.fingerprint}
 		if o.scope=="physical" {report,testErr=s.AdaptivePhysicalSiberian(ctx,resolver,o.iface,req)} else {report,testErr=s.AdaptiveSiberian(ctx,resolver,req)}
 	case "connectivity":
 		req:=ac.ConnectivityRequest{Host:o.host,Consent:true}
