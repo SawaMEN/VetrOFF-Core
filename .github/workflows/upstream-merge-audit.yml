@@ -127,19 +127,7 @@ jobs:
           PY
           cd "$sing"
           CGO_ENABLED=1 go test -race -mod=mod -overlay "$tmp/overlay.json" -count=1 -timeout=3m -ldflags '-checklinkname=0' \
-            -run '^TestH_NetworkResetReachesTheDNSServers        if: ${{ !cancelled() && steps.merge_audit.outcome == 'success' && steps.setup_go.outcome == 'success' }}
-        run: bash scripts/test-tailscale-candidate.sh
-      - name: Enforce Core options regression gate
-        if: ${{ !cancelled() && steps.core_options.outcome == 'failure' }}
-        run: exit 1
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: upstream-merge-audit
-          path: .build/upstream-merge-audit/
-          if-no-files-found: warn
-          retention-days: 21
- -v ./route 2>&1 | tee "$report/network-reset-candidate-test.log"
+            -run '^TestH_NetworkResetReachesTheDNSServers$' -v ./route 2>&1 | tee "$report/network-reset-candidate-test.log"
           grep -Fq -- '--- PASS: TestH_NetworkResetReachesTheDNSServers' "$report/network-reset-candidate-test.log"
       - name: Probe Tailscale candidate against locked dependencies
         if: ${{ !cancelled() && steps.merge_audit.outcome == 'success' && steps.setup_go.outcome == 'success' }}
