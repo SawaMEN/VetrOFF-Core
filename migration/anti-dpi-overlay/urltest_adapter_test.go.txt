@@ -1,0 +1,41 @@
+package group
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/sagernet/sing-box/adapter"
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+)
+
+func TestAntiDPIURLTestFreshAndStale(t *testing.T) {
+	s:=antiDPITestSelector()
+	var calls int
+	b,members,err:=newAdaptiveSelectorBinding(s,func(context.Context,adapter.Outbound)error{
+		calls++
+		return nil
+	})
+	if err!=nil {t.Fatal(err)}
+	b.endpoint="https://example.com/generate_204"
+	cfg:=ac.DefaultControllerConfig()
+	cfg.Connect.Enabled=true
+	cfg.Connect.RecoveryThreshold=1
+	cfg.Connect.CooldownSeconds=0
+	c,err:=ac.NewController(cfg,ac.ControllerConsent{Connect:true},[]ac.RouteBinding{{Network:"tcp",Outbounds:members,Switcher:b}})
+	if err!=nil {t.Fatal(err)}
+	if _,err=c.ResetNetwork(time.Now(),ac.HistoryKey{},map[string]string{"tcp":"a"});err!=nil {t.Fatal(err)}
+	ctx,err:=b.WithAdaptiveURLTest(context.Background(),c)
+	if err!=nil {t.Fatal(err)}
+	o:=s.outbounds["b"]
+	if _,_,handled:=adaptiveURLTestProbe(context.Background(),[]string{b.endpoint},o);handled {t.Fatal("unrequested probe intercepted")}
+	if _,_,handled:=adaptiveURLTestProbe(ctx,[]string{"https://other.example/"},o);handled {t.Fatal("unrelated probe intercepted")}
+	if _,_,handled:=adaptiveURLTestProbe(ctx,[]string{b.endpoint,"https://other.example/"},o);handled {t.Fatal("multi-URL probe intercepted")}
+	if delay,err,handled:=adaptiveURLTestProbe(ctx,[]string{b.endpoint},o);!handled||err!=nil||delay==0||calls!=1 {t.Fatal(delay,err,handled,calls)}
+	if _,err=c.ResetNetwork(time.Now(),ac.HistoryKey{},map[string]string{"tcp":"a"});err!=nil {t.Fatal(err)}
+	if _,err,handled:=adaptiveURLTestProbe(ctx,[]string{b.endpoint},o);!handled||!errors.Is(err,errAdaptiveStale) {t.Fatal(err,handled)}
+	fresh,err:=b.WithAdaptiveURLTest(context.Background(),c)
+	if err!=nil {t.Fatal(err)}
+	if _,err,handled:=adaptiveURLTestProbe(fresh,[]string{b.endpoint},o);!handled||err!=nil {t.Fatal(err,handled)}
+}

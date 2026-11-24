@@ -1,0 +1,95 @@
+package cmd
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"reflect"
+
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+	"github.com/sagernet/sing-box/option"
+)
+
+var adaptiveMux bool
+var adaptiveMuxPrefer bool
+
+func init() {
+	commandRun.Flags().BoolVar(&adaptiveMux,"anti-dpi-mux",false,"enable adaptive MUX for a locally confirmed compatible pair")
+	commandRun.Flags().BoolVar(&adaptiveMuxPrefer,"anti-dpi-mux-prefer",false,"prefer the multiplexed member when selecting")
+}
+
+// compare the actual decoded options passed to Box.New, not tags or
+// subscription-provided identity claims. Only the multiplex field is removed.
+// DeepEqual also includes fields excluded from JSON serialization.
+func muxOptions(o option.Outbound)(any,*option.OutboundMultiplexOptions,error) {
+	switch p:=o.Options.(type) {
+	case *option.VLESSOutboundOptions:
+		if o.Type!="vless"||p==nil||p.Flow!=""||p.Transport!=nil||
+			p.Reverse!=nil||p.Testpre!=0||len(p.Testseed)!=0||
+			(p.Encryption!=""&&p.Encryption!="none") {
+			return nil,nil,errors.New("unsupported VLESS MUX options")
+		}
+		copy:=*p
+		copy.Multiplex=nil
+		return copy,p.Multiplex,nil
+	case *option.TrojanOutboundOptions:
+		if o.Type!="trojan"||p==nil||p.Transport!=nil {return nil,nil,errors.New("unsupported Trojan MUX options")}
+		copy:=*p
+		copy.Multiplex=nil
+		return copy,p.Multiplex,nil
+	default:
+		return nil,nil,errors.New("unreviewed adaptive MUX protocol")
+	}
+}
+
+// prepareAdaptiveMux is called before Box.New. The returned pair carries
+// no endpoint or credential fields, only an ephemeral opaque identity.
+// Explicit local --anti-dpi-mux attests server compatibility; it is not a
+// proof that the remote server works. Fresh HTTPS probes remain mandatory.
+func prepareAdaptiveMux(outbounds []option.Outbound,tag string,enabled,prefer bool)(*[2]ac.MuxProfile,error) {
+	if !enabled {
+		if prefer {return nil,errors.New("MUX preference requires adaptive MUX")}
+		return nil,nil
+	}
+	byTag:=make(map[string]option.Outbound,len(outbounds))
+	for _,o:=range outbounds {
+		if o.Tag=="" {continue}
+		if _,ok:=byTag[o.Tag];ok {return nil,errors.New("duplicate outbound tag")}
+		byTag[o.Tag]=o
+	}
+	s,ok:=byTag[tag]
+	if !ok||s.Type!="selector" {return nil,errors.New("adaptive MUX selector not found")}
+	opts,ok:=s.Options.(*option.SelectorOutboundOptions)
+	if !ok||opts==nil||opts.Balancer!=nil||len(opts.Outbounds)!=2||opts.Outbounds[0]==opts.Outbounds[1] {
+		return nil,errors.New("adaptive MUX requires exactly two distinct plain selector members")
+	}
+	a,ok:=byTag[opts.Outbounds[0]]
+	if !ok {return nil,errors.New("missing MUX member")}
+	b,ok:=byTag[opts.Outbounds[1]]
+	if !ok||a.Type!=b.Type {return nil,errors.New("different MUX member protocol")}
+	av,am,err:=muxOptions(a)
+	if err!=nil {return nil,err}
+	bv,bm,err:=muxOptions(b)
+	if err!=nil {return nil,err}
+	if !reflect.DeepEqual(av,bv) {return nil,errors.New("MUX member options differ outside multiplex")}
+	var key [32]byte
+	if _,err=rand.Read(key[:]);err!=nil {return nil,err}
+	pair:=new([2]ac.MuxProfile)
+	for i,o:=range []option.Outbound{a,b} {
+		m:=[]*option.OutboundMultiplexOptions{am,bm}[i]
+		p:=ac.MuxProfile{Outbound:ac.Outbound{Tag:o.Tag,Tunnel:true,Networks:[]string{"tcp"}},Protocol:o.Type,PairKey:hex.EncodeToString(key[:])}
+		if m!=nil&&m.Enabled {
+			if m.Brutal!=nil&&m.Brutal.Enabled {return nil,errors.New("unreviewed brutal MUX mode")}
+			switch m.Protocol {
+			case "h2mux","smux","yamux","rmux":
+			default: return nil,errors.New("explicit reviewed MUX protocol required")
+			}
+			p.Multiplex=true
+			p.MultiplexProtocol=m.Protocol
+			p.ServerCompatible=true
+		}
+		pair[i]=p
+	}
+	if pair[0].Multiplex==pair[1].Multiplex {return nil,errors.New("expected one MUX and one non-MUX member")}
+	return pair,nil
+}

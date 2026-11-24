@@ -1,0 +1,99 @@
+package group
+
+import (
+	"context"
+	"errors"
+	"net"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/sagernet/sing-box/adapter"
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+	"github.com/sagernet/sing-box/log"
+	M "github.com/sagernet/sing/common/metadata"
+)
+
+type adaptivePoolTestOutbound struct {
+	antiDPITestOutbound
+	dial func(context.Context)(net.Conn,error)
+}
+func (o *adaptivePoolTestOutbound) DialContext(ctx context.Context,_ string,_ M.Socksaddr)(net.Conn,error) {return o.dial(ctx)}
+
+func adaptivePoolFixture(t *testing.T,dial func(context.Context)(net.Conn,error))*Selector {
+	t.Helper()
+	s:=antiDPITestSelector()
+	s.logger=log.NewNOPFactory().Logger()
+	for _,tag:=range s.tags {
+		original:=s.outbounds[tag].(*antiDPITestOutbound)
+		s.outbounds[tag]=&adaptivePoolTestOutbound{antiDPITestOutbound:*original,dial:dial}
+	}
+	s.selected.Store(s.outbounds["a"])
+	b,members,err:=newAdaptiveSelectorBinding(s,func(context.Context,adapter.Outbound)error{return nil})
+	if err!=nil {t.Fatal(err)}
+	b.endpoint="https://example.com/204"
+	p:=ac.DefaultConfig()
+	p.Enabled=true
+	pool:=ac.PoolPolicy{Enabled:true,MaxTotal:1,MaxPerProfile:1,MaxPending:1}
+	if err=s.attachAdaptivePoolLocked(context.Background(),p,b,members,pool,true);err!=nil {t.Fatal(err)}
+	t.Cleanup(s.DisableAdaptive)
+	return s
+}
+
+func waitAdaptivePoolEmpty(t *testing.T,s *Selector) {
+	t.Helper()
+	until:=time.Now().Add(2*time.Second)
+	for time.Now().Before(until) {
+		if p:=s.AdaptivePoolState();p!=nil&&p.Total==0 {return}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("pool lease retained",s.AdaptivePoolState())
+}
+
+func TestAntiDPIPoolRealDialAndClose(t *testing.T) {
+	var calls atomic.Int32
+	s:=adaptivePoolFixture(t,func(context.Context)(net.Conn,error){
+		calls.Add(1)
+		a,b:=net.Pipe()
+		t.Cleanup(func(){_ = b.Close()})
+		return a,nil
+	})
+	c,err:=s.DialContext(context.Background(),"tcp",M.Socksaddr{})
+	if err!=nil {t.Fatal(err)}
+	if p:=s.AdaptivePoolState();p.Active!=1||p.Pending!=0 {t.Fatal(p)}
+	if _,err=s.DialContext(context.Background(),"tcp",M.Socksaddr{});!errors.Is(err,ac.ErrPoolLimit)||calls.Load()!=1 {t.Fatal(err,calls.Load())}
+	_ = c.Close()
+	waitAdaptivePoolEmpty(t,s)
+	c,err=s.DialContext(context.Background(),"tcp",M.Socksaddr{})
+	if err!=nil {t.Fatal(err)}
+	// Existing Selector interruption must release the same underlying lease.
+	s.interruptGroup.Interrupt(true)
+	waitAdaptivePoolEmpty(t,s)
+	_ = c.Close()
+}
+
+func TestAntiDPIPoolDialFailureAndNetworkReset(t *testing.T) {
+	started:=make(chan struct{})
+	var calls atomic.Int32
+	s:=adaptivePoolFixture(t,func(ctx context.Context)(net.Conn,error){
+		if calls.Add(1)==1 {return nil,errors.New("dial failure")}
+		close(started)
+		<-ctx.Done()
+		// Simulate a late successful dial even after cancellation.
+		a,b:=net.Pipe()
+		_ = b.Close()
+		return a,nil
+	})
+	if _,err:=s.DialContext(context.Background(),"tcp",M.Socksaddr{});err==nil {t.Fatal("failure lost")}
+	waitAdaptivePoolEmpty(t,s)
+	done:=make(chan error,1)
+	go func(){_,err:=s.DialContext(context.Background(),"tcp",M.Socksaddr{});done<-err}()
+	select {case <-started:case <-time.After(time.Second):t.Fatal("dial not started")}
+	if p:=s.AdaptivePoolState();p.Pending!=1 {t.Fatal(p)}
+	s.InterfaceUpdated(context.Background())
+	select {
+	case err:=<-done:if !errors.Is(err,ac.ErrPoolStale) {t.Fatal(err)}
+	case <-time.After(2*time.Second):t.Fatal("old dial not canceled")
+	}
+	waitAdaptivePoolEmpty(t,s)
+}

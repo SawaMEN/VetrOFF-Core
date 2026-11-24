@@ -1,0 +1,12 @@
+package group
+
+import "testing"
+
+func TestAntiDPIFingerprintAllowlist(t *testing.T) {
+	for _,name:=range []string{"utls-chrome-auto","utls-firefox-auto","utls-safari-auto"} {
+		if h,err:=adaptiveFingerprintHandshake(name);err!=nil||h==nil {t.Fatal(name,err)}
+	}
+	for _,name:=range []string{"","go-standard","random","randomized","unknown"} {
+		if h,err:=adaptiveFingerprintHandshake(name);err==nil||h!=nil {t.Fatal("unexpected adapter",name)}
+	}
+}

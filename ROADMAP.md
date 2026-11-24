@@ -19,3 +19,46 @@
 - [ ] Resolve the other conflicts and review dependencies.
 - [ ] Fix failing routing tests and pass the integrated regression suite.
 - [ ] Pass the full build matrix and promote verified source pins together.
+
+## Adaptive Connect / Anti-DPI
+
+Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Client. See [integration candidate](migration/adaptive-connect/README.md). Stable pins are unchanged until reviewed integration and test completion.
+
+- [x] Port the independent selection policy from 3x-ui.
+- [x] Add network-generation isolation, manual mode and deterministic tests.
+- [x] Add a typed URLTest/Selector adapter candidate and independent race-test workflow.
+- [ ] Wire the adapter into the actual URLTest/Selector and platform network lifecycle.
+- [x] Define versioned opt-in policy v1 and strict decoder.
+- [ ] Wire policy import into the app/core lifecycle.
+- [x] Add a bounded client Siberian-style diagnostic candidate with explicit path scope.
+- [x] Implement layered DNS/IPv4/IPv6/TCP/TLS/HTTPS connectivity diagnostics candidate.
+- [x] Add explicit pinned tunnel-leaf DNS-over-TLS and TCP diagnostic adapter in overlay.
+- [x] Add explicit Linux hardware-interface physical diagnostic binding candidate with no fallback.
+- [x] Add explicit one-shot diagnostic CLI and local v1 JSON report export candidate.
+- [x] Add explicitly selected diagnostic-only uTLS browser presets to the existing Siberian-style report contract.
+- [ ] Verify physical socket binding on real hardware, additional platforms, GUI report export, real tunnel DNS/socket behavior and live uTLS profile handshakes.
+- [x] Add explicit single-address TCP/TLS/HTTPS diagnosis without DNS resolution, with separate report kind.
+- [x] Add single-address report import in 3x-ui Anti-DPI.
+- [ ] Review additional DPI-CH-specific tests and validate real network behavior.
+- [x] Add opt-in Adaptive MUX policy for validated preconfigured TCP profiles.
+- [x] Add opt-in CLI typed profile comparison and live MUX state validation to the selector owner for plain VLESS/Trojan TCP pairs.
+- [ ] Confirm integrated MUX tests and real compatible server behavior; review additional transports.
+- [x] Add opt-in logical connection budget candidate with race-safe reservations.
+- [x] Wire optional logical TCP budget into Selector dial/close and interrupt lifecycle in overlay.
+- [ ] Verify integrated budget tests, real transport resource usage and broader routing coverage.
+- [x] Add bounded opt-in in-memory availability history and probe ordering candidate.
+- [x] Bind random attachment/profile and network-epoch identities to actual URLTest worker history and probe ordering in overlay.
+- [ ] Verify history integration CI, stable platform identity recognition if available, and GUI display/clear controls.
+- [x] Compose Adaptive Connect, MUX, pool and history into one lifecycle controller candidate.
+- [x] Add a disposable prepared-tree bridge for the actual plain TCP-only Selector, guarded manual selection and integration CI.
+- [x] Add explicit context-bound fresh URLTest leaf worker bridge in the prepared-tree overlay.
+- [x] Add explicit post-start Selector owner, real URLTest batch call, InterfaceUpdated reset, manual pause/resume and close hooks in overlay.
+- [x] Add explicit local srun policy file and selector/probe flags; invoke the existing worker at bounded CLI cadence in the overlay.
+- [ ] Verify CLI compilation and real tunnel switching; bind Hiddify GUI lifecycle, platform notifications and actual transport cleanup.
+- [ ] Validate candidate builds and real network behavior before promotion.
+
+- [x] Add deterministic Go runtime report serialization and reverse panel policy contract tests.
+- [x] Confirm cross-repository CI against the pinned core commit (3x-ui run 45489515079; repeated after synchronization in run 45490030662).
+- [x] Configure separately versioned Linux amd64 experimental CLI artifact build, smoke checks and checksums.
+- [x] Add actual executable local proxy, opt-in rejection and graceful shutdown smoke gate plus practical test guide.
+- [ ] Confirm the candidate build and executable smoke job succeed, then perform practical testing.

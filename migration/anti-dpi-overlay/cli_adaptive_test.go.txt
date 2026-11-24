@@ -1,0 +1,33 @@
+package cmd
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+)
+
+func TestAntiDPICLIOptIn(t *testing.T) {
+	if _,on,err:=readAdaptiveCLI("","","",30*time.Second);on||err!=nil {t.Fatal(on,err)}
+	if _,_,err:=readAdaptiveCLI("","a","",30*time.Second);err==nil {t.Fatal("partial flags accepted")}
+	path:=filepath.Join(t.TempDir(),"policy.json")
+	p:=ac.DefaultConfig()
+	write:=func(){
+		raw,err:=json.Marshal(p)
+		if err!=nil {t.Fatal(err)}
+		if err=os.WriteFile(path,raw,0600);err!=nil {t.Fatal(err)}
+	}
+	write()
+	if _,on,err:=readAdaptiveCLI(path,"a","https://example.com/204",30*time.Second);on||err!=nil {t.Fatal(on,err)}
+	p.Enabled=true
+	write()
+	if got,on,err:=readAdaptiveCLI(path,"a","https://example.com/204",30*time.Second);!on||err!=nil||got!=p {t.Fatal(got,on,err)}
+	for _,d:=range []time.Duration{time.Second,90*time.Second,10*time.Minute} {
+		if _,_,err:=readAdaptiveCLI(path,"a","https://example.com/204",d);err==nil {t.Fatal("invalid interval accepted",d)}
+	}
+	if err:=os.WriteFile(path,[]byte("{"),0600);err!=nil {t.Fatal(err)}
+	if _,_,err:=readAdaptiveCLI(path,"a","https://example.com/204",30*time.Second);err==nil {t.Fatal("invalid policy accepted")}
+}

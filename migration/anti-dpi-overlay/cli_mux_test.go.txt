@@ -1,0 +1,38 @@
+package cmd
+
+import (
+	"testing"
+
+	"github.com/sagernet/sing-box/option"
+)
+
+func muxCLIOptions() []option.Outbound {
+	a:=&option.VLESSOutboundOptions{UUID:"00000000-0000-0000-0000-000000000001"}
+	b:=*a
+	b.Multiplex=&option.OutboundMultiplexOptions{Enabled:true,Protocol:"yamux"}
+	return []option.Outbound{
+		{Type:"selector",Tag:"s",Options:&option.SelectorOutboundOptions{Outbounds:[]string{"a","b"}}},
+		{Type:"vless",Tag:"a",Options:a},
+		{Type:"vless",Tag:"b",Options:&b},
+	}
+}
+
+func TestAntiDPICLIMuxPair(t *testing.T) {
+	p,err:=prepareAdaptiveMux(muxCLIOptions(),"s",true,false)
+	if err!=nil||p==nil||p[0].Multiplex||!p[1].Multiplex||p[0].PairKey!=p[1].PairKey {t.Fatal("pair not accepted",err)}
+	for _,change:=range []func(*option.VLESSOutboundOptions){
+		func(p *option.VLESSOutboundOptions){p.UUID="different"},
+		func(p *option.VLESSOutboundOptions){p.Server="different.example"},
+		func(p *option.VLESSOutboundOptions){p.Flow="xtls-rprx-vision"},
+		func(p *option.VLESSOutboundOptions){p.Testpre=1},
+		func(p *option.VLESSOutboundOptions){p.Transport=&option.V2RayTransportOptions{}},
+		func(p *option.VLESSOutboundOptions){p.Multiplex.Protocol="unknown"},
+		func(p *option.VLESSOutboundOptions){p.Multiplex.Enabled=false},
+	} {
+		o:=muxCLIOptions()
+		change(o[2].Options.(*option.VLESSOutboundOptions))
+		if _,err:=prepareAdaptiveMux(o,"s",true,false);err==nil {t.Fatal("incompatible pair accepted")}
+	}
+	if p,err:=prepareAdaptiveMux(nil,"",false,false);p!=nil||err!=nil {t.Fatal(err)}
+	if _,err:=prepareAdaptiveMux(nil,"",false,true);err==nil {t.Fatal("preference without opt-in")}
+}

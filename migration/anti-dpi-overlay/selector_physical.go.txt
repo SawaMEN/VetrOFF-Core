@@ -1,0 +1,55 @@
+package group
+
+import (
+	"context"
+	"errors"
+	"net"
+	"net/netip"
+
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+)
+
+// The binding has no unbound dial fallback. Platform implementations must
+// verify the interface before every socket and report binding errors.
+type adaptivePhysicalBinding struct {
+	valid func() bool
+	dial func(context.Context,netip.Addr,string)(net.Conn,error)
+}
+
+func (s *Selector) beginPhysicalDiagnostic(ctx context.Context,resolver AdaptiveDNSResolver,interfaceName string,consent bool)(context.Context,*adaptiveTunnelPath,func(),error) {
+	if !consent {return nil,nil,nil,errors.New("explicit physical-network diagnostic consent required")}
+	// Use the same owner and epoch gate as tunnel diagnostics; never run
+	// both simultaneously or change routing/selector configuration.
+	ctx,p,finish,err:=s.beginTunnelDiagnostic(ctx,resolver,true)
+	if err!=nil {return nil,nil,nil,err}
+	physical,err:=newAdaptivePhysicalBinding(s,interfaceName)
+	if err!=nil {finish();return nil,nil,nil,err}
+	p.physical=physical
+	if p.Generation()==0 {finish();return nil,nil,nil,errors.New("physical path not verified")}
+	return ctx,p,finish,nil
+}
+
+// AdaptivePhysicalConnectivity sends only the requested diagnostic DNS and
+// HTTPS traffic outside the tunnel on the explicitly selected interface.
+// The caller must obtain separate consent for this physical path.
+func (s *Selector) AdaptivePhysicalConnectivity(ctx context.Context,resolver AdaptiveDNSResolver,interfaceName string,req ac.ConnectivityRequest)(ac.ConnectivityReport,error) {
+	ctx,p,finish,err:=s.beginPhysicalDiagnostic(ctx,resolver,interfaceName,req.Consent)
+	if err!=nil {return ac.ConnectivityReport{},err}
+	defer finish()
+	return adaptiveDiagnosticTester.CheckConnectivity(ctx,p,req)
+}
+
+func (s *Selector) AdaptivePhysicalSiberian(ctx context.Context,resolver AdaptiveDNSResolver,interfaceName string,req ac.SiberianRequest)(ac.SiberianReport,error) {
+	ctx,p,finish,err:=s.beginPhysicalDiagnostic(ctx,resolver,interfaceName,req.Consent)
+	if err!=nil {return ac.SiberianReport{},err}
+	defer finish()
+	return adaptiveCheckSiberian(ctx,p,req)
+}
+
+
+func (s *Selector) AdaptivePhysicalAddress(ctx context.Context,resolver AdaptiveDNSResolver,interfaceName string,req ac.AddressRequest)(ac.AddressReport,error) {
+	ctx,p,finish,err:=s.beginPhysicalDiagnostic(ctx,resolver,interfaceName,req.Consent)
+	if err!=nil {return ac.AddressReport{},err}
+	defer finish()
+	return adaptiveDiagnosticTester.CheckAddress(ctx,p,req)
+}

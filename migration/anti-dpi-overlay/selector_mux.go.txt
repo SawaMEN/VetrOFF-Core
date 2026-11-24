@@ -1,0 +1,42 @@
+package group
+
+import (
+	"context"
+	"errors"
+
+	"github.com/sagernet/sing-box/adapter"
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+)
+
+// EnableAdaptiveWithMux accepts a pair validated by the local configuration
+// owner against the options used to build this exact instance. It also
+// independently checks the resolved runtime members and actual MUX state.
+func (s *Selector) EnableAdaptiveWithMux(ctx context.Context,policy ac.Config,consent bool,endpoint string,pool ac.PoolPolicy,poolConsent bool,pair [2]ac.MuxProfile,prefer bool) error {
+	if err:=policy.Validate();err!=nil {return err}
+	if !policy.Enabled||!consent {s.DisableAdaptive();return nil}
+	s.adaptiveLifecycleMu.Lock()
+	defer s.adaptiveLifecycleMu.Unlock()
+	if s.adaptiveOwner!=nil {return errors.New("adaptive selector already enabled")}
+	b,profiles,err:=NewAdaptiveSelectorBinding(s,endpoint)
+	if err!=nil {return err}
+	return s.attachAdaptiveMuxLocked(ctx,policy,b,profiles,pool,poolConsent,&pair,prefer)
+}
+
+func validateLiveMuxPair(b *AdaptiveSelectorBinding,profiles []ac.Outbound,pair *[2]ac.MuxProfile) error {
+	if pair==nil {return nil}
+	if b==nil||len(profiles)!=2||pair[0].Outbound.Tag==pair[1].Outbound.Tag {return errors.New("invalid live MUX pair")}
+	for i:=range pair {
+		p:=&pair[i]
+		o:=b.members[p.Outbound.Tag]
+		mux,ok:=o.(adapter.OutboundWithMultiplex)
+		if !ok||o.Type()!=p.Protocol||mux.MultiplexEnabled()!=p.Multiplex {
+			return errors.New("MUX configuration does not match live outbound")
+		}
+		found:=false
+		for _,profile:=range profiles {
+			if profile.Tag==p.Outbound.Tag {p.Outbound=profile;found=true;break}
+		}
+		if !found {return errors.New("MUX member not in selector")}
+	}
+	return nil
+}

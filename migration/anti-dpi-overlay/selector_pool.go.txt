@@ -1,0 +1,99 @@
+package group
+
+import (
+	"context"
+	"errors"
+	"net"
+	"sync"
+
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+	"github.com/sagernet/sing-box/common/interrupt"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
+)
+
+// adaptiveBudgetConn sits inside interrupt.Group so both normal close and
+// group interruption close the accounted connection. Release only after
+// the underlying Close returns, and never count the same close twice.
+type adaptiveBudgetConn struct {
+	net.Conn
+	lease *ac.Lease
+	once sync.Once
+	err error
+}
+
+func (c *adaptiveBudgetConn) Close() error {
+	c.once.Do(func(){
+		defer c.lease.Release()
+		c.err=c.Conn.Close()
+	})
+	return c.err
+}
+
+// Preserve sing's upstream traversal for extended I/O and early handshake.
+func (c *adaptiveBudgetConn) Upstream() any {return c.Conn}
+func (c *adaptiveBudgetConn) ReaderReplaceable() bool {return true}
+func (c *adaptiveBudgetConn) WriterReplaceable() bool {return true}
+
+func (s *Selector) adaptiveBudgetDial(ctx context.Context,network string,destination M.Socksaddr)(net.Conn,error,bool) {
+	s.adaptiveLifecycleMu.Lock()
+	o:=s.adaptiveOwner
+	s.adaptiveLifecycleMu.Unlock()
+	if o==nil||!o.poolEnabled {return nil,nil,false}
+	if N.NetworkName(network)!=N.NetworkTCP {return nil,errors.New("adaptive budget supports TCP only"),true}
+	o.mu.Lock()
+	if o.closed||o.dialCtx==nil||o.dialCtx.Err()!=nil {
+		o.mu.Unlock()
+		return nil,ac.ErrControllerInactive,true
+	}
+	detour:=s.selected.Load()
+	if detour==nil {
+		o.mu.Unlock()
+		return nil,errors.New("no selected outbound"),true
+	}
+	physical:=o.dialCtx
+	state:=o.controller.State()
+	lease,err:=o.controller.Reserve(state.Generation,"tcp",detour.Tag())
+	o.mu.Unlock()
+	if err!=nil {return nil,err,true}
+	if lease==nil {return nil,errors.New("missing enabled budget lease"),true}
+	// No locks are held during a real dial. Cancellation is scoped to the
+	// pending open, not the lifetime of established user connections.
+	dialCtx,cancel:=context.WithCancel(ctx)
+	stop:=context.AfterFunc(physical,cancel)
+	defer func(){stop();cancel()}()
+	conn,err:=detour.DialContext(dialCtx,network,destination)
+	if err!=nil||conn==nil {
+		if conn!=nil {_=conn.Close()}
+		lease.Release()
+		if err==nil {err=errors.New("outbound returned no connection")}
+		return nil,err,true
+	}
+	o.mu.Lock()
+	// Serialize commit and interrupt registration with selection/reset.
+	// Even a dialer ignoring cancellation cannot publish an old open.
+	if o.closed||physical!=o.dialCtx||physical.Err()!=nil||dialCtx.Err()!=nil||
+		s.selected.Load()!=detour {
+		err=ac.ErrPoolStale
+	} else {
+		err=lease.Commit()
+	}
+	if err==nil {
+		wrapped:=&adaptiveBudgetConn{Conn:conn,lease:lease}
+		result:=s.interruptGroup.NewConn(wrapped,interrupt.IsExternalConnectionFromContext(ctx))
+		o.mu.Unlock()
+		return result,nil,true
+	}
+	o.mu.Unlock()
+	_=conn.Close()
+	lease.Release()
+	return nil,err,true
+}
+
+// AdaptivePoolState is a local snapshot, not a network-health observation.
+func (s *Selector) AdaptivePoolState() *ac.PoolSnapshot {
+	s.adaptiveLifecycleMu.Lock()
+	defer s.adaptiveLifecycleMu.Unlock()
+	if s.adaptiveOwner==nil {return nil}
+	return s.adaptiveOwner.controller.State().Pool
+}

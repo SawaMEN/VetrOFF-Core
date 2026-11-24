@@ -1,0 +1,57 @@
+package cmd
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+	"time"
+
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+)
+
+func TestAntiDPICLIDiagnosticOptions(t *testing.T) {
+	o:=adaptiveDiagnosticOptions{}
+	if o.requested() {t.Fatal("implicit diagnosis")}
+	o=adaptiveDiagnosticOptions{kind:"connectivity",scope:"tunnel",host:"owned.example",resolverIP:"1.1.1.1",resolverName:"one.one.one.one",output:"report.json",consent:true}
+	if _,err:=o.validate();err!=nil {t.Fatal(err)}
+	for _,change:=range []func(*adaptiveDiagnosticOptions){
+		func(o *adaptiveDiagnosticOptions){o.consent=false},
+		func(o *adaptiveDiagnosticOptions){o.scope=""},
+		func(o *adaptiveDiagnosticOptions){o.scope="physical"},
+		func(o *adaptiveDiagnosticOptions){o.iface="eth0"},
+		func(o *adaptiveDiagnosticOptions){o.resolverIP="127.0.0.1"},
+		func(o *adaptiveDiagnosticOptions){o.kind="siberian"},
+		func(o *adaptiveDiagnosticOptions){o.output=""},
+	} {
+		bad:=o
+		change(&bad)
+		if _,err:=bad.validate();err==nil {t.Fatal("invalid diagnostic accepted")}
+	}
+	o.scope="physical";o.iface="eth0"
+	if _,err:=o.validate();err!=nil {t.Fatal(err)}
+}
+
+func TestAntiDPICLIReportExclusiveExport(t *testing.T) {
+	dir:=t.TempDir()
+	path:=filepath.Join(dir,"report.json")
+	report:=ac.ConnectivityReport{Version:1,Kind:"connectivity",Scope:ac.ScopeTunnel,Host:"owned.example",CheckedAt:time.Now().UTC(),Families:[]ac.FamilyConnectivity{}}
+	if err:=writeAdaptiveDiagnostic(path,report);err!=nil {t.Fatal(err)}
+	raw,err:=os.ReadFile(path)
+	if err!=nil {t.Fatal(err)}
+	var decoded ac.ConnectivityReport
+	if err=json.Unmarshal(raw,&decoded);err!=nil||decoded.Complete||decoded.Scope!=ac.ScopeTunnel||decoded.Version!=1 {t.Fatal(decoded,err)}
+	if runtime.GOOS!="windows" {
+		info,err:=os.Stat(path)
+		if err!=nil||info.Mode().Perm()&0077!=0 {t.Fatal("report permissions",err)}
+	}
+	if err=writeAdaptiveDiagnostic(path,report);err==nil {t.Fatal("existing report overwritten")}
+	after,err:=os.ReadFile(path)
+	if err!=nil||string(raw)!=string(after) {t.Fatal("existing report changed")}
+	if err=writeAdaptiveDiagnostic(filepath.Join(dir,"empty.json"),ac.SiberianReport{});err==nil {t.Fatal("empty report exported")}
+	link:=filepath.Join(dir,"link.json")
+	if err=os.Symlink(path,link);err==nil {
+		if err=writeAdaptiveDiagnostic(link,report);err==nil {t.Fatal("symlink overwritten")}
+	}
+}

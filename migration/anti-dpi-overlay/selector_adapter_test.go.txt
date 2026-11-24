@@ -1,0 +1,61 @@
+package group
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/interrupt"
+)
+
+type antiDPITestOutbound struct {
+	adapter.Outbound
+	tag string
+	kind string
+}
+
+func (o *antiDPITestOutbound) Tag()string {return o.tag}
+func (o *antiDPITestOutbound) Type()string {return o.kind}
+func (o *antiDPITestOutbound) Network()[]string {return []string{"tcp"}}
+func (o *antiDPITestOutbound) Dependencies()[]string {return nil}
+
+func antiDPITestSelector()*Selector {
+	a:=&antiDPITestOutbound{tag:"a",kind:"vless"}
+	b:=&antiDPITestOutbound{tag:"b",kind:"trojan"}
+	s:=&Selector{ctx:context.Background(),tags:[]string{"a","b"},outbounds:map[string]adapter.Outbound{"a":a,"b":b},interruptGroup:interrupt.NewGroup()}
+	s.selected.Store(a)
+	return s
+}
+
+func TestAntiDPISelectorCommit(t *testing.T) {
+	s:=antiDPITestSelector()
+	fail:=true
+	b,profiles,err:=newAdaptiveSelectorBinding(s,func(context.Context,adapter.Outbound)error{
+		if fail {return errors.New("probe failed")}
+		return nil
+	})
+	if err!=nil||len(profiles)!=2 {t.Fatal(profiles,err)}
+	if err=b.SwitchVerified(context.Background(),"a","b");err==nil||s.Selected("tcp").Tag()!="a" {t.Fatal(err)}
+	fail=false
+	if err=b.SwitchVerified(context.Background(),"a","b");err!=nil||s.Selected("tcp").Tag()!="b" {t.Fatal(err)}
+	if err=b.SwitchVerified(context.Background(),"a","b");err==nil {t.Fatal("stale expected accepted")}
+}
+
+func TestAntiDPISelectorManualABA(t *testing.T) {
+	s:=antiDPITestSelector()
+	b,_,err:=newAdaptiveSelectorBinding(s,func(context.Context,adapter.Outbound)error{
+		// Manual selection changes and returns to the original tag during
+		// verification. Tag comparison alone would miss this.
+		if !s.SelectOutbound("b")||!s.SelectOutbound("a") {t.Fatal("manual selection failed")}
+		return nil
+	})
+	if err!=nil {t.Fatal(err)}
+	if err=b.SwitchVerified(context.Background(),"a","b");err==nil||s.Selected("tcp").Tag()!="a" {t.Fatal(err)}
+}
+
+func TestAntiDPISelectorRejectsNonTunnel(t *testing.T) {
+	s:=antiDPITestSelector()
+	s.outbounds["b"]=&antiDPITestOutbound{tag:"b",kind:"direct"}
+	if _,_,err:=newAdaptiveSelectorBinding(s,func(context.Context,adapter.Outbound)error{return nil});err==nil {t.Fatal("direct accepted")}
+}

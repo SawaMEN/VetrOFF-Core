@@ -1,0 +1,81 @@
+//go:build linux && !android
+
+package group
+
+import (
+	"context"
+	"errors"
+	"net"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+
+	"github.com/sagernet/sing-box/adapter"
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+	"github.com/sagernet/sing/service"
+	"golang.org/x/sys/unix"
+)
+
+// Restrict the first implementation to hardware-backed interfaces on
+// Linux, with a matching monitored default path. Virtual bridges, TUN,
+// loopback, and unidentified mobile/USB paths are deliberately rejected.
+func adaptivePhysicalInterface(name string)(*net.Interface,error) {
+	if name==""||len(name)>=unix.IFNAMSIZ||strings.ContainsAny(name,"/\\\x00")||name=="."||name==".." {
+		return nil,errors.New("invalid physical interface name")
+	}
+	i,err:=net.InterfaceByName(name)
+	if err!=nil {return nil,err}
+	if i.Index<=0||i.Flags&net.FlagUp==0||i.Flags&net.FlagLoopback!=0 {
+		return nil,errors.New("physical interface is not up")
+	}
+	// Do not infer physical status from a name such as eth0 alone.
+	if _,err=os.Stat(filepath.Join("/sys/class/net",name,"device"));err!=nil {
+		return nil,errors.New("interface is not verified hardware-backed")
+	}
+	return i,nil
+}
+
+func newAdaptivePhysicalBinding(s *Selector,name string)(*adaptivePhysicalBinding,error) {
+	nm:=service.FromContext[adapter.NetworkManager](s.ctx)
+	if nm==nil||nm.InterfaceMonitor()==nil {return nil,errors.New("physical interface monitor unavailable")}
+	i,err:=adaptivePhysicalInterface(name)
+	if err!=nil {return nil,err}
+	index:=i.Index
+	valid:=func()bool{
+		current,err:=adaptivePhysicalInterface(name)
+		if err!=nil||current.Index!=index {return false}
+		def:=nm.InterfaceMonitor().DefaultInterface()
+		return def!=nil&&def.Index==index&&def.Name==name
+	}
+	if !valid() {return nil,errors.New("selected interface is not the monitored default physical path")}
+	return &adaptivePhysicalBinding{
+		valid:valid,
+		dial:func(ctx context.Context,ip netip.Addr,port string)(net.Conn,error){
+			if !valid()||!ac.PublicDiagnosticIP(ip)||(port!="443"&&port!="853") {
+				return nil,errors.New("physical diagnostic path unavailable")
+			}
+			d:=net.Dialer{ControlContext:func(ctx context.Context,network,address string,raw syscall.RawConn)error{
+				if ctx.Err()!=nil {return ctx.Err()}
+				if !valid() {return errors.New("physical interface changed")}
+				var bindErr error
+				err:=raw.Control(func(fd uintptr){
+					bindErr=unix.SetsockoptString(int(fd),unix.SOL_SOCKET,unix.SO_BINDTODEVICE,name)
+					if bindErr!=nil {return}
+					var actual string
+					actual,bindErr=unix.GetsockoptString(int(fd),unix.SOL_SOCKET,unix.SO_BINDTODEVICE)
+					if bindErr==nil&&actual!=name {bindErr=errors.New("physical socket binding not confirmed")}
+				})
+				if err!=nil {return err}
+				return bindErr
+			}}
+			network:="tcp6"
+			if ip.Is4() {network="tcp4"}
+			conn,err:=d.DialContext(ctx,network,net.JoinHostPort(ip.String(),port))
+			if err!=nil {return nil,err}
+			if !valid()||ctx.Err()!=nil {_=conn.Close();return nil,errors.New("physical path changed")}
+			return conn,nil
+		},
+	},nil
+}

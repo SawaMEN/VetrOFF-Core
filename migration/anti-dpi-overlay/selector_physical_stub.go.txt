@@ -1,0 +1,9 @@
+//go:build !linux || android
+
+package group
+
+import "errors"
+
+func newAdaptivePhysicalBinding(_ *Selector,_ string)(*adaptivePhysicalBinding,error) {
+	return nil,errors.New("physical diagnostics not supported on this platform")
+}

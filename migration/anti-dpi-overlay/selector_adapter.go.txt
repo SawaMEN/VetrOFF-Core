@@ -1,0 +1,125 @@
+package group
+
+import (
+	"context"
+	"errors"
+	"net"
+	"net/http"
+	"net/url"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/sagernet/sing-box/adapter"
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+	M "github.com/sagernet/sing/common/metadata"
+)
+
+// AdaptiveSelectorBinding is an experimental bridge for a plain Selector.
+// A normal Selector selects one outbound for both TCP and UDP. Limit the
+// first integration to members that advertise TCP only. Never attach two
+// independent adaptive controllers to one shared Selector.
+type AdaptiveSelectorBinding struct {
+	selector *Selector
+	endpoint string
+	members map[string]adapter.Outbound
+	verify func(context.Context,adapter.Outbound) error
+}
+
+// NewAdaptiveSelectorBinding must be called by the owner after Start and
+// before installing the controller. No automatic enable or scheduler.
+func NewAdaptiveSelectorBinding(s *Selector,endpoint string)(*AdaptiveSelectorBinding,[]ac.Outbound,error) {
+	u,err:=url.Parse(endpoint)
+	if err!=nil||u.Scheme!="https"||u.Hostname()==""||u.User!=nil||u.Fragment!=""||
+		(u.Port()!=""&&u.Port()!="443") {
+		return nil,nil,errors.New("expected an owned HTTPS 204 probe endpoint on port 443")
+	}
+	b,members,err:=newAdaptiveSelectorBinding(s,func(ctx context.Context,o adapter.Outbound)error{
+		return adaptiveVerifiedHTTP(ctx,o,u)
+	})
+	if err==nil { b.endpoint=u.String() }
+	return b,members,err
+}
+
+func newAdaptiveSelectorBinding(s *Selector,verify func(context.Context,adapter.Outbound)error)(*AdaptiveSelectorBinding,[]ac.Outbound,error) {
+	if s==nil||s.balance!=nil||verify==nil||s.selected.Load()==nil { return nil,nil,errors.New("plain started selector required") }
+	b:=&AdaptiveSelectorBinding{selector:s,members:map[string]adapter.Outbound{},verify:verify}
+	var members []ac.Outbound
+	for i,tag:=range s.tags {
+		o:=s.outbounds[tag]
+		if o==nil||strings.HasPrefix(tag,"§hide§")||len(o.Dependencies())!=0 {
+			return nil,nil,errors.New("unsupported selector dependency")
+		}
+		switch o.Type() {
+		case "vless","vmess","trojan","shadowsocks":
+		default: return nil,nil,errors.New("unreviewed selector outbound")
+		}
+		if len(o.Network())!=1||!slices.Contains(o.Network(),"tcp") {
+			return nil,nil,errors.New("first integration requires TCP-only members")
+		}
+		b.members[tag]=o
+		members=append(members,ac.Outbound{Tag:tag,Tunnel:true,Priority:i,Networks:[]string{"tcp"}})
+	}
+	if len(members)<2||len(members)>256 { return nil,nil,errors.New("expected 2..256 eligible members") }
+	return b,members,nil
+}
+
+// Probe uses the existing worker's context and the explicitly resolved
+// outbound. The worker owns cadence and records only completed probes.
+// A successful TCP dial or cached URLTest delay is not sufficient.
+func (b *AdaptiveSelectorBinding) Probe(ctx context.Context,tag string) ac.ProbeOutcome {
+	o:=b.members[tag]
+	if o==nil { return ac.ProbeSkipped }
+	if ctx.Err()!=nil { return ac.ProbeCanceled }
+	err:=b.verify(ctx,o)
+	if ctx.Err()!=nil||errors.Is(err,context.Canceled) { return ac.ProbeCanceled }
+	if err!=nil { return ac.ProbeFailed }
+	return ac.ProbePassed
+}
+
+func (b *AdaptiveSelectorBinding) SwitchVerified(ctx context.Context,expected,target string) error {
+	s:=b.selector
+	o:=b.members[target]
+	if o==nil { return errors.New("unknown adaptive target") }
+	// Do not hold the selection mutex during the network probe. Manual
+	// selection can proceed; compare both the active tag and revision before
+	// committing to prevent ABA races.
+	s.adaptiveSelectionMu.Lock()
+	current:=s.selected.Load()
+	revision:=s.adaptiveSelectionRevision
+	s.adaptiveSelectionMu.Unlock()
+	if current==nil||current.Tag()!=expected { return errors.New("selector changed") }
+	if err:=b.verify(ctx,o);err!=nil { return err }
+	s.adaptiveSelectionMu.Lock()
+	defer s.adaptiveSelectionMu.Unlock()
+	current=s.selected.Load()
+	if err:=ctx.Err();err!=nil { return err }
+	if current==nil||current.Tag()!=expected||s.adaptiveSelectionRevision!=revision {
+		return errors.New("selector changed during verification")
+	}
+	if !s.selectOutboundLocked(target) { return errors.New("selector rejected target") }
+	return nil
+}
+
+func adaptiveVerifiedHTTP(ctx context.Context,o adapter.Outbound,u *url.URL) error {
+	ctx,cancel:=context.WithTimeout(ctx,4*time.Second)
+	defer cancel()
+	destination:=M.ParseSocksaddrHostPortStr(u.Hostname(),"443")
+	transport:=&http.Transport{
+		DialContext:func(ctx context.Context,network,address string)(net.Conn,error){
+			return o.DialContext(ctx,"tcp",destination)
+		},
+		DisableKeepAlives:true,
+		MaxResponseHeaderBytes:16*1024,
+		TLSHandshakeTimeout:3*time.Second,
+	}
+	defer transport.CloseIdleConnections()
+	client:=http.Client{Transport:transport,CheckRedirect:func(*http.Request,[]*http.Request)error{return http.ErrUseLastResponse}}
+	req,err:=http.NewRequestWithContext(ctx,http.MethodGet,u.String(),nil)
+	if err!=nil { return err }
+	resp,err:=client.Do(req)
+	if err!=nil { return err }
+	defer resp.Body.Close()
+	if resp.StatusCode!=http.StatusNoContent { return errors.New("unexpected probe response") }
+	return ctx.Err()
+}
