@@ -3709,6 +3709,32 @@ for path, own_sha, new_sha in (
     assert b"block_bits_ipv4" in candidate and b"fallback_address" in candidate
     resolutions[path] = candidate
 
+# Combined build 45486170730 found cleanly merged lazy-outbound callers
+# still expecting the upstream Status interface and boolean monitor flag.
+# Retain the fork's IsReady interface and atomic lifecycle flag consistently.
+for path, sha, edits in (
+    ("adapter/outbound/h_lazy.go", "5d2a5a8a7ec2d27f78755abde04ba70da557f4e0", (
+        (b"return inner.Status()", b"return adapter.OutboundStatus(inner)", 1),
+        (b"adapter.IsWarming(l.inner.Status())", b"adapter.IsWarming(adapter.OutboundStatus(l.inner))", 1),
+        (b"func (l *Lazy) Status() adapter.Status {", b"func (l *Lazy) IsReady() bool { return l.Status() == adapter.StatusReady }\n\nfunc (l *Lazy) Status() adapter.Status {", 1),
+    )),
+    ("common/monitoring/h_keep_top.go", "6a35e046f1a2e1385f5cad5c230a9c00784b5217", (
+        (b"if m.started {", b"if m.started.Load() {", 2),
+        (b"if m.started &&", b"if m.started.Load() &&", 1),
+    )),
+    ("common/monitoring/h_keep_top_search.go", "439c8290fc012cf473fb393e5be06cb661497028", (
+        (b"status := lazy.Status()", b"status := adapter.OutboundStatus(lazy)", 1),
+    )),
+    ("common/monitoring/h_parked.go", "60be7fb385ecd6cf02025e586c62ce7724e7cab8", (
+        (b"if !m.started", b"if !m.started.Load()", 2),
+    )),
+):
+    candidate = checked_blob(data["upstream"], path, sha)
+    assert git("show", data["tentative_tree"] + ":" + path) == candidate, path
+    for before, after, count in edits:
+        lifecycle_edit(before, after, count)
+    compat[path] = subprocess.check_output(["gofmt"], input=candidate)
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"
