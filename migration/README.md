@@ -497,3 +497,20 @@ Psiphon and its scanner and bridge dependencies. No stable pins changed.
 Expected: 43/44 Core and 146/166 sing-box, 189/210 (21 remaining).
 186 are source-confirmed; the three new Psiphon paths await source and
 runtime verification. Android/Conduit real-network testing remains required.
+
+### Telemost session lifecycle and candidate regression coverage
+
+Audit 45484929203 passed the source gate for the three Psiphon paths:
+43/44 Core and 146/166 sing-box (189/210) source resolutions confirmed.
+Three more paths are submitted: transport/call/telemost/connect.go,
+creator.go and h_relay_test.go. The creator returns a session without
+waiting for a peer, installs handlers on every new peer bridge, and
+closes active connections on shutdown. A canceled creator is not published;
+a joiner's early exit now signals failure instead of waiting for the
+caller timeout. Existing upstream reconnect handler tests are retained.
+The CI overlay covers the call configuration, relay, retry and Telemost
+packages together with the other reviewed protocols. Live service testing
+and the known upstream TODO about swapping a joiner's replacement tunnel
+remain outstanding. Stable pins are unchanged.
+Expected: 43/44 Core and 149/166 sing-box (192/210; 18 remaining).
+189 source-confirmed; three await the new source gate and runtime tests.
