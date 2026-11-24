@@ -2024,6 +2024,30 @@ for path, own_sha, new_sha, removed, inserted in (
     assert all(b"pretest_" in b"\n".join(left[a:b]) for a,b,c,d in changes)
     resolutions[path] = new
 
+
+# Smart DNS pool: the only upstream differences are source attribution.
+for path, old_sha, own_sha, new_sha in (
+    ("docs/hiddify/features/dns/smart-dns-pool.en.md", "491a4fec73ae2278bffe5e9dc10c41a1e8c589a6", "7f2b7fecccac88c7083568bb1da5d7dbd1e96363", "89040eab40dcac7d5e9ac5327594bbe87f038ec1"),
+    ("docs/hiddify/features/dns/smart-dns-pool.fa.md", "7be6943aebd3da302fd7b63637263706be78006b", "1b6b8fd3bd7c89e08dd56970003c80ba83399d90", "a058a63a5d9914921ffa5d46920ad50052ce2b90"),
+):
+    old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+        ("base", "patched_tree", "upstream"), (old_sha, own_sha, new_sha)))
+    en = path.endswith(".en.md")
+    credit = ("## Sources and credits" if en else "## منبع‌ها و قدردانی").encode()
+    related = ("## See also" if en else "## همچنین ببینید").encode()
+    i = new.index(credit)
+    j = new.index(related, i)
+    assert new[:i] + new[j:] == own
+    resolutions[path] = new
+
+# Clean upstream helper must use the fork's optional detailed status
+# contract. Record the fix in the candidate tree, not only in a test.
+path = "adapter/h_detour.go"
+detour = checked_blob(data["tentative_tree"], path, "25ec7f984b22fa4fbe7f2e369d13f28a1e8af99f")
+assert detour == checked_blob(data["upstream"], path, "25ec7f984b22fa4fbe7f2e369d13f28a1e8af99f")
+detour = replace_once(detour, b"outbound.Status()", b"OutboundStatus(outbound)")
+detour = subprocess.check_output(["gofmt"], input=detour)
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"
@@ -2043,5 +2067,6 @@ clean = replace_once(clean, old_setup,
 # The revised server bind explicitly listens on its configured port.
 clean = replace_once(clean, b"DeviceOpts{Address: []netip.Prefix{serverAddress}, MTU: 1500}",
     b"DeviceOpts{Address: []netip.Prefix{serverAddress}, MTU: 1500, ListenPort: serverPort}")
-apply_reviewed(data, resolutions, {path: subprocess.check_output(["gofmt"], input=clean)})
+apply_reviewed(data, resolutions, {path: subprocess.check_output(["gofmt"], input=clean),
+                                  "adapter/h_detour.go": detour})
 

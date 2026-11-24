@@ -144,3 +144,15 @@ before integration. The compile-only pass is followed by the actual UDP
 regression test. The two MasterDNS translations now document the previously
 verified resolver admission behavior and restore attribution. No stable
 source pins are changed.
+
+### WARP dependency completeness
+
+The combined WARP probe now includes the upstream HeldLazy interface and
+reviewed URLTestHistory.LastGood field, both required by detour handling.
+The PathStatus adaptation is a reviewed clean-tree adjustment rather than
+a temporary test edit. A regression test checks legacy IsReady outbounds
+and detailed Status outbounds in a single path. The Tailscale gate starts
+from its own locked source checkout and runs independently of failures in
+preceding package probes once audit and Go setup have succeeded. Two smart
+DNS pool documentation conflicts restore attribution, preserving all other
+bytes. Stable pins remain unchanged; combined WARP tests are still pending.

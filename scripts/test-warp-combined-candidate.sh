@@ -20,6 +20,7 @@ groups = ("protocol/warp", "protocol/masque", "hiddify/warpscan",
           "common/iponly", "transport/masque", "transport/device",
           "protocol/awg", "protocol/wireguard")
 extra = ("adapter/h_deep_search.go", "adapter/h_detour.go", "adapter/h_status.go",
+         "adapter/h_lazy.go", "adapter/experimental.go",
          "option/h_edge_search.go", "option/h_warp_scanner.go")
 blocked = [p for p in meta["remaining_conflicts"] if p in extra or any(p.startswith(g + "/") for g in groups)]
 assert not blocked, blocked
@@ -38,23 +39,36 @@ with tempfile.TemporaryDirectory() as tmp:
         shutil.copytree(dest / group, sing / group)
     for path in extra:
         shutil.copyfile(dest / path, sing / path)
-# The shared adapter helper is a clean upstream addition, but the locked
-# interface has IsReady rather than Status. The reviewed h_status.go
-# supplies OutboundStatus for both contracts. Record this probe-only edit.
-path = sing / "adapter/h_detour.go"
-blob = path.read_bytes()
-assert blob.count(b"outbound.Status()") == 1
-path.write_bytes(blob.replace(b"outbound.Status()", b"OutboundStatus(outbound)"))
+# These dependencies are reviewed, not inferred from the old checkout.
+assert "adapter/h_detour.go" in meta["clean_adjustments"]
+assert "adapter/experimental.go" in meta["reviewed_resolutions"]
+assert b"OutboundStatus(outbound)" in (sing / "adapter/h_detour.go").read_bytes()
+assert b"type HeldLazy interface" in (sing / "adapter/h_lazy.go").read_bytes()
+assert b"LastGood uint16" in (sing / "adapter/experimental.go").read_bytes()
 assert not (sing / "hiddify/warpscan/scanner.go").exists()
 assert (sing / "hiddify/warpscan/h_engine.go").exists()
 assert b"scanner.Close()" in (sing / "protocol/masque/outbound.go").read_bytes()
 (report / "warp-combined-candidate.json").write_text(json.dumps(
     {"tree": tree, "packages": groups, "extra": extra,
-     "probe_only_adjustment": "adapter/h_detour.go: OutboundStatus compatibility",
+     "reviewed_adjustment": "adapter/h_detour.go: OutboundStatus compatibility",
      "tags": ["with_gvisor", "with_masque", "with_awg"]}, indent=2) + "\n")
 PY
+cp "$ROOT/migration/tests/adapter_detour_compat_test.go" "$sing/adapter/vetroff_detour_compat_test.go"
 cd "$sing"
 tags=with_gvisor,with_masque,with_awg
+CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=2m -tags "$tags" -ldflags '-checklinkname=0' \
+  -run '^TestVetrOFFPathStatusCompatibility
+go list -mod=mod -tags "$tags" -f '{{range .GoFiles}}{{println .}}{{end}}' ./protocol/warp > "$report/warp-combined-files.txt"
+grep -Fxq endpoint_warp_masque.go "$report/warp-combined-files.txt"
+grep -Fxq endpoint_warp_awg.go "$report/warp-combined-files.txt"
+CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=5m -tags "$tags" -ldflags '-checklinkname=0' \
+  -run '^$' ./protocol/warp ./protocol/masque ./hiddify/warpscan ./hiddify/edgescan ./transport/masque \
+  2>&1 | tee "$report/warp-combined-build.log"
+CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=4m -tags "$tags" -ldflags '-checklinkname=0' \
+  -run '^TestH_OutboundDropsPacketsToDomains$' -v ./protocol/masque 2>&1 | tee "$report/warp-combined-packet-test.log"
+grep -Fq -- '--- PASS: TestH_OutboundDropsPacketsToDomains' "$report/warp-combined-packet-test.log"
+ -v ./adapter 2>&1 | tee "$report/adapter-detour-test.log"
+grep -Fq -- '--- PASS: TestVetrOFFPathStatusCompatibility' "$report/adapter-detour-test.log"
 go list -mod=mod -tags "$tags" -f '{{range .GoFiles}}{{println .}}{{end}}' ./protocol/warp > "$report/warp-combined-files.txt"
 grep -Fxq endpoint_warp_masque.go "$report/warp-combined-files.txt"
 grep -Fxq endpoint_warp_awg.go "$report/warp-combined-files.txt"
