@@ -478,3 +478,22 @@ Conduit pairing, detour validation and isolated data directories. Preserve
 these requirements before adopting the new scanner or changing bootstrap.
 Expected count: 43/44 Core and 143/166 sing-box (186/210; 24 remaining).
 182 source-confirmed, four await the latest source gate. Stable pins unchanged.
+
+### Psiphon restart and protected bootstrap candidate
+
+Audit 45483083719 confirmed 43/44 Core and 143/166 sing-box source
+resolutions (186/210). Its route test failed to compile because the scoped
+overlay omitted route/dns.go; dd23efb includes that coordinated file. The
+same audit failed TestH_ScanRatesBlocks; WARP regression remains open.
+Three Psiphon conflicts are submitted together: controller, outbound and
+configuration tests. The candidate separates permanent instance shutdown
+from restartable attempts, waits for controller termination before modifying
+configuration or closing the datastore, retains per-instance private data
+paths and Conduit pairing, validates detours, and skips a forced local proxy
+for direct protected Android connections. The authenticated SOCKS bridge
+is prepared before config commit when needed. The duplicate notice.go
+implementation is removed only in the candidate. The test overlay includes
+Psiphon and its scanner and bridge dependencies. No stable pins changed.
+Expected: 43/44 Core and 146/166 sing-box, 189/210 (21 remaining).
+186 are source-confirmed; the three new Psiphon paths await source and
+runtime verification. Android/Conduit real-network testing remains required.
