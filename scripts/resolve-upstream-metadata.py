@@ -201,6 +201,70 @@ assert b'command: ["/opt/hiddify.sh"]' not in new
 seq = iter(new.splitlines())
 assert all(any(candidate == line for candidate in seq) for line in own.splitlines())
 resolutions[path] = new
+
+# Docker and OpenWrt: advance the original package versions only. These
+# files describe upstream distribution packages, not VetrOFF stable pins.
+for path, hashes, previous, current in (
+    ("platform/docker/Dockerfile", (
+        "3ad655730d5cf5cedffb33dd3bc1f0cb8800621d",
+        "a92386512b0b0e1bf068950b3fa15cfb0cd8b622",
+        "3784a54a0dcb0e906001e090c3d32fdde1631659",
+    ), b"ENV VERSION=v5.5.5", b"ENV VERSION=v5.9.15"),
+    ("platform/wrt/Makefile", (
+        "e3b4ba7e29563f5ad221d90ef423975f2b2441a0",
+        "eec54b50430002999b767eafb88ee92c76c79be8",
+        "bb79055964f979d441551e7628cc6fde737c9a2d",
+    ), b"PKG_VERSION:=5.5.5", b"PKG_VERSION:=5.9.15"),
+):
+    old, own, new = (checked_blob(data[rev], path, sha)
+                     for rev, sha in zip(("base", "patched_tree", "upstream"), hashes))
+    assert own.count(previous) == 1 and new.count(current) == 1
+    assert own.replace(previous, current, 1) == new, path
+    resolutions[path] = new
+
+# The fork's only entrypoint changes were exec and the renamed executable.
+# Upstream retains both, removes dead comments and adds an opt-in router
+# argument. Keep the upstream script without modifying the host firewall.
+path = "platform/docker/hiddify.sh"
+old, own, new = (checked_blob(data[rev], path, sha)
+                 for rev, sha in zip(("base", "patched_tree", "upstream"), (
+                     "5b1f805e67a3530967253754e128e8f8c3e575ff",
+                     "70ef1efb02d13e3c48cb967a65e4d3b460f2218d",
+                     "97bd2df9c5eaff4007f274dd37dc807cdd872eaf")))
+assert old.count(b"/hiddify/HiddifyCli run") == 2
+assert old.replace(b"/hiddify/HiddifyCli run", b"exec /hiddify/hiddify-core run") == own
+assert b'set -- run --config "$CONFIG"' in new
+assert b'[ -f "/hiddify/hiddify.json" ] && set -- "$@" -d /hiddify/hiddify.json' in new
+assert b'exec /hiddify/hiddify-core "$@"' in new
+subprocess.run(["sh", "-n"], input=new, check=True)
+resolutions[path] = new
+
+# Preserve the public Go field name used by the fork and its single
+# lan-sharing-password JSON key. The options struct and other callers
+# still need reconciliation before the complete Core candidate can build.
+path = "v2/config/inbound_ports.go"
+own = checked_blob(patched, path, "8f9a380e6e3e76c9aee95f04bf3bc622073a4df4")
+new = checked_blob(upstream, path, "c2df169ef8e04d61a1bf806be2df222fd6e105c7")
+assert new.count(b"hopt.ProxySecret") == 2
+assert new.replace(b"hopt.ProxySecret", b"hopt.LanSharingPassword") == own
+resolutions[path] = own
+
+path = "v2/config/inbound_ports_test.go"
+own = checked_blob(patched, path, "393db9dab2c1a8eed219a39864542314784cfd68")
+new = checked_blob(upstream, path, "2f12fa63eea39d80afb5565081a652ff3a72d2ab")
+# Keep the fork regression for the embedded JSON field, as well as every
+# upstream port-policy test. Retain the fork's existing profile fixture.
+start = own.index(b"\n\nfunc TestLANSharingPasswordJSONDoesNotShadowConfiguredSecret(")
+end = own.index(b"\nconst ports =", start)
+regression = own[start:end]
+assert b"opts.LanSharingPassword" in regression and b"localUsers(opts)" in regression
+assert new.count(b"Content: oneProxyProfile") == 1
+candidate = new.replace(b"Content: oneProxyProfile", b"Content: chainTestProfile")
+marker = b"\nconst ports ="
+assert candidate.count(marker) == 1
+assert candidate.replace(marker, regression + marker, 1) == own
+resolutions[path] = subprocess.check_output(["gofmt"], input=own)
+
 apply_reviewed(data, resolutions)
 
 repo = repo / "hiddify-sing-box"
