@@ -1,0 +1,88 @@
+package cmd
+
+import (
+	"context"
+	"errors"
+	"io"
+	"os"
+	"strings"
+	"time"
+
+	box "github.com/sagernet/sing-box"
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/protocol/group"
+)
+
+var adaptivePolicyPath string
+var adaptiveSelectorTag string
+var adaptiveProbeURL string
+var adaptiveInterval time.Duration
+
+func init() {
+	commandRun.Flags().StringVar(&adaptivePolicyPath,"anti-dpi-policy","","local Adaptive Connect v1 JSON policy (explicit opt-in)")
+	commandRun.Flags().StringVar(&adaptiveSelectorTag,"anti-dpi-selector","","plain TCP-only selector tag")
+	commandRun.Flags().StringVar(&adaptiveProbeURL,"anti-dpi-probe-url","","owned HTTPS 204 probe URL")
+	commandRun.Flags().DurationVar(&adaptiveInterval,"anti-dpi-interval",30*time.Second,"interval between completed adaptive probe cycles")
+}
+
+// Local CLI flags are the consent boundary. They are deliberately not read
+// from a subscription or the ordinary sing-box configuration.
+func readAdaptiveCLI(path,tag,endpoint string,interval time.Duration)(ac.Config,bool,error) {
+	if path==""&&tag==""&&endpoint=="" {return ac.Config{},false,nil}
+	if path==""||strings.TrimSpace(tag)==""||strings.TrimSpace(tag)!=tag||endpoint=="" {
+		return ac.Config{},false,errors.New("all three Anti-DPI CLI flags are required")
+	}
+	// Check before Open to avoid blocking on a named pipe. The file is a
+	// local user-controlled input; read at most MaxConfigBytes+1 bytes.
+	info,err:=os.Stat(path)
+	if err!=nil {return ac.Config{},false,err}
+	if !info.Mode().IsRegular()||info.Size()>ac.MaxConfigBytes {
+		return ac.Config{},false,errors.New("expected a small regular policy file")
+	}
+	file,err:=os.Open(path)
+	if err!=nil {return ac.Config{},false,err}
+	defer file.Close()
+	raw,err:=io.ReadAll(io.LimitReader(file,ac.MaxConfigBytes+1))
+	if err!=nil {return ac.Config{},false,err}
+	p,err:=ac.ParseConfig(raw)
+	if err!=nil {return ac.Config{},false,err}
+	if interval<15*time.Second||interval>5*time.Minute||interval>=time.Duration(p.MaxAgeSeconds)*time.Second {
+		return ac.Config{},false,errors.New("Anti-DPI interval must be 15..300s and shorter than observation max age")
+	}
+	return p,p.Enabled,nil
+}
+
+func startAdaptiveCLI(ctx context.Context,instance *box.Box,p ac.Config,enabled bool) error {
+	if !enabled {return nil}
+	o,ok:=instance.Outbound().Outbound(adaptiveSelectorTag)
+	if !ok {return errors.New("Anti-DPI selector not found")}
+	s,ok:=o.(*group.Selector)
+	if !ok {return errors.New("Anti-DPI requires a plain selector")}
+	if err:=s.EnableAdaptive(ctx,p,true,adaptiveProbeURL);err!=nil {return err}
+	// A plain Selector has no own periodic URLTest scheduler. This is the
+	// sole owner for the selected plain group; it calls the existing worker
+	// rather than creating another health-test implementation. The first
+	// cycle starts immediately and the timer begins after completion.
+	interval:=adaptiveInterval
+	go runAdaptiveCLI(ctx,s,interval)
+	return nil
+}
+
+func runAdaptiveCLI(ctx context.Context,s *group.Selector,interval time.Duration) {
+	defer s.DisableAdaptive()
+	for ctx.Err()==nil {
+		_,err:=s.RunAdaptiveCycle(ctx)
+		if err!=nil&&ctx.Err()==nil&&!errors.Is(err,ac.ErrControllerInactive) {
+			// Do not log endpoint, profile metadata or transport errors.
+			log.Warn("Anti-DPI cycle did not complete")
+		}
+		timer:=time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}

@@ -23,7 +23,9 @@ cp "$ROOT/migration/anti-dpi-overlay/urltest_adapter.go.txt" "$sing/protocol/gro
 cp "$ROOT/migration/anti-dpi-overlay/urltest_adapter_test.go.txt" "$sing/protocol/group/adaptive_urltest_test.go"
 cp "$ROOT/migration/anti-dpi-overlay/selector_lifecycle.go.txt" "$sing/protocol/group/adaptive_lifecycle.go"
 cp "$ROOT/migration/anti-dpi-overlay/selector_lifecycle_test.go.txt" "$sing/protocol/group/adaptive_lifecycle_test.go"
-python3 - "$sing/protocol/group/selector.go" "$sing/protocol/group/urltest.go" <<'PY'
+cp "$ROOT/migration/anti-dpi-overlay/cli_adaptive.go.txt" "$tmp/core/cmd/adaptive_cli.go"
+cp "$ROOT/migration/anti-dpi-overlay/cli_adaptive_test.go.txt" "$tmp/core/cmd/adaptive_cli_test.go"
+python3 - "$sing/protocol/group/selector.go" "$sing/protocol/group/urltest.go" "$tmp/core/cmd/cmd_sing_run.go" <<'PY'
 import pathlib
 import sys
 p = pathlib.Path(sys.argv[1])
@@ -63,8 +65,28 @@ replace_once('if testResult.err != nil {\n\t\t\t\t\tif b.ctx.Err() != nil {', ''
                 if testResult.err != nil {
                     if b.ctx.Err() != nil {''')
 p.write_text(s)
+p = pathlib.Path(sys.argv[3])
+s = p.read_text()
+replace_once('func create() (*box.Box, context.CancelFunc, error) {', '''func create() (*box.Box, context.CancelFunc, error) {
+    adaptivePolicy, adaptiveEnabled, err := readAdaptiveCLI(adaptivePolicyPath, adaptiveSelectorTag, adaptiveProbeURL, adaptiveInterval)
+    if err != nil {
+        return nil, nil, err
+    }''')
+replace_once('return instance, cancel, nil', '''if err := startAdaptiveCLI(ctx, instance, adaptivePolicy, adaptiveEnabled); err != nil {
+        cancel()
+        _ = instance.Close()
+        return nil, nil, E.Cause(err, "start Anti-DPI")
+    }
+    return instance, cancel, nil''')
+p.write_text(s)
 PY
 cd "$sing"
 gofmt -w protocol/group/selector.go protocol/group/urltest.go protocol/group/adaptive_selector*.go protocol/group/adaptive_urltest*.go protocol/group/adaptive_lifecycle*.go common/adaptiveconnect/*.go
 export CGO_ENABLED=0
 go test -mod=mod -count=1 -ldflags '-checklinkname=0' ./common/adaptiveconnect ./protocol/group -run 'TestAntiDPI|TestController'
+
+cd "$tmp/core"
+gofmt -w cmd/adaptive_cli*.go cmd/cmd_sing_run.go
+need make
+tags=$(cli_tags)
+go test -mod=mod -count=1 -tags "$tags" -ldflags '-checklinkname=0' ./cmd -run 'TestAntiDPICLI'

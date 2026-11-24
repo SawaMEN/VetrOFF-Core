@@ -44,5 +44,6 @@ Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Cli
 - [x] Add a disposable prepared-tree bridge for the actual plain TCP-only Selector, guarded manual selection and integration CI.
 - [x] Add explicit context-bound fresh URLTest leaf worker bridge in the prepared-tree overlay.
 - [x] Add explicit post-start Selector owner, real URLTest batch call, InterfaceUpdated reset, manual pause/resume and close hooks in overlay.
-- [ ] Bind opt-in startup/config import and existing periodic probe owner in the app/core; verify platform notifications and actual transport cleanup.
+- [x] Add explicit local srun policy file and selector/probe flags; invoke the existing worker at bounded CLI cadence in the overlay.
+- [ ] Verify CLI compilation and real tunnel switching; bind Hiddify GUI lifecycle, platform notifications and actual transport cleanup.
 - [ ] Validate candidate builds and real network behavior before promotion.
