@@ -6,6 +6,9 @@ on:
     paths:
       - 'scripts/test-combined-candidate.sh'
       - 'scripts/prepare-dependency-candidates.py'
+      - 'scripts/prepare-tailscale-callers.py'
+      - 'scripts/fix-masterdns-session-readiness.py'
+      - 'scripts/audit-upstream-merge.sh'
       - 'scripts/resolve-upstream-metadata.py'
       - '.github/workflows/combined-candidate.yml'
 permissions:
