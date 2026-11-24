@@ -652,3 +652,19 @@ v28.5.2, whose client uses its own context-aware dialPipeContext. The new
 SDK pairing still requires compilation; no production dependency is changed.
 202/210 source resolutions confirmed; eight outstanding. ROADMAP 9/16.
 No stable pin or release promotion until full combined gates pass.
+
+### Required regression and integration trigger coverage
+
+The previous completed routing audit (45489649503) failed the slowdown
+regression; the replacement deterministic fixture is already in main.
+Require its explicit PASS marker in both the scoped and combined route
+checks, not only the Go command exit code. The combined protocol probe
+also requires explicit PASS markers for network reset, Psiphon lifecycle
+and Android bootstrap, Telemost peer handlers and XDrive validation.
+A renamed, skipped or build-tag-excluded required test cannot silently
+pass the gate. Changes to the shared routing check, common helper or
+source preparation now trigger combined candidate CI, which syntax-checks
+all shell scripts. These are test-gate changes, not production transport
+changes. 202/210 source resolutions confirmed; eight remain outstanding.
+ROADMAP 9/16. Full combined verification and stable pin promotion remain
+pending.

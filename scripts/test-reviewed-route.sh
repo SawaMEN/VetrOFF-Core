@@ -45,7 +45,7 @@ normal="$report/$prefix-reset-candidate-test.log"
 disabled="$report/$prefix-pacing-disabled-candidate-test.log"
 HIDDIFY_NO_READ_PACE=0 CGO_ENABLED=1 go test -race -mod=mod "${args[@]}" -count=1 -timeout=3m -ldflags '-checklinkname=0' \
   -run '^TestH_(NetworkResetReachesTheDNSServers|ReadPace|WakePace|PacedRawConn|TrackedDatagramSocket|TrackedSockets|PathRoundTrip|BusyDatagramSocket)' -v ./route 2>&1 | tee "$normal" || failed=1
-for test in TestH_NetworkResetReachesTheDNSServers TestH_TrackedDatagramSocketKeepsItsReader TestH_WakePaceNeedsALongPath TestH_ReadPaceLeavesAnExchangeAlone TestH_PacedRawConnWaitsAfterAWakeUp; do
+for test in TestH_NetworkResetReachesTheDNSServers TestH_TrackedDatagramSocketKeepsItsReader TestH_WakePaceNeedsALongPath TestH_ReadPaceLeavesAnExchangeAlone TestH_PacedRawConnWaitsAfterAWakeUp TestH_ReadPaceStopsWhenTheDownloadSlows; do
   if ! grep -Fq -- "--- PASS: $test " "$normal"; then
     echo "Required routing regression did not pass: $test" >&2
     failed=1

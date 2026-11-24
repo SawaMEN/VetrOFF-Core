@@ -156,8 +156,16 @@ probe route-regressions bash "$ROOT/scripts/test-reviewed-route.sh" --combined "
 CGO_ENABLED=1 probe tailscale go test -race -mod=mod -count=1 -timeout=5m \
   -tags with_tailscale,with_tailcat -ldflags '-checklinkname=0' ./protocol/tailscale/...
 probe sing-tests go test -mod=mod -count=1 -timeout=6m -tags "$tags,with_xdrive" -ldflags '-checklinkname=0' \
-  -run '^TestH_(NetworkResetReachesTheDNSServers|Psiphon|XDrive|EveryPeerBridgeHasTheSessionsHandlers)' \
+  -run '^TestH_(NetworkResetReachesTheDNSServers|Psiphon|XDrive|EveryPeerBridgeHasTheSessionsHandlers)' -v \
   ./route ./protocol/psiphon ./transport/call/telemost ./transport/v2rayxdrive .
+# A successful go test can still mean that a required regression was not
+# selected (for example after a build tag or test name changes).
+for test in TestH_NetworkResetReachesTheDNSServers TestH_PsiphonCloseIsIdempotentAndPreventsLateStart TestH_PsiphonDirectAndroidBootstrapDoesNotForceHTTPProxy TestH_EveryPeerBridgeHasTheSessionsHandlers TestH_XDriveRequiresVLESSEncryption; do
+  if ! grep -Fq -- "--- PASS: $test " "$report/combined-sing-tests.log"; then
+    echo "Required combined regression did not pass: $test" >&2
+    failed=1
+  fi
+done
 # The integration test module must use exactly the reviewed root
 # replacements. Compile it without executing tests that require containers,
 # remote services or privileged network operations.

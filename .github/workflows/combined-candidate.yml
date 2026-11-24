@@ -5,6 +5,9 @@ on:
     branches: [main]
     paths:
       - 'scripts/test-combined-candidate.sh'
+      - 'scripts/test-reviewed-route.sh'
+      - 'scripts/_common.sh'
+      - 'scripts/prepare.sh'
       - 'scripts/prepare-dependency-candidates.py'
       - 'scripts/prepare-tailscale-callers.py'
       - 'scripts/fix-masterdns-session-readiness.py'
@@ -30,7 +33,7 @@ jobs:
           cache: false
       - name: Validate candidate scripts
         run: |
-          bash -n scripts/test-combined-candidate.sh
+          for script in scripts/*.sh; do bash -n "$script"; done
           python3 -m py_compile scripts/*.py
       - name: Audit reviewed candidate trees and manifests
         run: bash scripts/audit-upstream-merge.sh 4e5a9a357003d0a995360586702fd24c53042e3f
