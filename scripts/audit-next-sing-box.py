@@ -6,9 +6,18 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 OLD = "a26e58b376987a3305b201ec87fbc8918f620ad3"
 NEW = "1267fe6aac8d11f3a562e8feecad11d11f48f965"
+DEPENDENCIES = {
+    "replace/sing": ("https://github.com/hiddify/sing.git",
+                     "b40ea077780dbc1babef7d035d4b0fea8d9ad6f2",
+                     "39d22feb8337617eeb1fb7df5c59cd10b27ebc2a"),
+    "replace/soar": ("https://github.com/hiddify/soar.git",
+                     "e18587bc9fb62f326124d1f3eb0ceb31708bd077",
+                     "d7c81ce7dff97a295a90f9b61d9ef91bb903633a"),
+}
 
 
 def module(name, filename):
@@ -27,6 +36,31 @@ def require(condition, message):
         raise ValueError(message)
 
 
+def check_dependencies(repo, report):
+    results = {}
+    for path, (url, old, new) in DEPENDENCIES.items():
+        for revision, expected in ((OLD, old), (NEW, new)):
+            entry = git(repo, "ls-tree", revision, "--", path).decode().strip()
+            require(entry == f"160000 commit {expected}\t{path}", f"gitlink drift: {path}")
+        # Fetch each exact commit into a separate scratch repository. Never
+        # replace missing commits with a different branch head or old pin.
+        with tempfile.TemporaryDirectory() as tmp:
+            git(tmp, "init", "--bare", "--quiet")
+            fetch = subprocess.run(
+                ["git", "-C", tmp, "fetch", "--no-recurse-submodules",
+                 "--no-tags", "--depth=1", url, new],
+                capture_output=True, check=False, timeout=120)
+            log = fetch.stdout + fetch.stderr
+            (report / (path.replace("/", "-") + "-fetch.log")).write_bytes(log)
+            available = fetch.returncode == 0
+            if available:
+                require(git(tmp, "rev-parse", "FETCH_HEAD^{commit}").decode().strip() == new,
+                        f"fetched wrong revision: {path}")
+        results[path] = {"url": url, "before": old, "target": new,
+                         "available": available, "fetch_exit": fetch.returncode}
+    return results
+
+
 def main(work, local, evidence, report):
     checker = module("evidence_check", "verify-candidate-evidence.py")
     checker.verify(evidence)
@@ -40,7 +74,12 @@ def main(work, local, evidence, report):
                              final["components"]["hiddify-sing-box"]["tree"])
     reviewed = json.loads((local / "hiddify-sing-box-reviewed.json").read_text())
     require(reviewed["upstream"] == OLD, "unexpected previous upstream revision")
-    git(repo, "fetch", "--quiet", "--no-tags", "origin", NEW)
+    # Parent merge and dependency availability are independent checks.
+    # The old checkout contains shallow submodules; recursive fetch would
+    # try the new gitlinks before the source audit can report its conflicts.
+    report.mkdir(parents=True, exist_ok=True)
+    git(repo, "fetch", "--quiet", "--no-recurse-submodules", "--no-tags",
+        "--depth=64", "origin", NEW)
     require(git(repo, "rev-parse", NEW + "^{commit}").decode().strip() == NEW, "new revision mismatch")
     git(repo, "merge-base", "--is-ancestor", OLD, NEW)
     count = int(git(repo, "rev-list", "--count", OLD + ".." + NEW))
@@ -65,11 +104,12 @@ def main(work, local, evidence, report):
     require(bool(conflicts) == (result.returncode == 1), "merge status mismatch")
     changed = sorted(set(os.fsdecode(p) for p in
                          git(repo, "diff", "--name-only", "-z", OLD, NEW).split(b"\0") if p))
-    report.mkdir(parents=True, exist_ok=True)
     (report / "upstream-commits.txt").write_bytes(git(repo, "log", "--format=%H %s", OLD + ".." + NEW))
     (report / "upstream-diff.patch").write_bytes(git(repo, "diff", "--binary", "--full-index", OLD, NEW))
     (report / "tentative-update.patch").write_bytes(git(repo, "diff", "--binary", "--full-index", baseline, tree))
     (report / "merge-stderr.log").write_bytes(result.stderr)
+    dependencies = check_dependencies(repo, report)
+    blocked = sorted(path for path, info in dependencies.items() if not info["available"])
     details = {
         "release_baseline": "0.0.4",
         "upstream_before": OLD,
@@ -80,13 +120,16 @@ def main(work, local, evidence, report):
         "changed_upstream_paths": changed,
         "conflicts": conflicts,
         "conflict_count": len(conflicts),
-        "status": "review_required" if conflicts else "clean_merge_tests_required",
+        "dependencies": dependencies,
+        "unavailable_dependencies": blocked,
+        "status": ("dependency_fetch_blocked" if blocked else
+                   "review_required" if conflicts else "clean_merge_tests_required"),
         "stable_promotion": False,
     }
     (report / "update-audit.json").write_text(json.dumps(details, indent=2, sort_keys=True) + "\n")
     print(json.dumps(details, indent=2, sort_keys=True))
     # Even a clean merge still needs its own full integration and matrix.
-    return 1 if conflicts else 0
+    return 1 if conflicts or blocked else 0
 
 
 if __name__ == "__main__":

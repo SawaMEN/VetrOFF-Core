@@ -952,3 +952,18 @@ and the new target. It saves conflict paths, upstream and candidate
 patches, and the full commit list; conflict-free output still requires
 integration and cross-platform builds. It does not change stable pins
 or republish 0.0.4. New audit pending CI.
+
+### Decouple source update audit from nested dependency availability
+
+Audit 45510830961 reconstructed the 0.0.4 baseline successfully but
+recursive fetch failed on the upstream sing and Soar gitlinks
+39d22feb8337617eeb1fb7df5c59cd10b27ebc2a and
+d7c81ce7dff97a295a90f9b61d9ef91bb903633a. GitHub commit API also
+returned no commit for either exact revision. Their public branch heads
+still point at the previously verified pins. Disable recursion for the
+parent fetch, explicitly deepen enough for the 21-commit comparison,
+and audit the parent merge independently. Probe both exact gitlinks
+in disposable bare repositories and record availability and fetch logs.
+Missing revisions remain hard blockers even if the parent merge is
+clean. Do not substitute old pins, change stable sources or publish a
+partial 0.0.5. The corrected audit is pending CI.
