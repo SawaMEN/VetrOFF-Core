@@ -994,3 +994,12 @@ preserve fork documentation and dependency pins, and explicitly defer
 17 commits. Run the three exact upstream regression tests against the
 Core graph and compile the CLI with readonly modules. This is an
 independent test candidate, not a release or full v5 update. Pending CI.
+
+### Correct partial-update workflow syntax
+
+Run 45511817268 failed before scheduling any jobs: the test regex line
+was truncated and an artifact upload block inserted into the shell
+script. Restore the complete anchored pattern and one upload step.
+The four-commit test remains a separate candidate, with all three
+regressions mandatory and readonly Core compilation. No source pin or
+release change. Retry pending CI.

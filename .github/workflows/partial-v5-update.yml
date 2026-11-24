@@ -72,15 +72,7 @@ jobs:
           cd release-source/candidate-src
           tags="$(make -s print-CLI_TAGS NAIVE=0)"
           report="$GITHUB_WORKSPACE/update-report"
-          pattern='^(TestH_HotReloadLogLevel|TestH_BalancerKeepsConnectionsThroughATentativeMiss|TestH_MonitoringMissOfACachedMemberIsSeenByTheGroups)
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: partial-v5-update-evidence
-          path: update-report/
-          if-no-files-found: warn
-          retention-days: 21
-
+          pattern='^(TestH_HotReloadLogLevel|TestH_BalancerKeepsConnectionsThroughATentativeMiss|TestH_MonitoringMissOfACachedMemberIsSeenByTheGroups)$'
           go test -mod=readonly -count=1 -timeout=5m -tags "$tags" -ldflags '-checklinkname=0' -run "$pattern" -v github.com/sagernet/sing-box github.com/sagernet/sing-box/common/monitoring github.com/sagernet/sing-box/protocol/group/balancer | tee "$report/regressions.log"
           for test in TestH_HotReloadLogLevel TestH_BalancerKeepsConnectionsThroughATentativeMiss TestH_MonitoringMissOfACachedMemberIsSeenByTheGroups; do
             grep -Fq -- "--- PASS: $test " "$report/regressions.log"
@@ -89,7 +81,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: sing-box-v5-update-audit
+          name: partial-v5-update-evidence
           path: update-report/
           if-no-files-found: warn
           retention-days: 21
