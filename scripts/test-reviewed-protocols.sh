@@ -17,8 +17,8 @@ tree = meta["reviewed_tree"]
 def git(*args):
     return subprocess.check_output(["git", "-C", str(sing), *args])
 groups = ("protocol/hiddify/dnstt", "protocol/shadowsocks", "transport/simple-obfs", "protocol/ssh",
-          "hiddify/readahead", "common/wholepacket", "hiddify/finalmask", "protocol/tunnel", "transport/v2rayxdrive")
-extra = ("option/shadowsocks.go", "option/dnstt.go", "option/ssh.go")
+          "hiddify/readahead", "common/wholepacket", "hiddify/finalmask", "protocol/tunnel", "transport/v2rayxdrive", "protocol/psiphon", "common/proxybridge", "hiddify/edgescan")
+extra = ("option/shadowsocks.go", "option/dnstt.go", "option/ssh.go", "option/psiphon.go", "option/h_psiphon_scanner.go", "option/h_edge_search.go")
 # Some option filenames differ by revision: only include paths that exist.
 extra = tuple(p for p in extra if git("ls-tree", tree, "--", p))
 blocked = [p for p in meta["remaining_conflicts"] if p in extra or any(p.startswith(g + "/") for g in groups)]
@@ -49,7 +49,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 shutil.copyfile(dest / path, original)
         env = dict(os.environ, CGO_ENABLED="1")
         failed = []
-        for name, package in (("readahead", "./hiddify/readahead"), ("wholepacket", "./common/wholepacket"), ("dnstt", "./protocol/hiddify/dnstt"), ("shadowsocks", "./protocol/shadowsocks"), ("ssh", "./protocol/ssh"), ("finalmask", "./hiddify/finalmask"), ("tunnel-server", "./protocol/tunnel"), ("xdrive-lifecycle", "./transport/v2rayxdrive")):
+        for name, package in (("readahead", "./hiddify/readahead"), ("wholepacket", "./common/wholepacket"), ("dnstt", "./protocol/hiddify/dnstt"), ("shadowsocks", "./protocol/shadowsocks"), ("ssh", "./protocol/ssh"), ("finalmask", "./hiddify/finalmask"), ("tunnel-server", "./protocol/tunnel"), ("xdrive-lifecycle", "./transport/v2rayxdrive"), ("psiphon", "./protocol/psiphon")):
             with (report / (name + "-candidate-test.log")).open("wb") as log:
                 result = subprocess.run(["go", "test", "-race", "-mod=mod", "-count=1",
                     "-timeout=5m", "-ldflags", "-checklinkname=0", package], cwd=sing, env=env,
