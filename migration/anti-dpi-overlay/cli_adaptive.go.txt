@@ -62,7 +62,7 @@ func readAdaptiveCLI(path,tag,endpoint string,interval time.Duration)(ac.Config,
 
 func startAdaptiveCLI(ctx context.Context,instance *box.Box,p ac.Config,enabled bool,pair *[2]ac.MuxProfile) error {
 	if !enabled {
-		if adaptivePool.Enabled||adaptiveMux||adaptiveMuxPrefer||adaptiveHistory.Enabled {return errors.New("Anti-DPI optional modes require enabled local Adaptive Connect policy")}
+		if adaptivePool.Enabled||adaptiveMux||adaptiveMuxPrefer||adaptiveHistory.Enabled||adaptiveDiagnostic.requested() {return errors.New("Anti-DPI optional modes require enabled local Adaptive Connect policy")}
 		return nil
 	}
 	o,ok:=instance.Outbound().Outbound(adaptiveSelectorTag)
@@ -70,6 +70,10 @@ func startAdaptiveCLI(ctx context.Context,instance *box.Box,p ac.Config,enabled 
 	s,ok:=o.(*group.Selector)
 	if !ok {return errors.New("Anti-DPI requires a plain selector")}
 	if err:=s.EnableAdaptiveFeatures(ctx,p,true,adaptiveProbeURL,adaptivePool,adaptivePool.Enabled,pair,adaptiveMuxPrefer,adaptiveHistory,adaptiveHistory.Enabled);err!=nil {return err}
+	if err:=runAdaptiveDiagnostic(ctx,s,adaptiveDiagnostic);err!=nil {
+		s.DisableAdaptive()
+		return err
+	}
 	// A plain Selector has no own periodic URLTest scheduler. This is the
 	// sole owner for the selected plain group; it calls the existing worker
 	// rather than creating another health-test implementation. The first

@@ -80,6 +80,7 @@ func connectivityAddress(ctx context.Context,path DiagnosticPath,ip netip.Addr,h
 	if conn!=nil { defer conn.Close() }
 	if err==nil && conn==nil { err=errors.New("missing connection") }
 	r.TCP=measured(start,err)
+	if r.TCP.Outcome=="certificate-error"||r.TCP.Outcome=="not-found" { r.TCP.Outcome="error" }
 	if err!=nil { return r }
 	// HTTP I/O is bounded by both the context and a connection deadline.
 	deadline,_:=ctx.Deadline()
@@ -96,6 +97,7 @@ func connectivityAddress(ctx context.Context,path DiagnosticPath,ip netip.Addr,h
 	client:=tls.Client(conn,cfg)
 	err=client.HandshakeContext(ctx)
 	r.TLS=measured(start,err)
+	if r.TLS.Outcome=="not-found" { r.TLS.Outcome="error" }
 	if err!=nil { return r }
 	start=time.Now()
 	// Send only a single HEAD for the explicitly owned host. No cookies,
@@ -114,6 +116,7 @@ func connectivityAddress(ctx context.Context,path DiagnosticPath,ip netip.Addr,h
 		}
 	}
 	r.HTTP=measured(start,err)
+	if r.HTTP.Outcome=="certificate-error"||r.HTTP.Outcome=="not-found" { r.HTTP.Outcome="error" }
 	return r
 }
 
@@ -149,6 +152,7 @@ func (t *SiberianTester) CheckConnectivity(ctx context.Context,path DiagnosticPa
 		ips,err:=path.LookupNetIP(dnsCtx,family,host+".")
 		stop()
 		item.DNS=measured(start,err)
+		if item.DNS.Outcome=="certificate-error" { item.DNS.Outcome="error" }
 		if err:=checkPath();err!=nil { return r,err }
 		if err!=nil {
 			r.Families=append(r.Families,item)

@@ -1,0 +1,127 @@
+package cmd
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/netip"
+	"os"
+	"strings"
+
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/protocol/group"
+)
+
+type adaptiveDiagnosticOptions struct {
+	kind,scope,host,control,resolverIP,resolverName,iface,output string
+	consent bool
+}
+
+var adaptiveDiagnostic adaptiveDiagnosticOptions
+
+// srun creates instances serially. Run a diagnostic only once per CLI
+// invocation, never implicitly repeat it on SIGHUP.
+var adaptiveDiagnosticWritten bool
+
+func init() {
+	f:=commandRun.Flags()
+	f.StringVar(&adaptiveDiagnostic.kind,"anti-dpi-diagnostic","","one-shot diagnostic: connectivity or siberian")
+	f.StringVar(&adaptiveDiagnostic.scope,"anti-dpi-diagnostic-scope","","explicit scope: tunnel or physical")
+	f.StringVar(&adaptiveDiagnostic.host,"anti-dpi-diagnostic-host","","owned test hostname")
+	f.StringVar(&adaptiveDiagnostic.control,"anti-dpi-diagnostic-control","","second owned hostname for Siberian-style comparison")
+	f.StringVar(&adaptiveDiagnostic.resolverIP,"anti-dpi-diagnostic-dns-ip","","public DNS-over-TLS server IP")
+	f.StringVar(&adaptiveDiagnostic.resolverName,"anti-dpi-diagnostic-dns-name","","DNS-over-TLS certificate hostname")
+	f.StringVar(&adaptiveDiagnostic.iface,"anti-dpi-diagnostic-interface","","physical Linux interface (physical scope only)")
+	f.StringVar(&adaptiveDiagnostic.output,"anti-dpi-diagnostic-output","","new local JSON report file (never overwritten)")
+	f.BoolVar(&adaptiveDiagnostic.consent,"anti-dpi-diagnostic-consent",false,"consent to test owned hosts on the selected path")
+}
+
+func (o adaptiveDiagnosticOptions) requested() bool {
+	return o.kind!=""||o.scope!=""||o.host!=""||o.control!=""||o.resolverIP!=""||
+		o.resolverName!=""||o.iface!=""||o.output!=""||o.consent
+}
+
+func (o adaptiveDiagnosticOptions) validate()(group.AdaptiveDNSResolver,error) {
+	if !o.requested() {return group.AdaptiveDNSResolver{},nil}
+	if !o.consent||strings.TrimSpace(o.host)==""||strings.TrimSpace(o.output)=="" {
+		return group.AdaptiveDNSResolver{},errors.New("diagnostic requires explicit consent, owned hostname and new output path")
+	}
+	switch o.kind {
+	case "connectivity":
+		if o.control!="" {return group.AdaptiveDNSResolver{},errors.New("control hostname is only for Siberian-style diagnosis")}
+	case "siberian":
+		if strings.TrimSpace(o.control)==""||strings.EqualFold(strings.TrimSpace(o.host),strings.TrimSpace(o.control)) {
+			return group.AdaptiveDNSResolver{},errors.New("two distinct owned test hostnames required")
+		}
+	default:return group.AdaptiveDNSResolver{},errors.New("invalid diagnostic kind")
+	}
+	switch o.scope {
+	case "physical":
+		if strings.TrimSpace(o.iface)=="" {return group.AdaptiveDNSResolver{},errors.New("physical interface required")}
+	case "tunnel":
+		if o.iface!="" {return group.AdaptiveDNSResolver{},errors.New("interface is only for physical diagnostics")}
+	default:return group.AdaptiveDNSResolver{},errors.New("explicit diagnostic scope required")
+	}
+	ip,err:=netip.ParseAddr(o.resolverIP)
+	if err!=nil||!ac.PublicDiagnosticIP(ip)||ip.Is4In6()||strings.TrimSpace(o.resolverName)=="" {
+		return group.AdaptiveDNSResolver{},errors.New("public DNS-over-TLS IP and certificate hostname required")
+	}
+	return group.AdaptiveDNSResolver{IP:ip,ServerName:o.resolverName},nil
+}
+
+// Keep the existing v1 report schema unchanged. No wrapper fields,
+// credentials, profile tags, resolver identifiers or raw errors are exported.
+func writeAdaptiveDiagnostic(path string,report any) error {
+	switch r:=report.(type) {
+	case ac.SiberianReport:
+		if r.Version!=1||r.CheckedAt.IsZero()||(r.Scope!=ac.ScopePhysical&&r.Scope!=ac.ScopeTunnel) {return errors.New("no usable diagnostic report")}
+	case ac.ConnectivityReport:
+		if r.Version!=1||r.Kind!="connectivity"||r.CheckedAt.IsZero()||(r.Scope!=ac.ScopePhysical&&r.Scope!=ac.ScopeTunnel) {return errors.New("no usable diagnostic report")}
+	default:return errors.New("unsupported report")
+	}
+	raw,err:=json.MarshalIndent(report,"","  ")
+	if err!=nil {return err}
+	raw=append(raw,'\n')
+	if len(raw)>65536 {return errors.New("diagnostic report too large")}
+	// Exclusive creation refuses an existing file or symlink. The caller
+	// must choose a trusted local directory. Never truncate another report.
+	f,err:=os.OpenFile(path,os.O_WRONLY|os.O_CREATE|os.O_EXCL,0600)
+	if err!=nil {return err}
+	n,writeErr:=f.Write(raw)
+	if writeErr==nil&&n!=len(raw) {writeErr=errors.New("short diagnostic report write")}
+	if writeErr==nil {writeErr=f.Sync()}
+	closeErr:=f.Close()
+	if writeErr!=nil {return writeErr}
+	return closeErr
+}
+
+func runAdaptiveDiagnostic(ctx context.Context,s *group.Selector,o adaptiveDiagnosticOptions) error {
+	if !o.requested()||adaptiveDiagnosticWritten {return nil}
+	resolver,err:=o.validate()
+	if err!=nil {return err}
+	// Reject a preexisting report before doing network I/O; O_EXCL at
+	// write time still protects against races.
+	if _,err=os.Lstat(o.output);err==nil {return errors.New("diagnostic output already exists")} else if !os.IsNotExist(err) {return err}
+	var report any
+	var testErr error
+	switch o.kind {
+	case "siberian":
+		req:=ac.SiberianRequest{Host:o.host,ControlHost:o.control,Consent:true}
+		if o.scope=="physical" {report,testErr=s.AdaptivePhysicalSiberian(ctx,resolver,o.iface,req)} else {report,testErr=s.AdaptiveSiberian(ctx,resolver,req)}
+	case "connectivity":
+		req:=ac.ConnectivityRequest{Host:o.host,Consent:true}
+		if o.scope=="physical" {report,testErr=s.AdaptivePhysicalConnectivity(ctx,resolver,o.iface,req)} else {report,testErr=s.AdaptiveConnectivity(ctx,resolver,req)}
+	}
+	if err=writeAdaptiveDiagnostic(o.output,report);err!=nil {
+		if testErr!=nil {return errors.Join(testErr,err)}
+		return err
+	}
+	adaptiveDiagnosticWritten=true
+	if testErr!=nil {
+		log.Warn("Anti-DPI diagnostic incomplete; partial report saved")
+	} else {
+		log.Info("Anti-DPI diagnostic report saved")
+	}
+	return nil
+}

@@ -39,6 +39,8 @@ cp "$ROOT/migration/anti-dpi-overlay/selector_physical.go.txt" "$sing/protocol/g
 cp "$ROOT/migration/anti-dpi-overlay/selector_physical_linux.go.txt" "$sing/protocol/group/adaptive_physical_linux.go"
 cp "$ROOT/migration/anti-dpi-overlay/selector_physical_stub.go.txt" "$sing/protocol/group/adaptive_physical_stub.go"
 cp "$ROOT/migration/anti-dpi-overlay/selector_physical_test.go.txt" "$sing/protocol/group/adaptive_physical_test.go"
+cp "$ROOT/migration/anti-dpi-overlay/cli_diagnostic.go.txt" "$tmp/core/cmd/adaptive_diagnostic.go"
+cp "$ROOT/migration/anti-dpi-overlay/cli_diagnostic_test.go.txt" "$tmp/core/cmd/adaptive_diagnostic_test.go"
 python3 - "$sing/protocol/group/selector.go" "$sing/protocol/group/urltest.go" "$tmp/core/cmd/cmd_sing_run.go" <<'PY'
 import pathlib
 import sys
@@ -112,7 +114,7 @@ export CGO_ENABLED=0
 go test -mod=mod -count=1 -ldflags '-checklinkname=0' ./common/adaptiveconnect ./protocol/group -run 'TestAntiDPI|TestController'
 
 cd "$tmp/core"
-gofmt -w cmd/adaptive_cli*.go cmd/adaptive_mux*.go cmd/cmd_sing_run.go
+gofmt -w cmd/adaptive_cli*.go cmd/adaptive_mux*.go cmd/adaptive_diagnostic*.go cmd/cmd_sing_run.go
 need make
 tags=$(cli_tags)
 go test -mod=mod -count=1 -tags "$tags" -ldflags '-checklinkname=0' ./cmd -run 'TestAntiDPICLI'
