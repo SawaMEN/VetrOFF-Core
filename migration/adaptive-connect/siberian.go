@@ -95,6 +95,9 @@ func publicDiagnosticIP(ip netip.Addr) bool {
 	return true
 }
 
+// PublicDiagnosticIP exposes the same address policy to trusted path adapters.
+func PublicDiagnosticIP(ip netip.Addr) bool { return publicDiagnosticIP(ip) }
+
 func sharedDiagnosticIP(a,b []netip.Addr) (netip.Addr,error) {
 	for _,list:=range [][]netip.Addr{a,b} {
 		if len(list)<1 || len(list)>8 { return netip.Addr{},errors.New("expected 1..8 resolved addresses") }
@@ -119,11 +122,11 @@ func diagnosticAttempt(ctx context.Context,path DiagnosticPath,ip netip.Addr,hos
 	defer cancel()
 	a:=DiagnosticAttempt{Stage:"tcp",Outcome:"ok"}
 	conn,err:=path.DialContext(ctx,"tcp",net.JoinHostPort(ip.String(),"443"))
+	if conn!=nil { defer conn.Close() }
 	if err==nil {
 		if conn==nil {
 			err=errors.New("path returned no connection")
 		} else {
-			defer conn.Close()
 			a.Stage="tls"
 			client:=tls.Client(conn,&tls.Config{ServerName:host,MinVersion:tls.VersionTLS12})
 			err=client.HandshakeContext(ctx)

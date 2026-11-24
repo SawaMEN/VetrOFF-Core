@@ -77,10 +77,10 @@ func connectivityAddress(ctx context.Context,path DiagnosticPath,ip netip.Addr,h
 	defer cancel()
 	start:=time.Now()
 	conn,err:=path.DialContext(ctx,"tcp",net.JoinHostPort(ip.String(),"443"))
+	if conn!=nil { defer conn.Close() }
 	if err==nil && conn==nil { err=errors.New("missing connection") }
 	r.TCP=measured(start,err)
 	if err!=nil { return r }
-	defer conn.Close()
 	// HTTP I/O is bounded by both the context and a connection deadline.
 	deadline,_:=ctx.Deadline()
 	if err=conn.SetDeadline(deadline);err!=nil {

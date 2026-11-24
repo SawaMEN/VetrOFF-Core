@@ -33,6 +33,7 @@ type AdaptiveSelectorOwner struct {
 	dialCtx context.Context
 	cancelDial context.CancelFunc
 	running bool
+	diagnosticRunning bool
 	closed bool
 }
 
@@ -157,7 +158,7 @@ func (s *Selector) RunAdaptiveCycle(ctx context.Context)(ac.NetworkDecision,erro
 func (o *AdaptiveSelectorOwner) run(caller context.Context)(ac.NetworkDecision,error) {
 	o.mu.Lock()
 	e:=o.epoch.Load()
-	if o.closed||e==nil||e.ctx.Err()!=nil||caller.Err()!=nil||o.running {
+	if o.closed||e==nil||e.ctx.Err()!=nil||caller.Err()!=nil||o.running||o.diagnosticRunning {
 		o.mu.Unlock()
 		return ac.NetworkDecision{},ac.ErrControllerInactive
 	}

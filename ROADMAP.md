@@ -32,7 +32,8 @@ Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Cli
 - [ ] Wire policy import into the app/core lifecycle.
 - [x] Add a bounded client Siberian-style diagnostic candidate with explicit path scope.
 - [x] Implement layered DNS/IPv4/IPv6/TCP/TLS/HTTPS connectivity diagnostics candidate.
-- [ ] Connect diagnostics to platform-bound DNS and sockets, uTLS profiles and connectivity report import.
+- [x] Add explicit pinned tunnel-leaf DNS-over-TLS and TCP diagnostic adapter in overlay.
+- [ ] Connect physical path, CLI/GUI report export, verify real tunnel DNS and socket behavior, and review uTLS profiles.
 - [ ] Review and integrate additional DPI-CH-specific diagnostic tests.
 - [x] Add opt-in Adaptive MUX policy for validated preconfigured TCP profiles.
 - [x] Add opt-in CLI typed profile comparison and live MUX state validation to the selector owner for plain VLESS/Trojan TCP pairs.
