@@ -50,7 +50,7 @@ func TestDiagnosticPathChange(t *testing.T) {
 	p:=&diagnosticFake{scope:ScopePhysical,changeOnLookup:true}
 	p.generation.Store(1)
 	var tester SiberianTester
-	r,err:=tester.Check(context.Background(),p,SiberianRequest{"a.example.com","b.example.com",true})
+	r,err:=tester.Check(context.Background(),p,SiberianRequest{Host:"a.example.com",ControlHost:"b.example.com",Consent:true})
 	if err==nil || r.Evidence!="inconclusive" || p.dials.Load()!=0 { t.Fatal(r,err) }
 }
 

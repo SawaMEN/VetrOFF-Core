@@ -45,3 +45,11 @@ func (s *Selector) AdaptivePhysicalSiberian(ctx context.Context,resolver Adaptiv
 	defer finish()
 	return adaptiveCheckSiberian(ctx,p,req)
 }
+
+
+func (s *Selector) AdaptivePhysicalAddress(ctx context.Context,resolver AdaptiveDNSResolver,interfaceName string,req ac.AddressRequest)(ac.AddressReport,error) {
+	ctx,p,finish,err:=s.beginPhysicalDiagnostic(ctx,resolver,interfaceName,req.Consent)
+	if err!=nil {return ac.AddressReport{},err}
+	defer finish()
+	return adaptiveDiagnosticTester.CheckAddress(ctx,p,req)
+}

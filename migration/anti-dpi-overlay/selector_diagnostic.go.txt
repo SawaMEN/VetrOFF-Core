@@ -237,3 +237,11 @@ func (s *Selector) AdaptiveConnectivity(ctx context.Context,resolver AdaptiveDNS
 	defer finish()
 	return adaptiveDiagnosticTester.CheckConnectivity(ctx,p,req)
 }
+
+
+func (s *Selector) AdaptiveAddress(ctx context.Context,resolver AdaptiveDNSResolver,req ac.AddressRequest)(ac.AddressReport,error) {
+	ctx,p,finish,err:=s.beginTunnelDiagnostic(ctx,resolver,req.Consent)
+	if err!=nil {return ac.AddressReport{},err}
+	defer finish()
+	return adaptiveDiagnosticTester.CheckAddress(ctx,p,req)
+}

@@ -44,7 +44,7 @@ func TestConnectivityFamiliesAndSharedGate(t *testing.T) {
 	a,b:=r.Families[0],r.Families[1]
 	if a.Resolved!=3 || !a.Truncated || len(a.Addresses)!=2 || b.DNS.Outcome!="invalid-answer" || p.dials.Load()!=2 { t.Fatal(r) }
 	if a.Addresses[0].TCP.Outcome!="error" || a.Addresses[0].TLS.Outcome!="not-tested" { t.Fatal(a) }
-	if _,err:=tester.Check(context.Background(),p,SiberianRequest{"example.com","control.example.com",true});err==nil { t.Fatal("shared cooldown not enforced") }
+	if _,err:=tester.Check(context.Background(),p,SiberianRequest{Host:"example.com",ControlHost:"control.example.com",Consent:true});err==nil { t.Fatal("shared cooldown not enforced") }
 }
 
 func TestConnectivityTLSAndHTTP(t *testing.T) {
