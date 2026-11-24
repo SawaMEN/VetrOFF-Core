@@ -3547,6 +3547,53 @@ extra = extra.replace(b"&hPsiphonOutboundManager{}", b'hOutbounds{outbounds: map
 candidate = candidate.rstrip() + b"\n\n" + extra + b"\n"
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 
+# Telemost: the newer call API separates the session's lifetime from
+# its peer connections. The creator no longer waits for a first peer,
+# and every newly connected peer gets the same inbound handlers.
+path = "transport/call/telemost/connect.go"
+own = checked_blob(data["patched_tree"], path, "5deac3777f1dc9fc9a09ccf3f885c3fc4c23fa6c")
+new = checked_blob(data["upstream"], path, "b805bebf4989aff18b0e302c287cb053005b5619")
+candidate = new
+# Cancel before creating a conference, and do not publish a session
+# if the caller canceled while fetching its configuration.
+lifecycle_edit(b"\tcfg, err := FetchConfig(dialer, logger)\n", b"\tif err := ctx.Err(); err != nil {\n\t\treturn nil, \"\", err\n\t}\n\tcfg, err := FetchConfig(dialer, logger)\n")
+lifecycle_edit(b"\tgo bridge.Run()\n\treturn bridge.Close,", b"\tif err := ctx.Err(); err != nil {\n\t\tbridge.Close()\n\t\treturn nil, \"\", err\n\t}\n\tgo bridge.Run()\n\treturn bridge.Close,")
+# An initial join failure used to leave ConnectJoiner waiting until its
+# timeout even though the joiner's goroutine had already returned.
+lifecycle_edit(b"\tgo joiner.RunWithParams(params)\n\tselect {", b"\tdone := make(chan struct{})\n\tgo func() {\n\t\tdefer close(done)\n\t\tjoiner.RunWithParams(params)\n\t}()\n\tselect {")
+lifecycle_edit(b"\tcase <-ctx.Done():\n\t\tjoiner.Close()\n\t\treturn nil, nil, ctx.Err()", b"\tcase <-done:\n\t\tjoiner.Close()\n\t\treturn nil, nil, fmt.Errorf(\"telemost: joiner stopped before connecting\")\n\tcase <-ctx.Done():\n\t\tjoiner.Close()\n\t\treturn nil, nil, ctx.Err()")
+assert b"return bridge.Close, connInfo.ConferenceURI, nil" in candidate
+assert b"tunnel.NewJoinerBridge(tun, logger)" in candidate
+assert b"bridge.getActiveBridge()" not in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "transport/call/telemost/creator.go"
+own = checked_blob(data["patched_tree"], path, "236587fb240b174fd51fc2b32d35c194fe8341d9")
+new = checked_blob(data["upstream"], path, "ade912d229dd40098a9a94a3da72204d9d9654c7")
+assert b"next.InheritHandlers(previous)" in own
+assert b"tunnel.NewCreatorBridge(tun, b.accept, b.logger)" in new
+assert b"if b.ctx.Err() != nil { // closed while the peer connected" in new
+assert b"active.Close()" in new
+assert b"next.Close()" in new
+resolutions[path] = new
+
+path = "transport/call/telemost/h_relay_test.go"
+own = checked_blob(data["patched_tree"], path, "1fad329a003b30ddcb58a4997f00a15a5c42cc89")
+new = checked_blob(data["upstream"], path, "3d729664cb1870a45155d6591d6cd9a697b765ae")
+assert normalize_imports(own) == normalize_imports(new)
+resolutions[path] = new
+
+# Verify the API's cleanly merged callers and its new reconnect test.
+for path, sha, markers in (
+    ("transport/call/telemost/h_creator_test.go", "3d62a1a65529d486033f9b89093bb428d632b473", (b"TestH_EveryPeerBridgeHasTheSessionsHandlers", b"active.IsClosed()")),
+    ("protocol/call/inbound.go", "87d556d36c288541e6a1a718cd4691dea010c86a", (b"Accept: tunnel.AcceptHandlers",)),
+    ("protocol/call/outbound.go", "bd9a1731a844ce5d093a98785d5b61d3afe98fcc", (b"o.bridge.Load().DialContext",)),
+):
+    upstream_call = checked_blob(data["upstream"], path, sha)
+    for marker in markers:
+        assert marker in upstream_call, (path, marker)
+        assert marker in git("show", data["tentative_tree"] + ":" + path), (path, marker)
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"
