@@ -12,6 +12,7 @@ on:
       - 'scripts/test-reviewed-tunnel-transports.sh'
       - 'scripts/test-tailscale-candidate.sh'
       - 'scripts/test-reviewed-dns.sh'
+      - 'scripts/test-reviewed-masterdns.sh'
       - 'migration/tests/**'
 permissions:
   contents: read
@@ -35,6 +36,8 @@ jobs:
         run: bash scripts/test-reviewed-tunnel-transports.sh
       - name: Test reviewed sequential DNS and rating packages
         run: bash scripts/test-reviewed-dns.sh
+      - name: Test MasterDNS resolver admission and library candidate
+        run: bash scripts/test-reviewed-masterdns.sh
       - name: Probe Tailscale candidate against locked dependencies
         run: bash scripts/test-tailscale-candidate.sh
       - uses: actions/upload-artifact@v4

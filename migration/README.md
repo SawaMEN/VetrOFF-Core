@@ -94,3 +94,14 @@ This is a deliberate compatibility decision, not a stable behavior change.
 Existing tests are retained and eight upstream rating, detour, and deadline
 tests are added. A scoped race test checks the DNS transport and rating
 packages before the disposable checkout is rebuilt for Tailscale.
+
+### MasterDNS resolver admission
+
+The reviewed MasterDNS caller verifies actual tunnel MTU probes after the
+ordinary resolver pretest. The locked dependency and target have seven
+file differences despite divergent histories. The scoped CI imports only
+the four reviewed library/probe/test files, preserving the locked example
+configs and documentation. Both the library and outbound package are tested
+with the race detector. The nested dependency gitlink remains unresolved
+until its full migration and compatibility are confirmed. No stable pin or
+release code changes in this stage.

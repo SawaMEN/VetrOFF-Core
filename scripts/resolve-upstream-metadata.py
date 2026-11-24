@@ -1889,6 +1889,45 @@ assert b"func TestH_GroupSequentialSharesTheDeadline(" in tests
 assert b"func TestH_GroupSequentialScoresOrderTheServers(" not in own
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate.rstrip() + b"\n\n" + tests)
 
+
+# MasterDNS's plain DNS pretest is insufficient: verify both small tunnel
+# MTU probes before admitting a resolver. Both sides added the package.
+# Keep the fork's imports and exact remaining behavior.
+path = "protocol/hiddify/masterdns/outbound.go"
+assert not git("ls-tree", data["base"], "--", path)
+own = checked_blob(data["patched_tree"], path, "0aecc9b3179aa130d0aada3f524b2e45f1633c5f")
+new = checked_blob(data["upstream"], path, "695de0b8b1f346be79119a2fba18cca3656edfe3")
+candidate = replace_once(own, b'\tmdns "masterdnsvpn-go/lib"\n',
+    b'\tmDNS "github.com/miekg/dns"\n\tmdns "masterdnsvpn-go/lib"\n')
+candidate = replace_once(candidate, b"\t\t\treturn dnspool.CheckAnswer(address, response, err)",
+    b"\t\t\tif err := dnspool.CheckAnswer(address, response, err); err != nil {\n\t\t\t\treturn err\n\t\t\t}\n\t\t\treturn h.probeTunnel(ctx, address)")
+i = new.index(b"// probeTunnel sends")
+j = new.index(b"// orDefault", i)
+candidate = replace_once(candidate, b"// orDefault", new[i:j] + b"// orDefault")
+# Check all non-import bytes against the exact reviewed upstream version.
+assert candidate[candidate.index(b"\nconst ("):] == new[new.index(b"\nconst ("):]
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "protocol/hiddify/masterdns/h_masterdns_test.go"
+assert not git("ls-tree", data["base"], "--", path)
+own = checked_blob(data["patched_tree"], path, "3e7b8de28dcf3d60addd08a5f7cbf4073bc55a95")
+new = checked_blob(data["upstream"], path, "2498946d59d66c355c56249e7e5ac525977ece6d")
+candidate = replace_once(own, b'\t"net"\n', b'\t"net"\n\t"strings"\n')
+candidate = replace_once(candidate, b'\t"github.com/stretchr/testify/require"\n',
+    b'\t"github.com/stretchr/testify/require"\n\t"masterdnsvpn-go/lib/testserver"\n')
+i = new.index(b"// startTunnelResolver")
+j = new.index(b"// With smart_pool", i)
+candidate = replace_once(candidate, b"// With smart_pool", new[i:j] + b"// With smart_pool")
+candidate = replace_once(candidate, b"// and after start the resolvers that answer the probe join the pool.",
+    b"// and after start the resolvers that answer the probe and carry the tunnel join the pool.")
+candidate = replace_once(candidate, b"\tanswering := startLocalDNS(t)",
+    b"\tanswering, key := startTunnelResolver(t, validOptions().Domains[0], true)")
+i = candidate.index(b"func TestH_MasterDNSSmartPool(t ")
+candidate = candidate[:i] + replace_once(candidate[i:], b"\toptions := validOptions()\n",
+    b"\toptions := validOptions()\n\toptions.Key = key\n")
+assert candidate[candidate.index(b"\nfunc validOptions()"):] == new[new.index(b"\nfunc validOptions()"):]
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"
