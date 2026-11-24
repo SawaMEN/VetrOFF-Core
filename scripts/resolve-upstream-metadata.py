@@ -385,7 +385,79 @@ for imp in (b"fmt", b"time", b"github.com/sagernet/sing/common/json/badoption"):
 assert plain == own, path
 resolutions[path] = new
 
-apply_reviewed(data, resolutions)
+# Core KeepTop delegates selection to the new sing-box lazy monitoring
+# implementation. Preserve the fork's multi-format profile parser, which
+# fixed startup from raw share links. The old reload-driven selection
+# implementation and its private tests are replaced by the new runtime tests.
+path = "v2/hcore/keep_top.go"
+own = checked_blob(patched, path, "95dbdba8804230cb63cf187932f96e9b7cb7a170")
+new = checked_blob(upstream, path, "360e0ac70763c6dd917ecee603df111ff60eaddd")
+start = own.index(b"\t// Profiles may contain share URIs")
+end = own.index(b"\tif err != nil {", start)
+parser = own[start:end]
+assert parser.count(b"static.HiddifyOptions") == 1
+assert b"config.ParseConfig(" in parser
+before = b"\tinput, err := config.ReadSingOptions(ctx, &config.ReadOptions{Content: in.ConfigContent, Path: in.ConfigPath})\n"
+assert new.count(before) == 1
+candidate = new.replace(before, parser.replace(b"static.HiddifyOptions", b"hopt"), 1)
+assert b"takeDelegatedSystemProxy(options)" in candidate
+assert b"config.ApplyKeepTop(options, hopt, candidates)" in candidate
+assert b"monitor.KeepTopSearching()" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "v2/hcore/keep_top_test.go"
+own = checked_blob(patched, path, "a740db84183773b590e799ca29b67aa88ea1be36")
+new = checked_blob(upstream, path, "408f99d0ee39c8b185f9d292dee04485a01d508e")
+# The old tests exercise private selection functions that no longer
+# exist. Preserve the fork's independently useful parser regression.
+regression = own[own.index(b"func TestBuildRunningConfigParsesImportedProfileFormats("):]
+assert regression.count(b"built, err := buildRunningConfig(") == 1
+regression = regression.replace(b"built, err := buildRunningConfig(", b"built, _, err := buildRunningConfig(", 1)
+assert b"naive share URL" in regression and b"trojan share URL" in regression and b"sing-box JSON" in regression
+marker = b'\t"github.com/sagernet/sing-box/common/monitoring"\n'
+assert new.count(marker) == 1
+candidate = new.replace(marker, marker + b'\t"github.com/sagernet/sing-box/experimental/libbox"\n', 1)
+candidate += b"\n" + regression
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Hot reload: keep the fork's protected BaseContext read and the upstream
+# delegated system-proxy bookkeeping. Capture the service pointer once,
+# instead of looking it up again during validation and application.
+path = "v2/hcore/hotreload.go"
+own = checked_blob(patched, path, "1a674d4334baef6056b3bf6228f2dcf1709e109f")
+new = checked_blob(upstream, path, "b57ba117624e3e4b7f852c0ce382da69039037e1")
+guard = b"\tstatic.stateLock.RLock()\n\tbaseCtx := static.BaseContext\n\tstatic.stateLock.RUnlock()\n\treturn HotReload(baseCtx, in)"
+assert guard in own
+before = b"\treturn HotReload(static.BaseContext, in)"
+assert new.count(before) == 1
+candidate = new.replace(before, guard, 1)
+before = b"\ttunChanged, err := static.startedService.Load().IsTunChanged(ctx, options)"
+after = b"\tss := static.startedService.Load()\n\tif ss == nil {\n\t\treturn MessageType_HOT_RELOAD_FAILED, errors.New(\"no running service to hot reload\")\n\t}\n\ttunChanged, err := ss.IsTunChanged(ctx, options)"
+assert candidate.count(before) == 1
+candidate = candidate.replace(before, after, 1)
+before = b"static.startedService.Load().HotReload(serviceContext(ctx), options)"
+assert candidate.count(before) == 1
+candidate = candidate.replace(before, b"ss.HotReload(serviceContext(ctx), options)", 1)
+for marker in (b"libbox.CheckConfigOptions(options)", b"engineApplying(options)",
+               b"engineApplied(err == nil)", b"recordDelegatedSystemProxy(delegatedProxy)",
+               b"rememberProxyDetails(options)", b"errTunChanged"):
+    assert marker in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Connectivity's clean textual merge may retain the old watcher call,
+# which would invoke the removed reload-driven KeepTop implementation.
+# The two upstream/fork versions have the same updateConnectivity return
+# contract. Remove only that exact obsolete call block, if present.
+path = "v2/hcore/connectivity.go"
+own = checked_blob(patched, path, "de989529def18c500af84a1f48d1327f18bf87f2")
+new = checked_blob(upstream, path, "07a01b8967eef986d6dbb4916076e49dcba9fd37")
+old_call = b"\t\tif state, ok := h.updateConnectivity(ctx); ok {\n\t\t\th.followKeepTop(state)\n\t\t}\n"
+new_call = b"\t\th.updateConnectivity(ctx)\n"
+assert own.count(old_call) == 1 and new.count(new_call) == 1
+clean = git("show", data["tentative_tree"] + ":" + path)
+assert clean in (new, new.replace(new_call, old_call, 1)), path
+core_clean = {path: new} if clean != new else {}
+apply_reviewed(data, resolutions, core_clean)
 
 repo = repo / "hiddify-sing-box"
 data = json.loads((report / "hiddify-sing-box.json").read_text())
