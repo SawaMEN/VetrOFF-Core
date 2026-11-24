@@ -384,3 +384,24 @@ Core and 134/166 sing-box (174/210 total), of which 165 are confirmed by
 source audit and 9 require the newer gate. Remaining Core paths expected:
 Makefile, docs/hiddifyrpc.md, go.mod, v2/config/builder.go. Full integration
 build and dependency promotion remain pending; stable pins unchanged.
+
+### Builder and native build recipe reconciliation
+
+Run 45480059452 passed the reviewed-source gate, confirming 40 Core and
+134 sing-box resolutions. The next candidate resolves builder.go, Makefile
+and docs/hiddifyrpc.md. The builder retains the fork's serialized snapshots,
+privacy policy, adaptive-network settings and resolved chain-stage handling,
+while incorporating native IPv6-only host adaptation, router validation,
+fake-IP cache persistence and adaptive processor defaults. On native desktop
+systems with IPv6 support, the TUN also captures IPv6 in IPv4-only DNS mode;
+Android/iOS retain their platform-specific address contract. The updated
+regression tests this distinction; traffic and leak testing on actual
+platforms remain required. The Makefile candidate retains pinned generators,
+Android API 24 and arm64 targets, web RPC builds and non-mutating module
+preparation; adopts upstream Windows launchers (plus the legacy CLI filename),
+Apple static Cronet tags and Linux library runpath. All old RPC documentation
+table-member names were checked against the newer source.
+Expected resolution count: 43/44 Core, 134/166 sing-box (177/210 total).
+174 are confirmed at source level; three await audit 45480444831.
+Core go.mod remains deliberately unresolved until the combined dependency
+candidate builds and passes regression tests. No stable pins changed.
