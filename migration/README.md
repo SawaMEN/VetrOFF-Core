@@ -364,3 +364,23 @@ Five further Core conflicts are submitted (36/44 expected, 8 remaining;
 170/210 total expected). The last fully confirmed source audit covered
 158/210; the newer 12 resolutions require CI. Runtime and integration
 verification remain pending; stable pins are unchanged.
+
+### Native bindings, settings and DNS/chain configuration
+
+Run 45478958857 passed the reviewed-source gate for protobuf and admin
+service reconciliation, confirming 31 Core and 134 sing-box resolutions.
+Run 45479211273 failed on the speed-test import-block whitespace comparison;
+commit efada1a corrects the comparison while still requiring all nonblank
+lines of the original tests to be retained.
+Four further Core paths are submitted: buildconfighelper.go, mobile.go,
+chain.go and dns_group_test.go. Retain validated settings snapshots and
+GenerateConfig, synchronize the temporary log-level timer with settings
+publication, preserve native Close errors and privacy bindings, add device
+memory hints and stopped callbacks. Retain the Android chain-stage and
+legacy-chain validation, preserve Psiphon pairing/region normalization,
+and combine DNS dependency-order and duplicate-member tests with upstream
+transport-order regressions. The expected candidate count is now 40/44
+Core and 134/166 sing-box (174/210 total), of which 165 are confirmed by
+source audit and 9 require the newer gate. Remaining Core paths expected:
+Makefile, docs/hiddifyrpc.md, go.mod, v2/config/builder.go. Full integration
+build and dependency promotion remain pending; stable pins unchanged.
