@@ -3790,6 +3790,32 @@ for path, sha, signature in (
     lifecycle_edit(b'\t"testing"\n', b'\t"testing"\n\t"testing/synctest"\n')
     # The original test body is retained verbatim before gofmt.
     assert body in candidate
+    if path == "route/h_read_pace_test.go":
+        # Audit 45489649503 confirmed both previous regressions, but the
+        # slowdown test read from the fast phase's residual receive queue.
+        # Use virtual time and finish draining it before the slow phase.
+        sig = b"func TestH_ReadPaceStopsWhenTheDownloadSlows(t *testing.T)"
+        original = function_blob(candidate, sig)
+        start = sig + b" {\n"
+        assert original.startswith(start) and original.endswith(b"\n}\n")
+        slow = original[len(start):-len(b"\n}\n")]
+        slow = replace_once(slow, b"\tkept()\n\tif pace.aloneFor != 0 {\n\t\tt.Skip(\"this machine is too busy to feed the connection evenly\")\n\t}\n", b"\tkept()\n\trequire.Zero(t, pace.aloneFor, \"the deterministic fast feed did not slow down\")\n")
+        slow = replace_once(slow, b"\t// now a trickle\n", b"""\t// Wait for the feeder to finish and consume every queued fast-phase byte
+\t// before measuring the response to the slow sender.
+\tsynctest.Wait()
+\tfor {
+\t\tconn.mu.Lock()
+\t\tpending := conn.waiting
+\t\tconn.mu.Unlock()
+\t\tif pending == 0 {
+\t\t\tbreak
+\t\t}
+\t\t_, err := pace.read(conn, buffer)
+\t\trequire.NoError(t, err)
+\t}
+\t// now a trickle
+""")
+        lifecycle_edit(original, start + b"\tsynctest.Test(t, func(t *testing.T) {\n" + slow + b"\n\t})\n}\n")
     compat[path] = subprocess.check_output(["gofmt"], input=candidate)
 
 # This file merged cleanly at the textual level, but the AWG constructor
