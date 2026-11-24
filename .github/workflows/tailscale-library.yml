@@ -44,6 +44,24 @@ jobs:
           go test -race -mod=mod -count=1 -timeout=3m -v ./types/key ./util/dnsname 2>&1 | tee ../tailscale-evidence/runtime.log
           grep -Fq -- '--- PASS: TestVetrOFFRawKeyRoundTrip ' ../tailscale-evidence/runtime.log
           grep -Fq -- '--- PASS: TestVetrOFFFQDNParent ' ../tailscale-evidence/runtime.log
+      - name: Test DERP admission and TUN return-path contracts
+        run: |
+          set -euo pipefail
+          src=.build/tailscale-library
+          test ! -e "$src/derp/derpserver/vetroff_admission_test.go"
+          test ! -e "$src/net/tstun/vetroff_return_path_test.go"
+          cp migration/tailscale-tests/admission_test.go "$src/derp/derpserver/vetroff_admission_test.go"
+          cp migration/tailscale-tests/return_path_test.go "$src/net/tstun/vetroff_return_path_test.go"
+          cd "$src"
+          go test -race -mod=mod -count=1 -timeout=3m -run '^TestVetrOFF(StaticClientAdmission|ReturnPathValidation|InputRequiresDevice)        if: always()
+        with:
+          name: tailscale-library-evidence
+          path: .build/tailscale-evidence/
+          if-no-files-found: warn
+ -v ./derp/derpserver ./net/tstun 2>&1 | tee ../tailscale-evidence/contracts.log
+          for name in TestVetrOFFStaticClientAdmission TestVetrOFFReturnPathValidation TestVetrOFFInputRequiresDevice; do
+            grep -Fq -- "--- PASS: $name " ../tailscale-evidence/contracts.log
+          done
       - uses: actions/upload-artifact@v4
         if: always()
         with:

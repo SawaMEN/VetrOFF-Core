@@ -752,3 +752,20 @@ nested library. It does not prove TUN, DERP or routing behavior is
 identical; the remaining divergent commits and platform behavior still
 require review. Tailscale remains unresolved. 205/210 candidate paths
 source-confirmed, five open. Stable pins remain unchanged.
+
+### Tailscale admission and TUN contract verification
+
+Independent run 45494877741 passed the 13 source-blob checks and both
+raw-key and DNS-name race regressions. The target DERP admission differs
+from the old fork: a configured static allowlist contributes a rejection
+for unlisted keys when no other admission mechanism accepts them. Preserve
+that fail-closed behavior instead of copying the old early-return loop.
+Three new offline regressions cover isolated static admission and key
+replacement, return-path headroom bounds and preservation of the active
+path after rejection, and input without a device. These tests do not
+establish actual packet delivery, combined admission-policy equivalence,
+or production network behavior. New tests are pending CI. The newer
+scoped audit 45494490133 reported an EdgeScan/WARP failure; its complete
+job log was not available yet. No speculative fix or stable pin change.
+205/210 source conflicts reviewed; five open. ROADMAP 36/53 including
+Adaptive Connect. Tailscale remains pending broader behavioral review.
