@@ -980,3 +980,17 @@ only those four paths into the tentative tree and export the reviewed
 patch and files. Remaining conflicts and unavailable dependencies are
 reported independently. The updated source choices are pending CI;
 no build or release can pass while sing and Soar pins are unavailable.
+
+### Partial update while upstream dependencies are unavailable
+
+Audit 45511591449 confirms all four full-update source conflicts are
+resolved; the two missing gitlinks remain the sole reported gate failure.
+Do not turn this failed full update into a successful release. The last
+upstream revision before the first missing dependency update is
+d43f078901de7091b9ea438dbf6a19af97209526 (four commits). Add a separate
+partial candidate test using the verified 0.0.4 tree and source archive.
+Check the seven upstream Go blobs, three-way merge normalized Go files,
+preserve fork documentation and dependency pins, and explicitly defer
+17 commits. Run the three exact upstream regression tests against the
+Core graph and compile the CLI with readonly modules. This is an
+independent test candidate, not a release or full v5 update. Pending CI.
