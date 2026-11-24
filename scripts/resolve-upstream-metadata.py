@@ -3183,6 +3183,54 @@ plain = replace_once(plain, b"for range 16 {", b"for range 8 {")
 assert plain == own
 resolutions[path] = new
 
+# Outbound manager: keep the fork's immutable slices and captured scope,
+# error returns instead of panic, and add upstream dependency checking
+# for endpoints plus per-outbound security classification.
+path = "adapter/outbound/manager.go"
+own = checked_blob(data["patched_tree"], path, "a56075c31237362da68b492af744061c5f337c58")
+new = checked_blob(data["upstream"], path, "46d31bc9d9c62e5bfd598a2861300bc42fb977ed")
+candidate = own
+lifecycle_edit(b"\tstarted                 bool\n", b"\tstarted                 bool\n\tinsecure map[string]string\n")
+lifecycle_edit(b"\t\toutboundByTag: make(map[string]adapter.Outbound),", b"\t\toutboundByTag: make(map[string]adapter.Outbound),\n\t\tinsecure: make(map[string]string),")
+before = lifecycle_section(own, b"\t\tvar dependBy []string\n", b"\t\tif len(dependBy)")
+lifecycle_edit(before, b"\t\tdependBy := m.dependents(tag)\n")
+helper = lifecycle_section(new, b"// dependents lists", b"func (m *Manager) Create(")
+helper = helper.replace(b"if common.Contains(outbound.Dependencies(), tag) {", b"if outbound.Tag() != tag && slices.Contains(outbound.Dependencies(), tag) {")
+lifecycle_edit(b"func (m *Manager) Create(", helper + b"func (m *Manager) Create(")
+lifecycle_edit(b"\tdelete(m.outboundByTag, tag)\n", b"\tdelete(m.outboundByTag, tag)\n\tdelete(m.insecure, tag)\n")
+lifecycle_edit(b"\tm.outboundByTag[tag] = outbound\n", b"\tm.outboundByTag[tag] = outbound\n\tm.insecure[tag] = option.InsecureReason(options)\n")
+# Reject duplicate configuration entries before creating a second outbound
+# when not running. A valid running replacement continues to use hot reload.
+lifecycle_edit(b"\toption.MigrateTLSFragment(options) // H", b'''	m.access.RLock()
+	_, duplicate := m.outboundByTag[tag]
+	started := m.started
+	m.access.RUnlock()
+	if duplicate && !started {
+		return E.New("duplicate outbound tag: ", tag)
+	}
+	option.MigrateTLSFragment(options) // H''')
+# The existing short declaration is valid: scope is new in this function.
+# Do not publish a nonexistent default tag on lookup failure.
+lifecycle_edit(b"\tm.defaultTag = tag\n\tif tag == \"\" {", b"\tif tag == \"\" {\n\t\tm.defaultTag = tag")
+lifecycle_edit(b"\tdefer m.access.Unlock()\n\tif m.defaultOutbound != outbound", b"\tdefer m.access.Unlock()\n\tm.defaultTag = tag\n\tif m.defaultOutbound != outbound")
+assert b"append(slices.Clone(m.outbounds), outbound)" in candidate
+assert b"adapter.CloseLate(scope, outbound)" in candidate
+assert b"m.endpoint.Endpoints()" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Tunnel server: upstream fixes lock leaks on unknown users and preserves
+# nonblocking full-queue eviction. Close a discarded connection when the
+# initial request write fails, rather than silently leaking it.
+path = "protocol/tunnel/server.go"
+own = checked_blob(data["patched_tree"], path, "d05fda52a3569fe3f7545b3a633bfcdddc673e64")
+new = checked_blob(data["upstream"], path, "9ccb83c2c2a92df7984133c9dfe19c335b308e57")
+candidate = new
+lifecycle_edit(b"\t\t\t\ts.logger.ErrorContext(ctx, err)\n\t\t\t\tcontinue", b"\t\t\t\ts.logger.ErrorContext(ctx, err)\n\t\t\t\tconn.Close()\n\t\t\t\tcontinue")
+assert b"ch, ok = s.conns[tunnelDestination]\n\t\t\ts.mtx.Unlock()" in candidate
+assert b"return E.New(\"user \", request.DestinationUUID, \" not found\")" in candidate
+assert b"case oldConn := <-ch:" in candidate and b"oldConn.Close()" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"
