@@ -155,6 +155,45 @@ probe() {
     echo "Combined candidate failed: $name" >&2
   fi
 }
+# Run exactly the same local protocol regressions in both main modules.
+# Go uses the main module's selected versions and replace directives, not
+# those of the imported sing-box module. Package import paths work in both.
+network_packages=(
+  github.com/sagernet/sing-box/protocol/tuic
+  github.com/sagernet/sing-box/protocol/shadowsocks
+  github.com/sagernet/sing-box/common/tls
+  github.com/sagernet/sing-box/transport/wireguard
+  github.com/sagernet/sing-box/transport/awg
+)
+network_tests=(
+  TestH_TUICUDPRelayMode
+  TestH_ShadowsocksXrayMethodNames
+  TestH_ShadowsocksXrayMethodNamesMatchCiphers
+  TestH_Shadowsocks2022ConcurrentFirstPayload
+  TestH_Shadowsocks2022HandshakeFailure
+  TestH_Shadowsocks2022HandshakeCancellation
+  TestH_ShadowsocksLegacyKeepsEarlyHandshake
+  TestH_RealityShortIDTooLong
+  TestH_UTLSFingerprintVersions
+  TestH_MTUProbeEchoRequest
+  TestH_MTUProbeFilter
+  TestH_MTUProbeAnswerTooBig
+  TestH_AwgReservedBytes
+)
+network_regressions() {
+  local name=$1
+  local pattern test
+  pattern=$(IFS='|'; printf '^(%s)$' "${network_tests[*]}")
+  probe "$name" go test -mod=mod -count=1 -timeout=5m \
+    -tags "$tags,with_utls" -ldflags '-checklinkname=0' -run "$pattern" -v \
+    "${network_packages[@]}"
+  for test in "${network_tests[@]}"; do
+    if ! grep -Fq -- "--- PASS: $test " "$report/combined-$name.log"; then
+      echo "Required network regression did not pass in $name: $test" >&2
+      failed=1
+    fi
+  done
+}
 # Verify the exact patched dependency independently of Core compilation.
 (
   cd "$mdns"
@@ -191,8 +230,10 @@ for name in TestSetInboundIPv4OnlyKeepsPlatformRoutePolicy TestShouldEnableIPv6 
 done
 probe core-warp-mtu-policy go test -mod=mod -count=1 -timeout=2m -tags "$tags" -ldflags '-checklinkname=0' -run '^TestVetrOFFWarpMTUDiscoveryPolicy$' -v ./v2/config
 grep -Fq -- '--- PASS: TestVetrOFFWarpMTUDiscoveryPolicy ' "$report/combined-core-warp-mtu-policy.log" || failed=1
+network_regressions core-network-regressions
 cd "$candidate/hiddify-sing-box"
 probe sing-modules go list -mod=mod -m all
+network_regressions sing-network-regressions
 probe route-regressions bash "$ROOT/scripts/test-reviewed-route.sh" --combined "$candidate/hiddify-sing-box"
 # Test the paired library and callers with the feature tags enabled.
 CGO_ENABLED=1 probe tailscale go test -race -mod=mod -count=1 -timeout=5m \

@@ -818,3 +818,19 @@ source pins across all three graphs. Two new verifier unit tests cover
 source identity and missing/mismatched pin detection. Other shared source
 differences remain diagnostic, not silently upgraded. Candidate only;
 new integration results and stable manifest promotion remain pending.
+
+### Exercise network dependency selections in both main modules
+
+Run 45500842915 passed the reviewed-source gate with the new AWG and
+OpenVPN pins; full integration is still pending. Add 13 named local
+regressions, verified present in both source revisions, to both the Core
+and sing-box main-module test contexts. Cover TUIC relay-mode validation,
+Shadowsocks naming and handshake concurrency/failure/cancellation,
+legacy handshake, Reality short-ID validation, uTLS fingerprints,
+WireGuard MTU packet handling and AWG reserved bytes. Require all 13
+explicit PASS markers in each graph (26 total). No remote VPN handshake
+or live platform traffic is claimed; this tests compatibility of the
+selected module graphs, not full protocol interoperability. No further
+version bumps are made until this evidence and the remaining Core tests
+are available. Stable pins and the 205/210 source review count remain
+unchanged.
