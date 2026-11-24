@@ -40,4 +40,6 @@ Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Cli
 - [ ] Wire connection budget into actual dial/close lifecycle and verify transport resource usage.
 - [x] Add bounded opt-in in-memory availability history and probe ordering candidate.
 - [ ] Bind process-local network/profile identities and existing probe lifecycle to history.
+- [x] Compose Adaptive Connect, MUX, pool and history into one lifecycle controller candidate.
+- [ ] Bind the composed controller to reviewed core selectors, network events and real transport cleanup.
 - [ ] Validate candidate builds and real network behavior before promotion.
