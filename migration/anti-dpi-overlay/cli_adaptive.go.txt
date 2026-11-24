@@ -18,12 +18,17 @@ var adaptivePolicyPath string
 var adaptiveSelectorTag string
 var adaptiveProbeURL string
 var adaptiveInterval time.Duration
+var adaptivePool=ac.DefaultPoolPolicy()
 
 func init() {
 	commandRun.Flags().StringVar(&adaptivePolicyPath,"anti-dpi-policy","","local Adaptive Connect v1 JSON policy (explicit opt-in)")
 	commandRun.Flags().StringVar(&adaptiveSelectorTag,"anti-dpi-selector","","plain TCP-only selector tag")
 	commandRun.Flags().StringVar(&adaptiveProbeURL,"anti-dpi-probe-url","","owned HTTPS 204 probe URL")
 	commandRun.Flags().DurationVar(&adaptiveInterval,"anti-dpi-interval",30*time.Second,"interval between completed adaptive probe cycles")
+	commandRun.Flags().BoolVar(&adaptivePool.Enabled,"anti-dpi-pool",false,"enable logical TCP connection budget")
+	commandRun.Flags().IntVar(&adaptivePool.MaxTotal,"anti-dpi-pool-total",64,"maximum logical connections")
+	commandRun.Flags().IntVar(&adaptivePool.MaxPerProfile,"anti-dpi-pool-profile",32,"maximum logical connections per profile")
+	commandRun.Flags().IntVar(&adaptivePool.MaxPending,"anti-dpi-pool-pending",8,"maximum pending dials")
 }
 
 // Local CLI flags are the consent boundary. They are deliberately not read
@@ -54,12 +59,15 @@ func readAdaptiveCLI(path,tag,endpoint string,interval time.Duration)(ac.Config,
 }
 
 func startAdaptiveCLI(ctx context.Context,instance *box.Box,p ac.Config,enabled bool) error {
-	if !enabled {return nil}
+	if !enabled {
+		if adaptivePool.Enabled {return errors.New("Anti-DPI pool requires enabled local Adaptive Connect policy")}
+		return nil
+	}
 	o,ok:=instance.Outbound().Outbound(adaptiveSelectorTag)
 	if !ok {return errors.New("Anti-DPI selector not found")}
 	s,ok:=o.(*group.Selector)
 	if !ok {return errors.New("Anti-DPI requires a plain selector")}
-	if err:=s.EnableAdaptive(ctx,p,true,adaptiveProbeURL);err!=nil {return err}
+	if err:=s.EnableAdaptiveWithPool(ctx,p,true,adaptiveProbeURL,adaptivePool,adaptivePool.Enabled);err!=nil {return err}
 	// A plain Selector has no own periodic URLTest scheduler. This is the
 	// sole owner for the selected plain group; it calls the existing worker
 	// rather than creating another health-test implementation. The first

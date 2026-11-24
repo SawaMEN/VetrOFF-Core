@@ -25,6 +25,8 @@ cp "$ROOT/migration/anti-dpi-overlay/selector_lifecycle.go.txt" "$sing/protocol/
 cp "$ROOT/migration/anti-dpi-overlay/selector_lifecycle_test.go.txt" "$sing/protocol/group/adaptive_lifecycle_test.go"
 cp "$ROOT/migration/anti-dpi-overlay/cli_adaptive.go.txt" "$tmp/core/cmd/adaptive_cli.go"
 cp "$ROOT/migration/anti-dpi-overlay/cli_adaptive_test.go.txt" "$tmp/core/cmd/adaptive_cli_test.go"
+cp "$ROOT/migration/anti-dpi-overlay/selector_pool.go.txt" "$sing/protocol/group/adaptive_pool.go"
+cp "$ROOT/migration/anti-dpi-overlay/selector_pool_test.go.txt" "$sing/protocol/group/adaptive_pool_test.go"
 python3 - "$sing/protocol/group/selector.go" "$sing/protocol/group/urltest.go" "$tmp/core/cmd/cmd_sing_run.go" <<'PY'
 import pathlib
 import sys
@@ -52,6 +54,10 @@ func (s *Selector) selectOutboundLocked(tag string) bool {''')
 replace_once('if s.selected.Swap(detour) == detour {', '''s.adaptiveSelectionRevision++
     if s.selected.Swap(detour) == detour {''')
 replace_once('func (s *Selector) Close() error {', 'func (s *Selector) Close() error {\n\ts.DisableAdaptive()')
+replace_once('func (s *Selector) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {', '''func (s *Selector) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+    if conn, err, handled := s.adaptiveBudgetDial(ctx, network, destination); handled {
+        return conn, err
+    }''')
 p.write_text(s)
 p = pathlib.Path(sys.argv[2])
 s = p.read_text()
@@ -81,7 +87,7 @@ replace_once('return instance, cancel, nil', '''if err := startAdaptiveCLI(ctx, 
 p.write_text(s)
 PY
 cd "$sing"
-gofmt -w protocol/group/selector.go protocol/group/urltest.go protocol/group/adaptive_selector*.go protocol/group/adaptive_urltest*.go protocol/group/adaptive_lifecycle*.go common/adaptiveconnect/*.go
+gofmt -w protocol/group/selector.go protocol/group/urltest.go protocol/group/adaptive_selector*.go protocol/group/adaptive_urltest*.go protocol/group/adaptive_lifecycle*.go protocol/group/adaptive_pool*.go common/adaptiveconnect/*.go
 export CGO_ENABLED=0
 go test -mod=mod -count=1 -ldflags '-checklinkname=0' ./common/adaptiveconnect ./protocol/group -run 'TestAntiDPI|TestController'
 

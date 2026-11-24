@@ -28,6 +28,9 @@ type AdaptiveSelectorOwner struct {
 	epoch atomic.Pointer[adaptiveEpoch]
 	members []adapter.Outbound
 	history *urltest.HistoryStorage
+	poolEnabled bool
+	dialCtx context.Context
+	cancelDial context.CancelFunc
 	running bool
 	closed bool
 }
@@ -35,6 +38,12 @@ type AdaptiveSelectorOwner struct {
 // EnableAdaptive is an explicit post-start API, not automatic configuration
 // import. The local app must grant consent independently of the subscription.
 func (s *Selector) EnableAdaptive(ctx context.Context,policy ac.Config,consent bool,endpoint string) error {
+	return s.EnableAdaptiveWithPool(ctx,policy,consent,endpoint,ac.DefaultPoolPolicy(),false)
+}
+
+// EnableAdaptiveWithPool adds explicit local consent for a logical TCP
+// connection budget on this one Selector; probes bypass the budget.
+func (s *Selector) EnableAdaptiveWithPool(ctx context.Context,policy ac.Config,consent bool,endpoint string,pool ac.PoolPolicy,poolConsent bool) error {
 	if err:=policy.Validate();err!=nil {return err}
 	if !policy.Enabled||!consent {s.DisableAdaptive();return nil}
 	s.adaptiveLifecycleMu.Lock()
@@ -42,22 +51,26 @@ func (s *Selector) EnableAdaptive(ctx context.Context,policy ac.Config,consent b
 	if s.adaptiveOwner!=nil {return errors.New("adaptive selector already enabled")}
 	b,members,err:=NewAdaptiveSelectorBinding(s,endpoint)
 	if err!=nil {return err}
-	return s.attachAdaptiveLocked(ctx,policy,b,members)
+	return s.attachAdaptivePoolLocked(ctx,policy,b,members,pool,poolConsent)
 }
 
 func (s *Selector) attachAdaptiveLocked(ctx context.Context,policy ac.Config,b *AdaptiveSelectorBinding,profiles []ac.Outbound) error {
+	return s.attachAdaptivePoolLocked(ctx,policy,b,profiles,ac.DefaultPoolPolicy(),false)
+}
+
+func (s *Selector) attachAdaptivePoolLocked(ctx context.Context,policy ac.Config,b *AdaptiveSelectorBinding,profiles []ac.Outbound,pool ac.PoolPolicy,poolConsent bool) error {
 	if ctx.Err()!=nil {return ctx.Err()}
 	if s.adaptiveOwner!=nil||b==nil||b.selector!=s||b.endpoint=="" {return errors.New("invalid adaptive attachment")}
 	cfg:=ac.DefaultControllerConfig()
 	cfg.Connect=policy
-	// Optional MUX, pool and history are not silently enabled here. Their
-	// actual transport bindings and local identities still need review.
-	c,err:=ac.NewController(cfg,ac.ControllerConsent{Connect:true},[]ac.RouteBinding{{Network:"tcp",Outbounds:profiles,Switcher:b}})
+	cfg.Pool=pool
+	// MUX and history remain disabled pending their actual bindings.
+	c,err:=ac.NewController(cfg,ac.ControllerConsent{Connect:true,Pool:poolConsent},[]ac.RouteBinding{{Network:"tcp",Outbounds:profiles,Switcher:b}})
 	if err!=nil {return err}
 	if c==nil {return errors.New("adaptive policy disabled")}
-	o:=&AdaptiveSelectorOwner{binding:b,controller:c,parent:ctx,history:urltest.NewHistoryStorage()}
+	o:=&AdaptiveSelectorOwner{binding:b,controller:c,parent:ctx,history:urltest.NewHistoryStorage(),poolEnabled:pool.Enabled&&poolConsent}
 	for _,p:=range profiles {o.members=append(o.members,b.members[p.Tag])}
-	if err=o.resetLocked(time.Now());err!=nil {c.Close();return err}
+	if err=o.resetLocked(time.Now());err!=nil {o.close();return err}
 	s.adaptiveOwner=o
 	return nil
 }
@@ -77,6 +90,8 @@ func (o *AdaptiveSelectorOwner) resetLocked(now time.Time) error {
 	if _,err:=o.controller.ResetNetwork(now,ac.HistoryKey{},map[string]string{"tcp":active.Tag()});err!=nil {return err}
 	ctx,cancel:=context.WithCancel(o.parent)
 	o.epoch.Store(&adaptiveEpoch{ctx:ctx,cancel:cancel})
+	if o.cancelDial!=nil {o.cancelDial()}
+	o.dialCtx,o.cancelDial=context.WithCancel(o.parent)
 	return nil
 }
 
@@ -155,6 +170,7 @@ func (o *AdaptiveSelectorOwner) manualSelect(tag string) bool {
 	if !ok {return false}
 	if !o.controller.ManualSelection("tcp",time.Now(),tag) {
 		o.closed=true
+		if o.cancelDial!=nil {o.cancelDial()}
 		o.controller.Close()
 	}
 	return true
@@ -183,6 +199,7 @@ func (o *AdaptiveSelectorOwner) close() {
 	defer o.mu.Unlock()
 	o.cancelEpoch()
 	o.closed=true
+	if o.cancelDial!=nil {o.cancelDial()}
 	o.controller.Close()
 }
 

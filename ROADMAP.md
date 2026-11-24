@@ -37,7 +37,8 @@ Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Cli
 - [x] Add opt-in Adaptive MUX policy for validated preconfigured TCP profiles.
 - [ ] Integrate actual profile validation and mux lifecycle into the selector owner.
 - [x] Add opt-in logical connection budget candidate with race-safe reservations.
-- [ ] Wire connection budget into actual dial/close lifecycle and verify transport resource usage.
+- [x] Wire optional logical TCP budget into Selector dial/close and interrupt lifecycle in overlay.
+- [ ] Verify integrated budget tests, real transport resource usage and broader routing coverage.
 - [x] Add bounded opt-in in-memory availability history and probe ordering candidate.
 - [ ] Bind process-local network/profile identities and existing probe lifecycle to history.
 - [x] Compose Adaptive Connect, MUX, pool and history into one lifecycle controller candidate.
