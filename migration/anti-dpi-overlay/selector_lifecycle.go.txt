@@ -59,13 +59,19 @@ func (s *Selector) attachAdaptiveLocked(ctx context.Context,policy ac.Config,b *
 }
 
 func (s *Selector) attachAdaptivePoolLocked(ctx context.Context,policy ac.Config,b *AdaptiveSelectorBinding,profiles []ac.Outbound,pool ac.PoolPolicy,poolConsent bool) error {
+	return s.attachAdaptiveMuxLocked(ctx,policy,b,profiles,pool,poolConsent,nil,false)
+}
+
+func (s *Selector) attachAdaptiveMuxLocked(ctx context.Context,policy ac.Config,b *AdaptiveSelectorBinding,profiles []ac.Outbound,pool ac.PoolPolicy,poolConsent bool,pair *[2]ac.MuxProfile,prefer bool) error {
 	if ctx.Err()!=nil {return ctx.Err()}
 	if s.adaptiveOwner!=nil||b==nil||b.selector!=s||b.endpoint=="" {return errors.New("invalid adaptive attachment")}
 	cfg:=ac.DefaultControllerConfig()
 	cfg.Connect=policy
 	cfg.Pool=pool
-	// MUX and history remain disabled pending their actual bindings.
-	c,err:=ac.NewController(cfg,ac.ControllerConsent{Connect:true,Pool:poolConsent},[]ac.RouteBinding{{Network:"tcp",Outbounds:profiles,Switcher:b}})
+	if err:=validateLiveMuxPair(b,profiles,pair);err!=nil {return err}
+	cfg.MuxEnabled=pair!=nil
+	cfg.PreferMultiplex=prefer
+	c,err:=ac.NewController(cfg,ac.ControllerConsent{Connect:true,Pool:poolConsent,Mux:pair!=nil},[]ac.RouteBinding{{Network:"tcp",Outbounds:profiles,Switcher:b,MuxPair:pair}})
 	if err!=nil {return err}
 	if c==nil {return errors.New("adaptive policy disabled")}
 	o:=&AdaptiveSelectorOwner{binding:b,controller:c,parent:ctx,history:urltest.NewHistoryStorage(),poolEnabled:pool.Enabled&&poolConsent}

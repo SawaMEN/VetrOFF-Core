@@ -1,0 +1,47 @@
+package group
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/sagernet/sing-box/adapter"
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+	"github.com/sagernet/sing-box/log"
+)
+
+type liveMuxTestOutbound struct {
+	antiDPITestOutbound
+	mux bool
+}
+func (o *liveMuxTestOutbound) MultiplexEnabled() bool {return o.mux}
+
+func TestAntiDPILiveMuxSelection(t *testing.T) {
+	s:=antiDPITestSelector()
+	s.logger=log.NewNOPFactory().Logger()
+	s.outbounds["a"]=&liveMuxTestOutbound{antiDPITestOutbound:antiDPITestOutbound{tag:"a",kind:"vless"}}
+	s.outbounds["b"]=&liveMuxTestOutbound{antiDPITestOutbound:antiDPITestOutbound{tag:"b",kind:"vless"},mux:true}
+	s.selected.Store(s.outbounds["a"])
+	b,profiles,err:=newAdaptiveSelectorBinding(s,func(_ context.Context,o adapter.Outbound)error{
+		if o.Tag()=="a" {return errors.New("unavailable")}
+		return nil
+	})
+	if err!=nil {t.Fatal(err)}
+	b.endpoint="https://example.com/204"
+	pair:=[2]ac.MuxProfile{
+		{Outbound:profiles[0],PairKey:"local",Protocol:"vless"},
+		{Outbound:profiles[1],PairKey:"local",Protocol:"vless",Multiplex:true,MultiplexProtocol:"yamux",ServerCompatible:true},
+	}
+	bad:=pair
+	bad[1].Multiplex=false
+	if err:=validateLiveMuxPair(b,profiles,&bad);err==nil {t.Fatal("runtime mismatch accepted")}
+	p:=ac.DefaultConfig()
+	p.Enabled=true
+	p.FailureThreshold=1
+	p.RecoveryThreshold=1
+	p.CooldownSeconds=0
+	if err=s.attachAdaptiveMuxLocked(context.Background(),p,b,profiles,ac.DefaultPoolPolicy(),false,&pair,false);err!=nil {t.Fatal(err)}
+	t.Cleanup(s.DisableAdaptive)
+	d,err:=s.RunAdaptiveCycle(context.Background())
+	if err!=nil||d.Target!="b"||s.Selected("tcp").Tag()!="b" {t.Fatal(d,err)}
+}

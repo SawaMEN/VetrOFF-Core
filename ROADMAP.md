@@ -35,7 +35,8 @@ Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Cli
 - [ ] Connect diagnostics to platform-bound DNS and sockets, uTLS profiles and connectivity report import.
 - [ ] Review and integrate additional DPI-CH-specific diagnostic tests.
 - [x] Add opt-in Adaptive MUX policy for validated preconfigured TCP profiles.
-- [ ] Integrate actual profile validation and mux lifecycle into the selector owner.
+- [x] Add opt-in CLI typed profile comparison and live MUX state validation to the selector owner for plain VLESS/Trojan TCP pairs.
+- [ ] Confirm integrated MUX tests and real compatible server behavior; review additional transports.
 - [x] Add opt-in logical connection budget candidate with race-safe reservations.
 - [x] Wire optional logical TCP budget into Selector dial/close and interrupt lifecycle in overlay.
 - [ ] Verify integrated budget tests, real transport resource usage and broader routing coverage.

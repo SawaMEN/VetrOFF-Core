@@ -27,6 +27,10 @@ cp "$ROOT/migration/anti-dpi-overlay/cli_adaptive.go.txt" "$tmp/core/cmd/adaptiv
 cp "$ROOT/migration/anti-dpi-overlay/cli_adaptive_test.go.txt" "$tmp/core/cmd/adaptive_cli_test.go"
 cp "$ROOT/migration/anti-dpi-overlay/selector_pool.go.txt" "$sing/protocol/group/adaptive_pool.go"
 cp "$ROOT/migration/anti-dpi-overlay/selector_pool_test.go.txt" "$sing/protocol/group/adaptive_pool_test.go"
+cp "$ROOT/migration/anti-dpi-overlay/cli_mux.go.txt" "$tmp/core/cmd/adaptive_mux.go"
+cp "$ROOT/migration/anti-dpi-overlay/cli_mux_test.go.txt" "$tmp/core/cmd/adaptive_mux_test.go"
+cp "$ROOT/migration/anti-dpi-overlay/selector_mux.go.txt" "$sing/protocol/group/adaptive_mux.go"
+cp "$ROOT/migration/anti-dpi-overlay/selector_mux_test.go.txt" "$sing/protocol/group/adaptive_mux_test.go"
 python3 - "$sing/protocol/group/selector.go" "$sing/protocol/group/urltest.go" "$tmp/core/cmd/cmd_sing_run.go" <<'PY'
 import pathlib
 import sys
@@ -78,7 +82,15 @@ replace_once('func create() (*box.Box, context.CancelFunc, error) {', '''func cr
     if err != nil {
         return nil, nil, err
     }''')
-replace_once('return instance, cancel, nil', '''if err := startAdaptiveCLI(ctx, instance, adaptivePolicy, adaptiveEnabled); err != nil {
+replace_once('ctx, cancel := context.WithCancel(globalCtx)', '''muxPair, err := prepareAdaptiveMux(options.Outbounds, adaptiveSelectorTag, adaptiveMux, adaptiveMuxPrefer)
+    if err != nil {
+        return nil, nil, err
+    }
+    if muxPair != nil && !adaptiveEnabled {
+        return nil, nil, E.New("adaptive MUX requires enabled local policy")
+    }
+    ctx, cancel := context.WithCancel(globalCtx)''')
+replace_once('return instance, cancel, nil', '''if err := startAdaptiveCLI(ctx, instance, adaptivePolicy, adaptiveEnabled, muxPair); err != nil {
         cancel()
         _ = instance.Close()
         return nil, nil, E.Cause(err, "start Anti-DPI")
@@ -87,12 +99,12 @@ replace_once('return instance, cancel, nil', '''if err := startAdaptiveCLI(ctx, 
 p.write_text(s)
 PY
 cd "$sing"
-gofmt -w protocol/group/selector.go protocol/group/urltest.go protocol/group/adaptive_selector*.go protocol/group/adaptive_urltest*.go protocol/group/adaptive_lifecycle*.go protocol/group/adaptive_pool*.go common/adaptiveconnect/*.go
+gofmt -w protocol/group/selector.go protocol/group/urltest.go protocol/group/adaptive_selector*.go protocol/group/adaptive_urltest*.go protocol/group/adaptive_lifecycle*.go protocol/group/adaptive_pool*.go protocol/group/adaptive_mux*.go common/adaptiveconnect/*.go
 export CGO_ENABLED=0
 go test -mod=mod -count=1 -ldflags '-checklinkname=0' ./common/adaptiveconnect ./protocol/group -run 'TestAntiDPI|TestController'
 
 cd "$tmp/core"
-gofmt -w cmd/adaptive_cli*.go cmd/cmd_sing_run.go
+gofmt -w cmd/adaptive_cli*.go cmd/adaptive_mux*.go cmd/cmd_sing_run.go
 need make
 tags=$(cli_tags)
 go test -mod=mod -count=1 -tags "$tags" -ldflags '-checklinkname=0' ./cmd -run 'TestAntiDPICLI'
