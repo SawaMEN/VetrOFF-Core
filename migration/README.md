@@ -118,3 +118,15 @@ was equivalent WaitGroup syntax). The actual scanning implementation now
 lives in edgescan. Scoped tests cover the shared engine and WARP host
 classification, not the complete WARP endpoint migration. The original
 stable dependency pins and source patch series are unchanged.
+
+### MASQUE packet and scanner lifecycle reconciliation
+
+Run 45454746442 passed all scoped checks, including MasterDNS, edgescan,
+WARP classification and Tailscale. The MASQUE outbound resolution restores
+upstream scanner shutdown and synchronized scanner publication, and the
+IP-only UDP writer that avoids a netstack panic on domain destinations.
+The locked peer metadata API (`IsDomain`) remains unchanged. A reverse
+transformation asserts that all other original outbound behavior survives.
+The isolated regression overlays only the packet method and upstream test
+on the locked scanner. Full scanner lifecycle and WARP endpoint integration
+still require a combined candidate build; the stable pins are unchanged.

@@ -1973,6 +1973,32 @@ assert b"return edgescan.Scan(ctx, logger, request)" in engine
 assert b"wait.Add(1)" in shared and b"defer wait.Done()" in shared
 resolutions[path] = None
 
+
+# MASQUE: retain the locked peer metadata API, but adopt the new scanner
+# lifecycle and IP-only packet writer. All other differences were marker
+# formatting; the exact fork body is verified before migration.
+path = "protocol/masque/outbound.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("4dd454d30afcec8fd0cca20627cc45230b894bdb",
+     "c486e4016f816bf6b826e761e5a13a4f39f6962b",
+     "59b6993d5bb8fa1157605f800e00a27741796f11")))
+candidate = replace_once(new, b"peer.IsFqdn()", b"peer.IsDomain()")
+plain = replace_once(candidate, b'\t"github.com/sagernet/sing-box/common/iponly" //H\n', b"")
+plain = replace_once(plain, b"\t\tif scanner != nil { //H\n\t\t\tscanner.Close() //H\n\t\t} //H\n", b"")
+plain = replace_once(plain, b"\t\tw.tunnelAccess.Lock() //H\n\t\tw.scanner = scanner\n\t\tw.tunnelAccess.Unlock() //H\n", b"\t\tw.scanner = scanner\n")
+plain = replace_once(plain, b"\n\tif scanner := w.currentScanner(); scanner != nil { //H: its searches end with it\n\t\tscanner.Close() //H\n\t} //H\n", b"")
+signature = b"func (w *Outbound) ListenPacketWithDestination("
+plain = replace_once(plain, function_blob(plain, signature), function_blob(own, signature))
+plain = replace_once(plain, b"\t\tif scanner := w.currentScanner(); scanner != nil { //H\n\t\t\tscanner.DetectNetwork(true)",
+    b"\t\tif w.scanner != nil {\n\t\t\tw.scanner.DetectNetwork()")
+def normalized_masque(blob):
+    return subprocess.check_output(["gofmt"], input=blob.replace(b"//H", b"// H"))
+assert normalized_masque(plain) == normalized_masque(own), path
+assert b"iponly.NewPacketConn" in candidate
+assert b"scanner.Close()" in candidate
+resolutions[path] = normalized_masque(candidate)
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"
