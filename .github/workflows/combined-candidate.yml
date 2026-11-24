@@ -1,0 +1,42 @@
+name: Combined candidate integration
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/test-combined-candidate.sh'
+      - 'scripts/prepare-dependency-candidates.py'
+      - '.github/workflows/combined-candidate.yml'
+permissions:
+  contents: read
+concurrency:
+  group: combined-candidate-main
+  cancel-in-progress: true
+jobs:
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Validate candidate scripts
+        run: |
+          bash -n scripts/test-combined-candidate.sh
+          python3 -m py_compile scripts/*.py
+      - name: Audit reviewed candidate trees and manifests
+        run: bash scripts/audit-upstream-merge.sh 4e5a9a357003d0a995360586702fd24c53042e3f
+      - name: Build and test combined candidate in isolation
+        run: bash scripts/test-combined-candidate.sh
+      - name: Upload candidate diagnostics, not release binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: combined-candidate-diagnostics
+          path: .build/upstream-merge-audit/
+          if-no-files-found: warn
+          retention-days: 21
