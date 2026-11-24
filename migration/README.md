@@ -736,3 +736,19 @@ Docker test compilation in that older run still used v27.3.1; the current
 manifest already proposes v28.5.2. The source gate of run 45493415836
 passed for the prior 205/210 candidate; five conflicts remain open.
 No stable pins change until the integrated tests pass.
+
+### Independent Tailscale API compatibility gate
+
+Run 45494490133 passed the reviewed-source gate after the MTU changes;
+scoped runtime and combined integration results are still pending.
+Review of the Tailscale target confirms source-level counterparts for
+several late fork backports: TUN input and return-path interfaces,
+NetMapNoPeers, MagicDNS export, node backend, per-node network hooks,
+raw key conversions, DNS parent names and DERP configuration hooks.
+The new independent workflow verifies 13 exact target blobs and runs
+raw-key and DNS-name regression tests under the race detector. This
+avoids replacing a pending combined integration run while reviewing the
+nested library. It does not prove TUN, DERP or routing behavior is
+identical; the remaining divergent commits and platform behavior still
+require review. Tailscale remains unresolved. 205/210 candidate paths
+source-confirmed, five open. Stable pins remain unchanged.

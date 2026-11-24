@@ -1,0 +1,52 @@
+name: Tailscale nested compatibility
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/audit-tailscale-library.py'
+      - 'migration/tailscale-tests/**'
+      - '.github/workflows/tailscale-library.yml'
+permissions:
+  contents: read
+jobs:
+  compatibility:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GOWORK: 'off'
+      GOTOOLCHAIN: local
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Fetch exact nested dependency and verify reviewed source
+        run: |
+          mkdir -p .build/tailscale-library .build/tailscale-evidence
+          git -C .build/tailscale-library init -q
+          git -C .build/tailscale-library fetch --no-tags --depth=1 https://github.com/hiddify/tailscale.git 4138b20dfb9f5852d043abd8bf9da6c29d5ee53b
+          git -C .build/tailscale-library checkout --detach FETCH_HEAD
+          python3 scripts/audit-tailscale-library.py .build/tailscale-library .build/tailscale-evidence/source.json
+      - name: Test raw-key and DNS-name compatibility
+        run: |
+          set -euo pipefail
+          src=.build/tailscale-library
+          test ! -e "$src/types/key/vetroff_raw_key_test.go"
+          test ! -e "$src/util/dnsname/vetroff_parent_test.go"
+          cp migration/tailscale-tests/raw_key_test.go "$src/types/key/vetroff_raw_key_test.go"
+          cp migration/tailscale-tests/parent_test.go "$src/util/dnsname/vetroff_parent_test.go"
+          cd "$src"
+          go test -race -mod=mod -count=1 -timeout=3m -v ./types/key ./util/dnsname 2>&1 | tee ../tailscale-evidence/runtime.log
+          grep -Fq -- '--- PASS: TestVetrOFFRawKeyRoundTrip ' ../tailscale-evidence/runtime.log
+          grep -Fq -- '--- PASS: TestVetrOFFFQDNParent ' ../tailscale-evidence/runtime.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tailscale-library-evidence
+          path: .build/tailscale-evidence/
+          if-no-files-found: warn
