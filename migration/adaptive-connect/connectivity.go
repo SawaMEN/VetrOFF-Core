@@ -70,6 +70,14 @@ func measured(start time.Time,err error) ConnectivityStage {
 	return ConnectivityStage{Outcome:connectivityOutcome(err),DurationMS:time.Since(start).Milliseconds()}
 }
 
+// Socket closure can hide cancellation behind a generic I/O error. Preserve
+// the context cause when an operation actually failed; a completed success
+// is not retrospectively changed into a timeout.
+func diagnosticOperationError(ctx context.Context,err error) error {
+	if err!=nil&&ctx.Err()!=nil {return ctx.Err()}
+	return err
+}
+
 func connectivityAddress(ctx context.Context,path DiagnosticPath,ip netip.Addr,host string,config *tls.Config) AddressConnectivity {
 	skipped:=ConnectivityStage{Outcome:"not-tested"}
 	r:=AddressConnectivity{IP:ip.String(),TCP:skipped,TLS:skipped,HTTP:skipped}
@@ -79,13 +87,14 @@ func connectivityAddress(ctx context.Context,path DiagnosticPath,ip netip.Addr,h
 	conn,err:=path.DialContext(ctx,"tcp",net.JoinHostPort(ip.String(),"443"))
 	if conn!=nil { defer conn.Close() }
 	if err==nil && conn==nil { err=errors.New("missing connection") }
+	err=diagnosticOperationError(ctx,err)
 	r.TCP=measured(start,err)
 	if r.TCP.Outcome=="certificate-error"||r.TCP.Outcome=="not-found" { r.TCP.Outcome="error" }
 	if err!=nil { return r }
 	// HTTP I/O is bounded by both the context and a connection deadline.
 	deadline,_:=ctx.Deadline()
 	if err=conn.SetDeadline(deadline);err!=nil {
-		r.TLS=ConnectivityStage{Outcome:"error"}
+		r.TLS=ConnectivityStage{Outcome:connectivityOutcome(diagnosticOperationError(ctx,err))}
 		return r
 	}
 	stop:=context.AfterFunc(ctx,func(){ _=conn.Close() })
@@ -95,7 +104,7 @@ func connectivityAddress(ctx context.Context,path DiagnosticPath,ip netip.Addr,h
 	cfg.NextProtos=[]string{"http/1.1"}
 	start=time.Now()
 	client:=tls.Client(conn,cfg)
-	err=client.HandshakeContext(ctx)
+	err=diagnosticOperationError(ctx,client.HandshakeContext(ctx))
 	r.TLS=measured(start,err)
 	if r.TLS.Outcome=="not-found" { r.TLS.Outcome="error" }
 	if err!=nil { return r }
@@ -115,6 +124,7 @@ func connectivityAddress(ctx context.Context,path DiagnosticPath,ip netip.Addr,h
 			}
 		}
 	}
+	err=diagnosticOperationError(ctx,err)
 	r.HTTP=measured(start,err)
 	if r.HTTP.Outcome=="certificate-error"||r.HTTP.Outcome=="not-found" { r.HTTP.Outcome="error" }
 	return r
@@ -150,12 +160,14 @@ func (t *SiberianTester) CheckConnectivity(ctx context.Context,path DiagnosticPa
 		start:=time.Now()
 		dnsCtx,stop:=context.WithTimeout(ctx,3*time.Second)
 		ips,err:=path.LookupNetIP(dnsCtx,family,host+".")
+		err=diagnosticOperationError(dnsCtx,err)
 		stop()
 		item.DNS=measured(start,err)
 		if item.DNS.Outcome=="certificate-error" { item.DNS.Outcome="error" }
 		if err:=checkPath();err!=nil { return r,err }
 		if err!=nil {
 			r.Families=append(r.Families,item)
+			if item.DNS.Outcome=="canceled" {return r,context.Canceled}
 			continue
 		}
 		// Reject the whole family if any DNS answer is unsafe or mismatched;
@@ -187,7 +199,12 @@ func (t *SiberianTester) CheckConnectivity(ctx context.Context,path DiagnosticPa
 				r.Families=append(r.Families,item)
 				return r,err
 			}
-			item.Addresses=append(item.Addresses,connectivityAddress(ctx,path,ip,host,&tls.Config{MinVersion:tls.VersionTLS12}))
+			address:=connectivityAddress(ctx,path,ip,host,&tls.Config{MinVersion:tls.VersionTLS12})
+			item.Addresses=append(item.Addresses,address)
+			if address.TCP.Outcome=="canceled"||address.TLS.Outcome=="canceled"||address.HTTP.Outcome=="canceled" {
+				r.Families=append(r.Families,item)
+				return r,context.Canceled
+			}
 			if err:=checkPath();err!=nil {
 				r.Families=append(r.Families,item)
 				return r,err

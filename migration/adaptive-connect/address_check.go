@@ -39,7 +39,8 @@ func (t *SiberianTester) CheckAddress(ctx context.Context,path DiagnosticPath,re
 	if err:=ctx.Err();err!=nil {return AddressReport{},err}
 	if err:=t.begin();err!=nil {return AddressReport{},err}
 	defer t.finish()
-	ctx,cancel:=context.WithTimeout(ctx,5*time.Second)
+	parent:=ctx
+	ctx,cancel:=context.WithTimeout(parent,5*time.Second)
 	defer cancel()
 	r:=AddressReport{Version:1,Kind:"address-connectivity",Scope:scope,Host:host,CheckedAt:time.Now().UTC()}
 	if path.Generation()!=generation||path.Scope()!=scope {return r,errors.New("diagnostic path changed")}
@@ -48,7 +49,10 @@ func (t *SiberianTester) CheckAddress(ctx context.Context,path DiagnosticPath,re
 	if path.Generation()!=generation||path.Scope()!=scope {return r,errors.New("diagnostic path changed")}
 	// A bounded endpoint timeout is itself a measured result; external
 	// cancellation is not a complete observation.
-	if err:=ctx.Err();errors.Is(err,context.Canceled) {return r,err}
+	if err:=parent.Err();err!=nil {return r,err}
+	if address.TCP.Outcome=="canceled"||address.TLS.Outcome=="canceled"||address.HTTP.Outcome=="canceled" {
+		return r,context.Canceled
+	}
 	r.Complete=true
 	return r,nil
 }

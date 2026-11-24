@@ -152,6 +152,7 @@ func diagnosticAttemptWithHandshake(ctx context.Context,path DiagnosticPath,ip n
 			err=handshake(ctx,conn,host)
 		}
 	}
+	err=diagnosticOperationError(ctx,err)
 	if err!=nil {
 		a.Outcome="error"
 		var ne net.Error

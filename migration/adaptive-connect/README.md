@@ -139,3 +139,7 @@ The Anti-DPI candidate workflow now compiles a separate Linux amd64 binary after
 ### Executable local smoke gate
 
 The candidate artifact now requires five executable smoke cases: ordinary startup with no Anti-DPI flags, explicitly disabled policy, incomplete flags rejected, optional pool rejected without enabled policy, and enabled policy rejected for a direct outbound. Successful cases transfer a real HTTP request through the candidate's loopback mixed proxy to a local HTTP server and terminate with SIGTERM. No real VPN server, TUN or external test endpoint is used. The script uses only Python's standard library, a private temporary directory and local listener sockets; it never replaces an installed binary. The artifact includes the smoke script, its output and a Russian practical test guide. Passing this gate demonstrates the disabled path and startup validation, not live adaptive switching or a physical-network diagnostic.
+
+### Diagnostic cancellation regression
+
+Single-address reports now distinguish a diagnostic-owned endpoint timeout (a measured outcome) from a canceled or expired caller context (incomplete report). TCP/TLS/HTTP/DNS operation failures preserve the active context cause instead of reporting generic socket-close errors. Connectivity stops after a canceled stage and retains the collected partial result. Existing v1 report fields are unchanged. Synthetic tests cover parent cancellation, parent deadline, no additional dials and successful operation preservation. CI verification remains required.
