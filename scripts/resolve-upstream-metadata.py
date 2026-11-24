@@ -3350,6 +3350,196 @@ for path, own_sha, new_sha, marker, credits in (
     assert b"storage_dialer" in own and b"https://github.com/XTLS/Xray-core" in new
     resolutions[path] = replace_once(own, marker, credits + marker)
 
+# Psiphon controller: upstream reconnect loop needs a restartable attempt
+# context, but the instance itself must be permanently closed and its
+# datastore must not be released until both startup and controller exit.
+path = "protocol/psiphon/psiphon.go"
+own = checked_blob(data["patched_tree"], path, "4e672bc2b1aada8fe557dda997748c772e124707")
+new = checked_blob(data["upstream"], path, "3119778e48125997b0eab0bc7973634bc27237e7")
+candidate = new
+lifecycle_edit(b"\taccess          sync.Mutex\n", b"\taccess          sync.Mutex\n\tlifeMu sync.Mutex\n\tcloseMu sync.Mutex\n\tclosed atomic.Bool\n\tinstanceCancel context.CancelFunc\n")
+lifecycle_edit(b"\tctl := p.controller.Load()\n\tif ctl == nil {\n\t\treturn nil, errors.New", b"\tif p.closed.Load() {\n\t\treturn nil, net.ErrClosed\n\t}\n\tctl := p.controller.Load()\n\tif ctl == nil {\n\t\treturn nil, errors.New")
+lifecycle_edit(b"func (p *Psiphon) PreStart() error {\n", b"""func (p *Psiphon) PreStart() error {
+	p.lifeMu.Lock()
+	defer p.lifeMu.Unlock()
+	if p.closed.Load() {
+		return net.ErrClosed
+	}
+	if p.dataStoreOpened {
+		return nil
+	}
+""")
+lifecycle_edit(b"os.MkdirAll(p.config.DataRootDirectory, 0o755)", b"os.MkdirAll(p.config.DataRootDirectory, 0o700)")
+lifecycle_edit(b"return p.controller.Load() != nil && p.connected.Load()", b"return !p.closed.Load() && p.controller.Load() != nil && p.connected.Load()")
+lifecycle_edit(function_blob(new, b"func (p *Psiphon) Close()"), b"""func (p *Psiphon) Close() error {
+	p.closeMu.Lock()
+	defer p.closeMu.Unlock()
+	p.closed.Store(true)
+	if p.instanceCancel != nil {
+		p.instanceCancel()
+	}
+	p.stop()
+	p.lifeMu.Lock()
+	defer p.lifeMu.Unlock()
+	p.waitStopped()
+	stopListeningNotices(p)
+	p.closeDataStore()
+	p.connected.Store(false)
+	return nil
+}""")
+lifecycle_edit(b"func NewPsiphon(ctx context.Context, l logger.ContextLogger, config *psiphon.Config, tag string) (*Psiphon, error) {\n\tp := Psiphon{", b"func NewPsiphon(ctx context.Context, l logger.ContextLogger, config *psiphon.Config, tag string) (*Psiphon, error) {\n\tctx, instanceCancel := context.WithCancel(ctx)\n\tp := Psiphon{\n\t\tinstanceCancel: instanceCancel,")
+lifecycle_edit(b"func (p *Psiphon) Start() error {\n\tctx, cancel := context.WithCancel(p.ctx)", b"""func (p *Psiphon) Start() (err error) {
+	p.lifeMu.Lock()
+	defer p.lifeMu.Unlock()
+	if p.closed.Load() {
+		return net.ErrClosed
+	}
+	p.access.Lock()
+	previous := p.runDone
+	p.access.Unlock()
+	if previous != nil {
+		select {
+		case <-previous:
+		default:
+			return errors.New("Psiphon controller still running")
+		}
+	}
+	ctx, cancel := context.WithCancel(p.ctx)
+	defer func() {
+		if err != nil {
+			cancel()
+			p.waitStopped()
+			stopListeningNotices(p)
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return err
+	}""")
+lifecycle_edit(b'if err := listenNotices(p, func(event NoticeEvent) { p.onNotice(event, signal) }); err != nil {', b'''if err := listenNotices(p, func(event NoticeEvent) {
+		if ctx.Err() == nil && !p.closed.Load() {
+			p.onNotice(event, signal)
+		}
+	}); err != nil {''')
+lifecycle_edit(b"\tp.controller.Store(controller)\n", b"\tif err := ctx.Err(); err != nil {\n\t\treturn err\n\t}\n\tp.controller.Store(controller)\n")
+lifecycle_edit(b"\tcase <-connectedSignal:\n\t\tp.logger.Debug", b"\tcase <-connectedSignal:\n\t\tif err := ctx.Err(); err != nil {\n\t\t\treturn err\n\t\t}\n\t\tp.logger.Debug")
+lifecycle_edit(b"// Wait blocks until the controller started last stops", b"""// waitStopped is used before changing config for a replacement attempt.
+func (p *Psiphon) waitStopped() {
+	p.access.Lock()
+	done := p.runDone
+	p.access.Unlock()
+	if done != nil {
+		<-done
+	}
+}
+
+// Wait blocks until the controller started last stops""")
+lifecycle_edit(b"func (p *Psiphon) setConnected(ok bool) {\n", b"func (p *Psiphon) setConnected(ok bool) {\n\tif p.closed.Load() {\n\t\treturn\n\t}\n")
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+# The fork extracted these functions to notice.go; upstream now defines
+# them in psiphon.go. Remove the redundant file only from the candidate.
+path = "protocol/psiphon/notice.go"
+notice = checked_blob(data["patched_tree"], path, "b104be00e5f6f5eaac3632b989890b84e869fbea")
+assert git("show", data["tentative_tree"] + ":" + path) == notice
+assert b"func installNoticeHub()" in notice and b"func installNoticeHub()" in candidate
+compat[path] = None
+
+# Preserve Android socket protection, explicit detour validation, Conduit
+# and separate data directories. The bridge is created before Commit.
+path = "protocol/psiphon/outbound.go"
+own = checked_blob(data["patched_tree"], path, "be12d51cf8a7cd56dae007c62247adf01302ae05")
+new = checked_blob(data["upstream"], path, "ca71acc89e5f4160f2dedd3bf696bc4e7502b158")
+candidate = new
+lifecycle_edit(b"\tmu          sync.RWMutex\n", b"\tmu          sync.RWMutex\n\tlifeMu sync.Mutex\n\tclosed bool\n")
+lifecycle_edit(b"\tctx, cancel := context.WithCancel(ctx)\n", b'''	if options.Detour != "" && config.UpstreamProxyURL != "" {
+		return nil, E.New("Psiphon detour conflicts with upstream_proxy_url")
+	}
+	if config.InproxyClientPersonalCompartmentID != "" {
+		if options.Detour != "" || config.UpstreamProxyURL != "" {
+			return nil, E.New("Conduit pairing requires a direct Psiphon transport")
+		}
+		if manager := service.FromContext[adapter.NetworkManager](ctx); manager != nil && manager.DefaultOptions().RoutingMark != 0 {
+			return nil, E.New("Conduit pairing does not support root routing marks")
+		}
+	}
+	if platform := service.FromContext[adapter.PlatformInterface](ctx); platform != nil && platform.UsePlatformAutoDetectInterfaceControl() {
+		config.DeviceBinder = psiphonDeviceBinder{platform}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+''')
+lifecycle_edit(b"if scannerEnabled(options) {", b'if scannerEnabled(options) && config.InproxyClientPersonalCompartmentID == "" && config.UpstreamProxyURL == "" {')
+lifecycle_edit(b"func (h *Outbound) PreStart() error {\n", b"""func (h *Outbound) PreStart() error {
+	h.lifeMu.Lock()
+	defer h.lifeMu.Unlock()
+	if h.closed {
+		return net.ErrClosed
+	}
+""")
+# Explicit direct-detour rebuild must preserve binder and avoid replacing
+# a configured Conduit mode; direct mode is already checked above.
+lifecycle_edit(b"\t\tif err := h.firstHopByDetour(); err != nil {", b"\t\tbinder := h.psiphon.config.DeviceBinder\n\t\tif err := h.firstHopByDetour(); err != nil {")
+lifecycle_edit(b"\t\t\treturn err\n\t\t}\n\t}\n\tif h.scanner != nil { //H:", b"\t\t\treturn err\n\t\t}\n\t\th.psiphon.config.DeviceBinder = binder\n\t}\n\tif h.scanner != nil { //H:")
+# Move authenticated SOCKS bridge creation into PreStart, before the
+# library commits its config. Never force it on protected direct Android
+# sockets or Conduit, preserving QUIC and inproxy in those modes.
+bridge = lifecycle_section(new, b"\t// The Psiphon library opens its own connections.", b"\trunDone := make(chan struct{})")
+bridge = replace_once(bridge, b'if h.psiphon.config.UpstreamProxyURL == "" {', b'if h.psiphon.config.UpstreamProxyURL == "" && h.psiphon.config.InproxyClientPersonalCompartmentID == "" && (h.options.Detour != "" || h.psiphon.config.DeviceBinder == nil) {')
+bridge = replace_once(bridge, b"if err = proxy.Start(); err != nil {\n\t\t\treturn err", b"if err = proxy.Start(); err != nil {\n\t\t\tproxy.Close()\n\t\t\treturn err")
+lifecycle_edit(b"\treturn h.psiphon.PreStart()\n}\nfunc (h *Outbound) Start() error {\n" + lifecycle_section(new, b"\t// The Psiphon library opens its own connections.", b"\trunDone := make(chan struct{})"), bridge + b"""	return h.psiphon.PreStart()
+}
+func (h *Outbound) Start() error {
+	h.lifeMu.Lock()
+	defer h.lifeMu.Unlock()
+	if h.closed {
+		return net.ErrClosed
+	}
+	if h.runDone != nil {
+		return E.New("Psiphon already started")
+	}
+""")
+lifecycle_edit(b"\th.cancel()\n\tif h.runDone != nil {", b"\th.lifeMu.Lock()\n\tdefer h.lifeMu.Unlock()\n\tif h.closed {\n\t\treturn nil\n\t}\n\th.closed = true\n\th.cancel()\n\tif h.runDone != nil {")
+lifecycle_edit(b'\tconfig.UpstreamProxyURL = pick(options.UpstreamProxyURL, config.UpstreamProxyURL, "")\n\n\tapplyTunnelProtocols(config, options)', b'''\tconfig.UpstreamProxyURL = pick(options.UpstreamProxyURL, config.UpstreamProxyURL, "")
+	config.InproxyClientPersonalCompartmentID = pick(options.ConduitPairingID, config.InproxyClientPersonalCompartmentID, "")
+	if config.InproxyClientPersonalCompartmentID == "" {
+		applyTunnelProtocols(config, options)
+	}'''.replace(b"\\t", b"\t"))
+# Retain fork's actual safe directory name: lossy sanitization can make
+# two tags share a datastore. Do not migrate the same shared files into
+# several concurrent instances.
+lifecycle_edit(b"\tconfig.DataRootDirectory = filepath.Join(dataDir, instanceDirectory(tag))\n\tconfig.MigrateDataStoreDirectory = dataDir", b'''	if tag == "" {
+		tag = "default"
+	}
+	if !filepath.IsLocal(tag) || filepath.Base(tag) != tag {
+		return nil, E.New("invalid Psiphon outbound tag for data directory: ", tag)
+	}
+	dataDir = filepath.Join(dataDir, tag)
+	config.DataRootDirectory = dataDir
+	config.MigrateDataStoreDirectory = dataDir''')
+lifecycle_edit(b"\t\th.psiphon.stop()\n\t\tif h.ctx.Err()", b"\t\th.psiphon.stop()\n\t\th.psiphon.waitStopped()\n\t\tif h.ctx.Err()")
+candidate += b"\n" + own[own.index(b"type psiphonDeviceBinder struct"):].rstrip() + b"\n"
+# Retain direct readiness method for existing callers.
+candidate += b"\nfunc (h *Outbound) IsReady() bool { return h.psiphon.IsConnected() }\n"
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Combine upstream configuration/instance tests with the fork's Android,
+# Conduit, detour and close regressions. Keep directory migration isolated.
+path = "protocol/psiphon/h_psiphon_test.go"
+own = checked_blob(data["patched_tree"], path, "56cd53e7a8ab95886521c31045ab45a040b3368c")
+new = checked_blob(data["upstream"], path, "9b140a294335c4338371aca6e594e1cc61f97630")
+candidate = new
+lifecycle_edit(b'\t"encoding/base64"\n', b'\t"encoding/base64"\n\t"net"\n')
+lifecycle_edit(b'\t\tEgressRegion:                            "DE",', b'\t\tEgressRegion:                            "DE",\n\t\tConduitPairingID:                        "pair",')
+lifecycle_edit(b'\trequire.Equal(t, "DE", config.EgressRegion)\n', b'\trequire.Equal(t, "DE", config.EgressRegion)\n\trequire.Equal(t, "pair", config.InproxyClientPersonalCompartmentID)\n')
+lifecycle_edit(b"require.Equal(t, defaultDataDirectory, config.MigrateDataStoreDirectory)", b'require.Equal(t, filepath.Join(defaultDataDirectory, "psiphon"), config.MigrateDataStoreDirectory)')
+lifecycle_edit(b"require.Equal(t, defaultDataDirectory, config.MigrateObfuscatedServerListDownloadDirectory)", b'require.Equal(t, filepath.Join(defaultDataDirectory, "psiphon"), config.MigrateObfuscatedServerListDownloadDirectory)')
+lifecycle_edit(b'filepath.Join(defaultDataDirectory, "server_list_compressed")', b'filepath.Join(defaultDataDirectory, "psiphon", "server_list_compressed")')
+lifecycle_edit(b'require.Equal(t, "/tmp/psi", config.MigrateDataStoreDirectory)', b'require.Equal(t, filepath.Join("/tmp/psi", "psiphon"), config.MigrateDataStoreDirectory)')
+lifecycle_edit(b'filepath.Join("/tmp/psi", "server_list_compressed")', b'filepath.Join("/tmp/psi", "psiphon", "server_list_compressed")')
+lifecycle_edit(b'require.Equal(t, defaultDataDirectory, us.MigrateDataStoreDirectory, "the shared directory of before is migrated")', b'require.Equal(t, us.DataRootDirectory, us.MigrateDataStoreDirectory, "migration stays within the instance")')
+extra = own[own.index(b"func TestH_PsiphonCloseIsIdempotentAndPreventsLateStart"):].rstrip()
+extra = extra.replace(b"NewOutbound(context.Background(), nil", b"NewOutbound(hTestContext(), nil").replace(b"(context.Background(), &hProtectedAndroidPlatform{})", b"(hTestContext(), &hProtectedAndroidPlatform{})").replace(b"h.bridge", b"h.proxy")
+candidate = candidate.rstrip() + b"\n\n" + extra + b"\n"
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"
