@@ -345,3 +345,22 @@ files. Seven further conflict resolutions are submitted (31/44, expected
 13 remaining), plus the service schema clean-tree adjustment if needed.
 Schema verification and integrated build are pending; no stable pins
 have changed.
+
+### Diagnostics and proxy monitoring reconciliation
+
+Run 45476707575 completed successfully. Run 45478210412 stopped at
+protobuf inventory parsing: the checker did not accept explicit json_name
+annotations. Commit 60825a8 extends the checker to compare these annotations
+without relaxing the field/type/number compatibility assertions. Recheck
+45478958857 is pending.
+The next candidate combines the bounded fork network probe and IP lookup
+with the upstream crash report export. Adopt lazy proxy display conversion,
+resting status and duplicate stream suppression while retaining the fork's
+extra-security selector entry, endpoint fallback and readiness interface.
+Copy group-local display records before setting selection flags. Speed tests
+of an auto-selected group now target its representative proxy rather than
+repeatedly measuring all members, and bulk tests skip parked proxies.
+Five further Core conflicts are submitted (36/44 expected, 8 remaining;
+170/210 total expected). The last fully confirmed source audit covered
+158/210; the newer 12 resolutions require CI. Runtime and integration
+verification remain pending; stable pins are unchanged.
