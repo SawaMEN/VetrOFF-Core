@@ -21,6 +21,8 @@ cp "$ROOT/migration/anti-dpi-overlay/selector_adapter.go.txt" "$sing/protocol/gr
 cp "$ROOT/migration/anti-dpi-overlay/selector_adapter_test.go.txt" "$sing/protocol/group/adaptive_selector_test.go"
 cp "$ROOT/migration/anti-dpi-overlay/urltest_adapter.go.txt" "$sing/protocol/group/adaptive_urltest.go"
 cp "$ROOT/migration/anti-dpi-overlay/urltest_adapter_test.go.txt" "$sing/protocol/group/adaptive_urltest_test.go"
+cp "$ROOT/migration/anti-dpi-overlay/selector_lifecycle.go.txt" "$sing/protocol/group/adaptive_lifecycle.go"
+cp "$ROOT/migration/anti-dpi-overlay/selector_lifecycle_test.go.txt" "$sing/protocol/group/adaptive_lifecycle_test.go"
 python3 - "$sing/protocol/group/selector.go" "$sing/protocol/group/urltest.go" <<'PY'
 import pathlib
 import sys
@@ -32,8 +34,13 @@ def replace_once(old, new):
         raise SystemExit("selector source changed; review overlay: " + old)
     s = s.replace(old, new, 1)
 replace_once('"slices"', '"slices"\n\t"sync"')
-replace_once('type Selector struct {', 'type Selector struct {\n\tadaptiveSelectionMu sync.Mutex\n\tadaptiveSelectionRevision uint64')
+replace_once('type Selector struct {', 'type Selector struct {\n\tadaptiveSelectionMu sync.Mutex\n\tadaptiveSelectionRevision uint64\n\tadaptiveLifecycleMu sync.Mutex\n\tadaptiveOwner *AdaptiveSelectorOwner')
 replace_once('func (s *Selector) SelectOutbound(tag string) bool {', '''func (s *Selector) SelectOutbound(tag string) bool {
+    s.adaptiveLifecycleMu.Lock()
+    defer s.adaptiveLifecycleMu.Unlock()
+    if s.adaptiveOwner != nil {
+        return s.adaptiveOwner.manualSelect(tag)
+    }
     s.adaptiveSelectionMu.Lock()
     defer s.adaptiveSelectionMu.Unlock()
     return s.selectOutboundLocked(tag)
@@ -42,6 +49,7 @@ replace_once('func (s *Selector) SelectOutbound(tag string) bool {', '''func (s 
 func (s *Selector) selectOutboundLocked(tag string) bool {''')
 replace_once('if s.selected.Swap(detour) == detour {', '''s.adaptiveSelectionRevision++
     if s.selected.Swap(detour) == detour {''')
+replace_once('func (s *Selector) Close() error {', 'func (s *Selector) Close() error {\n\ts.DisableAdaptive()')
 p.write_text(s)
 p = pathlib.Path(sys.argv[2])
 s = p.read_text()
@@ -57,6 +65,6 @@ replace_once('if testResult.err != nil {\n\t\t\t\t\tif b.ctx.Err() != nil {', ''
 p.write_text(s)
 PY
 cd "$sing"
-gofmt -w protocol/group/selector.go protocol/group/urltest.go protocol/group/adaptive_selector*.go protocol/group/adaptive_urltest*.go common/adaptiveconnect/*.go
+gofmt -w protocol/group/selector.go protocol/group/urltest.go protocol/group/adaptive_selector*.go protocol/group/adaptive_urltest*.go protocol/group/adaptive_lifecycle*.go common/adaptiveconnect/*.go
 export CGO_ENABLED=0
 go test -mod=mod -count=1 -ldflags '-checklinkname=0' ./common/adaptiveconnect ./protocol/group -run 'TestAntiDPI|TestController'

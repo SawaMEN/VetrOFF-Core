@@ -1,0 +1,196 @@
+package group
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/sagernet/sing-box/adapter"
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+	"github.com/sagernet/sing-box/common/urltest"
+)
+
+type adaptiveEpoch struct {
+	ctx context.Context
+	cancel context.CancelFunc
+}
+
+// AdaptiveSelectorOwner is the opt-in lifecycle for one started plain
+// TCP-only selector. Existing owners call RunAdaptiveCycle at their normal
+// probe cadence. No ticker or competing selector is created.
+type AdaptiveSelectorOwner struct {
+	mu sync.Mutex
+	binding *AdaptiveSelectorBinding
+	controller *ac.Controller
+	parent context.Context
+	epoch atomic.Pointer[adaptiveEpoch]
+	members []adapter.Outbound
+	history *urltest.HistoryStorage
+	running bool
+	closed bool
+}
+
+// EnableAdaptive is an explicit post-start API, not automatic configuration
+// import. The local app must grant consent independently of the subscription.
+func (s *Selector) EnableAdaptive(ctx context.Context,policy ac.Config,consent bool,endpoint string) error {
+	if err:=policy.Validate();err!=nil {return err}
+	if !policy.Enabled||!consent {s.DisableAdaptive();return nil}
+	s.adaptiveLifecycleMu.Lock()
+	defer s.adaptiveLifecycleMu.Unlock()
+	if s.adaptiveOwner!=nil {return errors.New("adaptive selector already enabled")}
+	b,members,err:=NewAdaptiveSelectorBinding(s,endpoint)
+	if err!=nil {return err}
+	return s.attachAdaptiveLocked(ctx,policy,b,members)
+}
+
+func (s *Selector) attachAdaptiveLocked(ctx context.Context,policy ac.Config,b *AdaptiveSelectorBinding,profiles []ac.Outbound) error {
+	if ctx.Err()!=nil {return ctx.Err()}
+	if s.adaptiveOwner!=nil||b==nil||b.selector!=s||b.endpoint=="" {return errors.New("invalid adaptive attachment")}
+	cfg:=ac.DefaultControllerConfig()
+	cfg.Connect=policy
+	// Optional MUX, pool and history are not silently enabled here. Their
+	// actual transport bindings and local identities still need review.
+	c,err:=ac.NewController(cfg,ac.ControllerConsent{Connect:true},[]ac.RouteBinding{{Network:"tcp",Outbounds:profiles,Switcher:b}})
+	if err!=nil {return err}
+	if c==nil {return errors.New("adaptive policy disabled")}
+	o:=&AdaptiveSelectorOwner{binding:b,controller:c,parent:ctx,history:urltest.NewHistoryStorage()}
+	for _,p:=range profiles {o.members=append(o.members,b.members[p.Tag])}
+	if err=o.resetLocked(time.Now());err!=nil {c.Close();return err}
+	s.adaptiveOwner=o
+	return nil
+}
+
+func (o *AdaptiveSelectorOwner) cancelEpoch() {
+	if e:=o.epoch.Load();e!=nil {e.cancel()}
+}
+
+func (o *AdaptiveSelectorOwner) resetLocked(now time.Time) error {
+	o.cancelEpoch()
+	if o.closed {return ac.ErrControllerInactive}
+	if err:=o.parent.Err();err!=nil {return err}
+	active:=o.binding.selector.selected.Load()
+	if active==nil {return errors.New("no selected outbound")}
+	// Unknown path identity is intentional until the platform supplies a
+	// process-local key. Fresh health is always reset, even on same interface.
+	if _,err:=o.controller.ResetNetwork(now,ac.HistoryKey{},map[string]string{"tcp":active.Tag()});err!=nil {return err}
+	ctx,cancel:=context.WithCancel(o.parent)
+	o.epoch.Store(&adaptiveEpoch{ctx:ctx,cancel:cancel})
+	return nil
+}
+
+func (o *AdaptiveSelectorOwner) networkChanged() error {
+	// Cancel the old verification before waiting for the serialized commit.
+	o.cancelEpoch()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.resetLocked(time.Now())
+}
+
+// InterfaceUpdated is the existing sing-box network event listener contract.
+// It resets evidence immediately; the existing probe owner runs the next cycle.
+func (s *Selector) InterfaceUpdated(ctx context.Context) {
+	s.adaptiveLifecycleMu.Lock()
+	defer s.adaptiveLifecycleMu.Unlock()
+	if o:=s.adaptiveOwner;o!=nil {
+		if err:=o.networkChanged();err!=nil {
+			o.close()
+			s.adaptiveOwner=nil
+			if s.logger!=nil {s.logger.Debug("adaptive network reset: ",err)}
+		}
+	}
+}
+
+// RunAdaptiveCycle uses the actual URLTest leaf worker with its normal
+// bounded concurrency. A private history prevents strict checks from
+// changing ordinary URLTest group selection. No cached checks are used.
+func (s *Selector) RunAdaptiveCycle(ctx context.Context)(ac.NetworkDecision,error) {
+	s.adaptiveLifecycleMu.Lock()
+	o:=s.adaptiveOwner
+	s.adaptiveLifecycleMu.Unlock()
+	if o==nil {return ac.NetworkDecision{},ac.ErrControllerInactive}
+	return o.run(ctx)
+}
+
+func (o *AdaptiveSelectorOwner) run(caller context.Context)(ac.NetworkDecision,error) {
+	o.mu.Lock()
+	e:=o.epoch.Load()
+	if o.closed||e==nil||e.ctx.Err()!=nil||caller.Err()!=nil||o.running {
+		o.mu.Unlock()
+		return ac.NetworkDecision{},ac.ErrControllerInactive
+	}
+	ctx,cancel:=context.WithCancel(e.ctx)
+	stop:=context.AfterFunc(caller,cancel)
+	batchCtx,err:=o.binding.WithAdaptiveURLTest(ctx,o.controller)
+	if err!=nil {
+		stop();cancel();o.mu.Unlock()
+		return ac.NetworkDecision{},err
+	}
+	o.running=true
+	o.mu.Unlock()
+	defer func(){
+		stop();cancel()
+		o.mu.Lock();o.running=false;o.mu.Unlock()
+	}()
+	s:=o.binding.selector
+	URLTestOutbounds(batchCtx,s.outbound,o.history,s.logger,o.members,o.binding.endpoint,0,true)
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.closed||e!=o.epoch.Load()||ctx.Err()!=nil||caller.Err()!=nil {return ac.NetworkDecision{},ac.ErrControllerInactive}
+	return o.controller.Tick(ctx,"tcp",time.Now())
+}
+
+// manualSelect serializes actual manual selection with Tick. A user action
+// cancels an in-flight automatic verification before waiting for the lock.
+func (o *AdaptiveSelectorOwner) manualSelect(tag string) bool {
+	if o.binding.members[tag]==nil {return false}
+	o.cancelEpoch()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	s:=o.binding.selector
+	s.adaptiveSelectionMu.Lock()
+	ok:=s.selectOutboundLocked(tag)
+	s.adaptiveSelectionMu.Unlock()
+	if !ok {return false}
+	if !o.controller.ManualSelection("tcp",time.Now(),tag) {
+		o.closed=true
+		o.controller.Close()
+	}
+	return true
+}
+
+func (s *Selector) ResumeAdaptive() error {
+	s.adaptiveLifecycleMu.Lock()
+	defer s.adaptiveLifecycleMu.Unlock()
+	o:=s.adaptiveOwner
+	if o==nil {return ac.ErrControllerInactive}
+	o.cancelEpoch()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.closed||o.parent.Err()!=nil {return ac.ErrControllerInactive}
+	active:=s.selected.Load()
+	if active==nil {return errors.New("no selected outbound")}
+	if err:=o.controller.ResumeAutomatic("tcp",time.Now(),active.Tag());err!=nil {return err}
+	ctx,cancel:=context.WithCancel(o.parent)
+	o.epoch.Store(&adaptiveEpoch{ctx:ctx,cancel:cancel})
+	return nil
+}
+
+func (o *AdaptiveSelectorOwner) close() {
+	o.cancelEpoch()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.cancelEpoch()
+	o.closed=true
+	o.controller.Close()
+}
+
+func (s *Selector) DisableAdaptive() {
+	s.adaptiveLifecycleMu.Lock()
+	defer s.adaptiveLifecycleMu.Unlock()
+	if o:=s.adaptiveOwner;o!=nil {
+		o.close()
+		s.adaptiveOwner=nil
+	}
+}

@@ -1,0 +1,77 @@
+package group
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/sagernet/sing-box/adapter"
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+	"github.com/sagernet/sing-box/log"
+)
+
+func adaptiveLifecycleFixture(t *testing.T,verify func(context.Context,adapter.Outbound)error)*Selector {
+	t.Helper()
+	s:=antiDPITestSelector()
+	s.logger=log.NewNOPFactory().Logger()
+	b,members,err:=newAdaptiveSelectorBinding(s,verify)
+	if err!=nil {t.Fatal(err)}
+	b.endpoint="https://example.com/generate_204"
+	p:=ac.DefaultConfig()
+	p.Enabled=true
+	p.FailureThreshold=1
+	p.RecoveryThreshold=1
+	p.CooldownSeconds=0
+	if err=s.attachAdaptiveLocked(context.Background(),p,b,members);err!=nil {t.Fatal(err)}
+	t.Cleanup(s.DisableAdaptive)
+	return s
+}
+
+func TestAntiDPILifecycleActualURLTestWorker(t *testing.T) {
+	s:=adaptiveLifecycleFixture(t,func(_ context.Context,o adapter.Outbound)error{
+		if o.Tag()=="a" {return errors.New("unavailable")}
+		return nil
+	})
+	d,err:=s.RunAdaptiveCycle(context.Background())
+	if err!=nil||d.Target!="b"||s.Selected("tcp").Tag()!="b" {t.Fatal(d,err)}
+	if !s.SelectOutbound("a") {t.Fatal("manual selection failed")}
+	if _,err=s.RunAdaptiveCycle(context.Background());!errors.Is(err,ac.ErrControllerInactive) {t.Fatal("manual cycle not paused",err)}
+	s.InterfaceUpdated(context.Background())
+	// Network changes preserve the user's manual mode.
+	d,err=s.RunAdaptiveCycle(context.Background())
+	if err!=nil||d.Reason!="manual-selection"||s.Selected("tcp").Tag()!="a" {t.Fatal(d,err)}
+	if err=s.ResumeAdaptive();err!=nil {t.Fatal(err)}
+	d,err=s.RunAdaptiveCycle(context.Background())
+	if err!=nil||d.Target!="b" {t.Fatal(d,err)}
+	if err=s.Close();err!=nil {t.Fatal(err)}
+	if _,err=s.RunAdaptiveCycle(context.Background());!errors.Is(err,ac.ErrControllerInactive) {t.Fatal(err)}
+}
+
+func TestAntiDPILifecycleCancelsOldNetworkBatch(t *testing.T) {
+	started:=make(chan struct{},2)
+	s:=adaptiveLifecycleFixture(t,func(ctx context.Context,_ adapter.Outbound)error{
+		started<-struct{}{}
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	done:=make(chan error,1)
+	go func(){_,err:=s.RunAdaptiveCycle(context.Background());done<-err}()
+	select {case <-started:case <-time.After(time.Second):t.Fatal("probe never started")}
+	s.InterfaceUpdated(context.Background())
+	select {
+	case err:=<-done:if !errors.Is(err,ac.ErrControllerInactive) {t.Fatal(err)}
+	case <-time.After(2*time.Second):t.Fatal("old network batch did not stop")
+	}
+	if s.Selected("tcp").Tag()!="a" {t.Fatal("stale switch")}
+}
+
+func TestAntiDPILifecycleDisabled(t *testing.T) {
+	s:=antiDPITestSelector()
+	p:=ac.DefaultConfig()
+	if err:=s.EnableAdaptive(context.Background(),p,true,"");err!=nil {t.Fatal(err)}
+	p.Enabled=true
+	if err:=s.EnableAdaptive(context.Background(),p,false,"");err!=nil {t.Fatal(err)}
+	if s.adaptiveOwner!=nil {t.Fatal("enabled without consent")}
+	if !s.SelectOutbound("b") {t.Fatal("normal selector changed")}
+}
