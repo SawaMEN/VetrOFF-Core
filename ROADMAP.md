@@ -42,5 +42,6 @@ Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Cli
 - [ ] Bind process-local network/profile identities and existing probe lifecycle to history.
 - [x] Compose Adaptive Connect, MUX, pool and history into one lifecycle controller candidate.
 - [x] Add a disposable prepared-tree bridge for the actual plain TCP-only Selector, guarded manual selection and integration CI.
-- [ ] Bind the composed controller to selector startup, URLTest worker, platform network events and real transport cleanup.
+- [x] Add explicit context-bound fresh URLTest leaf worker bridge in the prepared-tree overlay.
+- [ ] Attach the bridge at selector startup, schedule via the existing owner, bind platform network events and real transport cleanup.
 - [ ] Validate candidate builds and real network behavior before promotion.

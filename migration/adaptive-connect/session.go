@@ -103,5 +103,9 @@ func (s *Session) Invalidate(generation uint64, id string) {
 	if generation != s.generation { return }
 	s.selector.mu.Lock()
 	defer s.selector.mu.Unlock()
-	delete(s.selector.health,id)
+	if h,ok:=s.selector.health[id];ok {
+		// Preserve the timestamp watermark to reject replayed observations.
+		h.successes,h.failures=0,0
+		s.selector.health[id]=h
+	}
 }

@@ -28,8 +28,9 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+      - run: VETROFF_SOURCE_MODE=locked bash scripts/prepare.sh
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26.x'
+          go-version-file: .build/hiddify-core/hiddify-sing-box/go.mod
           cache: false
-      - run: bash scripts/test-anti-dpi-overlay.sh
+      - run: bash scripts/test-anti-dpi-overlay.sh --reuse-sources

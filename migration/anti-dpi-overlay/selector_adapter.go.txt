@@ -21,6 +21,7 @@ import (
 // independent adaptive controllers to one shared Selector.
 type AdaptiveSelectorBinding struct {
 	selector *Selector
+	endpoint string
 	members map[string]adapter.Outbound
 	verify func(context.Context,adapter.Outbound) error
 }
@@ -33,9 +34,11 @@ func NewAdaptiveSelectorBinding(s *Selector,endpoint string)(*AdaptiveSelectorBi
 		(u.Port()!=""&&u.Port()!="443") {
 		return nil,nil,errors.New("expected an owned HTTPS 204 probe endpoint on port 443")
 	}
-	return newAdaptiveSelectorBinding(s,func(ctx context.Context,o adapter.Outbound)error{
+	b,members,err:=newAdaptiveSelectorBinding(s,func(ctx context.Context,o adapter.Outbound)error{
 		return adaptiveVerifiedHTTP(ctx,o,u)
 	})
+	if err==nil { b.endpoint=u.String() }
+	return b,members,err
 }
 
 func newAdaptiveSelectorBinding(s *Selector,verify func(context.Context,adapter.Outbound)error)(*AdaptiveSelectorBinding,[]ac.Outbound,error) {

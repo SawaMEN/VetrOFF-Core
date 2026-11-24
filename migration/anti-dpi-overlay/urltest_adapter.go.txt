@@ -1,0 +1,61 @@
+package group
+
+import (
+	"context"
+	"errors"
+	"reflect"
+	"time"
+
+	"github.com/sagernet/sing-box/adapter"
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+)
+
+type adaptiveURLTestKey struct{}
+type adaptiveURLTestBatch struct {
+	binding *AdaptiveSelectorBinding
+	controller *ac.Controller
+	ticket ac.ProbeTicket
+}
+
+// WithAdaptiveURLTest binds an explicitly requested existing URLTest batch
+// to the current generation. Call before starting the batch, not at result
+// delivery. Pass the returned context to URLTestOutbounds. The owner must
+// cancel old batches on network changes and serialize the subsequent Tick.
+// No cached or unrelated URLTest history is imported.
+func (b *AdaptiveSelectorBinding) WithAdaptiveURLTest(ctx context.Context,c *ac.Controller)(context.Context,error) {
+	if b==nil||c==nil||b.endpoint=="" { return nil,errors.New("adaptive URLTest binding not ready") }
+	if err:=ctx.Err();err!=nil { return nil,err }
+	ticket,err:=c.BeginProbe("tcp")
+	if err!=nil { return nil,err }
+	return context.WithValue(ctx,adaptiveURLTestKey{},&adaptiveURLTestBatch{binding:b,controller:c,ticket:ticket}),nil
+}
+
+// adaptiveURLTestProbe is called only from the existing uncached leaf worker.
+// For the explicit, matching single-URL batch, substitute the stricter
+// verified HTTPS 204 check. No duplicate probe or new scheduler is created.
+// The ordinary URLTest implementation remains unchanged otherwise.
+func adaptiveURLTestProbe(ctx context.Context,links []string,o adapter.Outbound)(uint16,error,bool) {
+	hook,_:=ctx.Value(adaptiveURLTestKey{}).(*adaptiveURLTestBatch)
+	if hook==nil||o==nil||len(links)!=1||links[0]!=hook.binding.endpoint { return 0,nil,false }
+	member:=hook.binding.members[o.Tag()]
+	if member==nil||!reflect.TypeOf(member).Comparable()||member!=o { return 0,nil,false }
+	start:=time.Now()
+	if err:=ctx.Err();err!=nil { return 0,err,true }
+	err:=hook.binding.verify(ctx,o)
+	at:=time.Now()
+	if ctx.Err()!=nil { return 0,ctx.Err(),true }
+	if errors.Is(err,context.Canceled) { return 0,err,true }
+	outcome:=ac.ProbePassed
+	if err!=nil { outcome=ac.ProbeFailed }
+	if !hook.controller.Record(at,hook.ticket,o.Tag(),at,outcome) {
+		// Do not publish stale/rejected results as fresh URLTest history.
+		return 0,errAdaptiveStale,true
+	}
+	if err!=nil { return 0,err,true }
+	ms:=at.Sub(start).Milliseconds()
+	if ms<1 { ms=1 }
+	if ms>65534 { ms=65534 }
+	return uint16(ms),nil,true
+}
+
+var errAdaptiveStale=errors.New("obsolete adaptive URLTest result")

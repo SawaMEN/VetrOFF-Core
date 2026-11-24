@@ -3,7 +3,9 @@ set -Eeuo pipefail
 source "$(dirname "$0")/_common.sh"
 need go
 need python3
-VETROFF_SOURCE_MODE=locked bash "$ROOT/scripts/prepare.sh"
+if [[ "${1:-}" != "--reuse-sources" ]]; then
+  VETROFF_SOURCE_MODE=locked bash "$ROOT/scripts/prepare.sh"
+fi
 verify_prepared_sources
 tmp=$(mktemp -d "$ROOT/.build/anti-dpi-overlay.XXXXXX")
 trap 'rm -rf -- "$tmp"' EXIT
@@ -17,7 +19,9 @@ cp "$ROOT"/migration/adaptive-connect/*.go "$candidate/"
 cp -a "$ROOT/migration/adaptive-connect/testdata" "$candidate/"
 cp "$ROOT/migration/anti-dpi-overlay/selector_adapter.go.txt" "$sing/protocol/group/adaptive_selector.go"
 cp "$ROOT/migration/anti-dpi-overlay/selector_adapter_test.go.txt" "$sing/protocol/group/adaptive_selector_test.go"
-python3 - "$sing/protocol/group/selector.go" <<'PY'
+cp "$ROOT/migration/anti-dpi-overlay/urltest_adapter.go.txt" "$sing/protocol/group/adaptive_urltest.go"
+cp "$ROOT/migration/anti-dpi-overlay/urltest_adapter_test.go.txt" "$sing/protocol/group/adaptive_urltest_test.go"
+python3 - "$sing/protocol/group/selector.go" "$sing/protocol/group/urltest.go" <<'PY'
 import pathlib
 import sys
 p = pathlib.Path(sys.argv[1])
@@ -39,8 +43,20 @@ func (s *Selector) selectOutboundLocked(tag string) bool {''')
 replace_once('if s.selected.Swap(detour) == detour {', '''s.adaptiveSelectionRevision++
     if s.selected.Swap(detour) == detour {''')
 p.write_text(s)
+p = pathlib.Path(sys.argv[2])
+s = p.read_text()
+replace_once('delay, testErr := urlTestLinks(testCtx, links, detour)', '''delay, testErr, handled := adaptiveURLTestProbe(testCtx, links, detour)
+                    if !handled {
+                        delay, testErr = urlTestLinks(testCtx, links, detour)
+                    }''')
+replace_once('if testResult.err != nil {\n\t\t\t\t\tif b.ctx.Err() != nil {', '''if testResult.err == errAdaptiveStale {
+                    return nil, nil
+                }
+                if testResult.err != nil {
+                    if b.ctx.Err() != nil {''')
+p.write_text(s)
 PY
 cd "$sing"
-gofmt -w protocol/group/selector.go protocol/group/adaptive_selector*.go common/adaptiveconnect/*.go
+gofmt -w protocol/group/selector.go protocol/group/urltest.go protocol/group/adaptive_selector*.go protocol/group/adaptive_urltest*.go common/adaptiveconnect/*.go
 export CGO_ENABLED=0
-go test -mod=mod -count=1 ./common/adaptiveconnect ./protocol/group -run 'TestAntiDPI|TestController'
+go test -mod=mod -count=1 -ldflags '-checklinkname=0' ./common/adaptiveconnect ./protocol/group -run 'TestAntiDPI|TestController'
