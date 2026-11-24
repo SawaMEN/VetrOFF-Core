@@ -152,3 +152,66 @@ def merge(component):
 
 for component in inputs:
     merge(component)
+
+# test/ is a separate main module: Go does not inherit replace directives.
+# Align every shared requirement and replacement with the reviewed root
+# manifest, while retaining test-only dependencies from both histories.
+def merge_test_module():
+    repo = root / "hiddify-sing-box"
+    meta = json.loads((report / "hiddify-sing-box.json").read_text())
+    docs = []
+    for revision, expected in (
+        ("patched_tree", "bf70a09fe0fa12b3ce2a48190895f1362abbf9b8"),
+        ("upstream", "17e47ce515726c10a4f1c7aa82dcbe5bacee8b31"),
+    ):
+        actual = git(repo, "rev-parse", meta[revision] + ":test/go.mod").decode().strip()
+        assert actual == expected, (revision, actual)
+        docs.append(parse(git(repo, "cat-file", "blob", actual)))
+    fork, upstream = docs
+    shared = parse((report / "hiddify-sing-box-go.mod.candidate").read_bytes())
+    assert fork["directives"]["module"] == upstream["directives"]["module"] == "test"
+    test_choices = {
+        "go.opentelemetry.io/otel/metric": "v1.45.0",
+        "go.opentelemetry.io/otel/trace": "v1.45.0",
+    }
+    requirements = {}
+    for key in sorted(set(fork["require"]) | set(upstream["require"]) | set(shared["require"])):
+        a, b, c = (doc["require"].get(key) for doc in (fork, upstream, shared))
+        if c:
+            version = c[0]
+        elif a and b and a[0] != b[0]:
+            version = test_choices[key]
+            assert version in (a[0], b[0])
+        else:
+            version = (a or b)[0]
+        # A direct dependency of the test module remains direct.
+        indirect = all(entry[1] for entry in (a, b) if entry is not None)
+        requirements[key] = (version, indirect)
+    assert requirements["github.com/sagernet/sing-box"] == ("v0.0.0", False)
+    replacements = {"github.com/sagernet/sing-box": "../"}
+    for key, value in shared["replace"].items():
+        replacements[key] = "." + value if value.startswith("./") else value
+    for doc in docs:
+        for key, value in doc["replace"].items():
+            if key not in replacements:
+                replacements[key] = value
+            elif key not in shared["replace"]:
+                assert replacements[key] == value, key
+    for key in ("github.com/xtls/xray-core", "github.com/metacubex/utls", "github.com/sagernet/sing-vmess"):
+        assert replacements[key] == "." + shared["replace"][key]
+    lines = ["module test", "", "go " + shared["directives"]["go"], "", "require ("]
+    for key, (version, indirect) in requirements.items():
+        lines.append(f"\t{key} {version}" + (" // indirect" if indirect else ""))
+    lines += [")", ""]
+    lines += [f"replace {key} => {value}" for key, value in sorted(replacements.items())]
+    candidate = ("\n".join(lines) + "\n").encode()
+    validated = parse(candidate)
+    assert validated["require"] == requirements and validated["replace"] == replacements
+    path = report / "hiddify-sing-box-test-go.mod.candidate"
+    path.write_bytes(candidate)
+    env = dict(os.environ, GOTOOLCHAIN="local", GOPROXY="off", GOSUMDB="off")
+    parsed = json.loads(subprocess.check_output(["go", "mod", "edit", "-json", str(path)], env=env))
+    assert {r["Path"]: (r["Version"], r.get("Indirect", False)) for r in parsed["Require"]} == requirements
+    print(f"sing-box test module candidate: {len(requirements)} requirements, {len(replacements)} replacements")
+
+merge_test_module()
