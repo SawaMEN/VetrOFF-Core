@@ -3594,6 +3594,27 @@ for path, sha, markers in (
         assert marker in upstream_call, (path, marker)
         assert marker in git("show", data["tentative_tree"] + ":" + path), (path, marker)
 
+# Build tags: the upstream Makefile differs only in its default tag list.
+# Keep the additional fork features in normal builds; explicit TAGS
+# overrides continue to work.
+path = "Makefile"
+own = checked_blob(data["patched_tree"], path, "fcf551653e6c8f691ae427dd235cd97ba8821b80")
+new = checked_blob(data["upstream"], path, "e49b5423d1358e854172aba54b1b023b09ba61ad")
+assert replace_once(own, b",with_acme,with_tailscale,with_ccm,with_ocm\n", b"\n") == new
+resolutions[path] = own
+
+# Schema generator: retain the fork's string CIDR representation and its
+# prefixable schema annotation; the remaining changes are comments/import
+# ordering and older equivalents of the modern reflection/string APIs.
+path = "schema/generator.go"
+own = checked_blob(data["patched_tree"], path, "2199b1cc0c4f6a33054096c0a0d6af22b74e8cb2")
+new = checked_blob(data["upstream"], path, "ab85a7a62a08d951be72134377d5668fc8bce174")
+assert b'hPrefixableField(fieldType)' in own and b'hPrefixableField(fieldType)' not in new
+for marker in (b'SmartPoolOptions', b'AnyOf(BooleanNode(), node)', b'reflect.TypeFor[xbadoption.Range]()', b'case rawMessageType:', b'fieldType'):
+    assert marker in own and marker in new, marker
+assert b'for field := range structType.Fields()' in own
+resolutions[path] = own
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"
