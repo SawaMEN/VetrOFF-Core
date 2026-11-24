@@ -9,6 +9,23 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+    # Audit-only changes do not alter any locked source or stable binary.
+    # Tag pushes, manual builds and scheduled upstream checks remain enabled.
+    paths-ignore:
+      - 'migration/**'
+      - 'scripts/audit-upstream-merge.sh'
+      - 'scripts/resolve-upstream-metadata.py'
+      - 'scripts/prepare-dependency-candidates.py'
+      - 'scripts/prepare-tailscale-callers.py'
+      - 'scripts/fix-masterdns-session-readiness.py'
+      - 'scripts/test-combined-candidate.sh'
+      - 'scripts/test-reviewed-*.sh'
+      - 'scripts/test-tailscale-candidate.sh'
+      - 'scripts/test-warp-combined-candidate.sh'
+      - 'scripts/verify-migration-checkpoints.py'
+      - '.github/workflows/upstream-merge-audit.yml'
+      - '.github/workflows/combined-candidate.yml'
+      - '.github/workflows/migration-checkpoints.yml'
   pull_request:
   schedule:
     - cron: '15 5 * * 1'
