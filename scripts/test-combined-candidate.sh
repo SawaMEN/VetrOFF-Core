@@ -213,4 +213,8 @@ else
   failed=1
   echo "Schema generation did not produce a JSON artifact" >&2
 fi
+# Preserve effective module selections and checksums before the disposable
+# checkout is removed. A version discrepancy is diagnostic; unexpected
+# replacements are a hard failure.
+probe effective-dependencies python3 "$ROOT/scripts/verify-combined-dependencies.py" "$candidate" "$report"
 exit "$failed"

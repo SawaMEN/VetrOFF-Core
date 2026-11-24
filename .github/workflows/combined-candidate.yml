@@ -6,6 +6,7 @@ on:
     paths:
       - 'scripts/test-combined-candidate.sh'
       - 'scripts/test-reviewed-route.sh'
+      - 'scripts/verify-combined-dependencies.py'
       - 'scripts/_common.sh'
       - 'scripts/prepare.sh'
       - 'scripts/prepare-dependency-candidates.py'
@@ -35,6 +36,7 @@ jobs:
         run: |
           for script in scripts/*.sh; do bash -n "$script"; done
           python3 -m py_compile scripts/*.py
+          python3 scripts/verify-combined-dependencies.py --self-test
       - name: Audit reviewed candidate trees and manifests
         run: bash scripts/audit-upstream-merge.sh 4e5a9a357003d0a995360586702fd24c53042e3f
       - name: Build and test combined candidate in isolation

@@ -668,3 +668,18 @@ all shell scripts. These are test-gate changes, not production transport
 changes. 202/210 source resolutions confirmed; eight remain outstanding.
 ROADMAP 9/16. Full combined verification and stable pin promotion remain
 pending.
+
+### Effective dependency graph and successful scoped audit
+
+Audit 45490112715 passed all scoped gates, including the corrected pacing
+regressions. The combined probe 45490098451 was still running when checked.
+The combined integration now records the actual Go-selected module graphs
+for Core, sing-box and the integration-test module, final go.mod/go.sum
+snapshots and SHA-256 digests before the temporary tree is removed. It
+checks selected replacements against the reviewed input manifests,
+including version-specific directives and canonical local paths. Unexpected
+replacements or graph errors fail CI. Shared version differences are
+reported for review, not automatically downgraded or treated as failures.
+Four offline helper self-tests run before the expensive integration.
+202/210 original source conflicts confirmed; eight pending. ROADMAP 9/16.
+No stable dependency pins or release inputs changed.
