@@ -114,7 +114,7 @@ jobs:
           from pathlib import Path
           sing, report, tmp = map(Path, sys.argv[1:])
           meta = json.loads((report / "hiddify-sing-box-reviewed.json").read_text())
-          paths = ("route/network.go", "route/router.go", "route/conn.go", "route/h_network_reset_test.go", "route/h_read_pace.go", "route/h_read_pace_test.go", "route/h_wake_pace.go", "route/h_wake_pace_test.go", "route/h_wake_pace_unix.go", "route/h_wake_pace_unix_test.go", "route/h_wake_pace_other.go", "route/h_path_rtt.go")
+          paths = ("route/network.go", "route/router.go", "route/conn.go", "route/dns.go", "route/h_network_reset_test.go", "route/h_read_pace.go", "route/h_read_pace_test.go", "route/h_wake_pace.go", "route/h_wake_pace_test.go", "route/h_wake_pace_unix.go", "route/h_wake_pace_unix_test.go", "route/h_wake_pace_other.go", "route/h_path_rtt.go")
           assert set(paths[:3]) <= set(meta["reviewed_resolutions"])
           assert not set(paths) & set(meta["remaining_conflicts"])
           files = {}
