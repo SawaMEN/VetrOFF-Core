@@ -555,3 +555,23 @@ Expected: 43/44 Core and 159/166 sing-box (202/210; 8 remaining).
 194 source-confirmed; eight await the new source gate. Remaining: three
 module manifests, four nested gitlinks and generated JSON schema.
 Stable pins and ROADMAP completion remain unchanged.
+
+### First combined-build compatibility corrections
+
+Combined probe 45486170730 reached Go compilation, then was canceled by
+its successor. It exposed missing Lazy.IsReady, direct Status calls on
+legacy interfaces, and non-atomic reads of the monitor's started flag.
+Commit b27c2c6 supplies compatibility adjustments in four clean paths:
+Lazy and three monitoring files. The route overlay alone was insufficient:
+route/dns.go in the fork had no dnsHijackConcurrency constant. Commit
+abb086f restores the named bound in the candidate, retaining 256 slots.
+The scoped Psiphon test now uses the exact reviewed tunnel-core replacement
+and DeepSearcher interface, with restoration of the original manifests.
+The previous documentation audit failed because WARP has two distinct
+fallback_address tables. 3e2337b preserves the fork-only row while retaining
+the other upstream row. All eight documentation resolutions require a fresh
+source gate; 194/210 remain confirmed and 202/210 submitted. The eight
+remaining manifest, gitlink and generated schema conflicts remain open.
+The combined workflow now runs after resolver changes and does not cancel
+a running probe. Full build and runtime tests remain unconfirmed; stable
+pins are unchanged.
