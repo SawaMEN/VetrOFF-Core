@@ -3615,6 +3615,100 @@ for marker in (b'SmartPoolOptions', b'AnyOf(BooleanNode(), node)', b'reflect.Typ
 assert b'for field := range structType.Fields()' in own
 resolutions[path] = own
 
+# Documentation: distinguish the upstream history from this migration's
+# verification status, preserve fork-specific protocol and configuration
+# contracts, and avoid dropping historical bug reports.
+path = "README.md"
+own = checked_blob(data["patched_tree"], path, "8123c0ba9bea55cad428b31226739512d6cc8603")
+new = checked_blob(data["upstream"], path, "27dddfd406965083d5e7b7b0967eb25bbc32c378")
+extra = own[own.index(b"## Additional protocols in this fork"):].strip()
+assert all(name in extra for name in (b"VetrOFFProxy", b"OpenFlux", b"OLCRTC", b"FPTN", b"PingTunnel", b"Snell", b"smart_dns_pool"))
+# Keep the fork title and complete license, not upstream branding.
+assert own.count(b"## License") == 1 and new.count(b"## License") == 1
+candidate = own.split(b"\n", 1)[0] + b"\n\n" + b"Integration candidate: upstream feature descriptions below are historical reference, not a statement that every feature has passed the VetrOFF build matrix.\n\n" + new[new.index(b"**Documentation:**"):new.index(b"## License")].rstrip() + b"\n\n" + own[own.index(b"## License"):own.index(b"## Additional protocols in this fork")].rstrip() + b"\n\n" + extra + b"\n"
+# Retain the existing example section as part of the fork contract.
+if b"## Examples\n" in own:
+    examples = own[own.index(b"## Examples\n"):].split(b"\n## ", 1)[0].rstrip()
+    candidate += b"\n" + examples + b"\n"
+resolutions[path] = candidate
+
+path = "docs/hiddify/app_considerations.md"
+own = checked_blob(data["patched_tree"], path, "0a0bc2be40e94d88e139fb0ae1d294ab607099fd")
+new = checked_blob(data["upstream"], path, "7898ce7550cec90c906e3b98ccafccedbedd6020")
+# Preserve the existing integration instructions, including the Xray/uTLS
+# versions and cached-buffer fix. Link to the exact upstream document
+# rather than reproducing conflicting instructions as current requirements.
+assert b"e1f78e792da34ce99fe2279729dea3b0a09efa9d" in own
+assert b"Chrome 133" in own and b"Chrome 155" in new
+assert b"XDrive remains registered" in own and b"storage_dialer" in own
+resolutions[path] = own.rstrip() + b"""
+
+## Next upstream integration (candidate only)
+
+- [Original integration notes at a26e58b](https://github.com/hiddify/hiddify-sing-box/blob/a26e58b376987a3305b201ec87fbc8918f620ad3/docs/hiddify/app_considerations.md) describe the upstream target, not the current stable fork.
+- Keep the native uTLS and vendored Xray/Reality pair until the combined build verifies replacements; do not assume newer browser fingerprints or Xray defaults are active.
+- The reviewed candidates include keep-top monitoring, independent outbound readiness and security classification, scoped network resets and Psiphon controller restart. Their full GUI and platform integration still needs testing.
+- Preserve Android socket protection, Conduit pairing, encrypted XDrive, legacy final_mask, standalone smart_dns_pool and explicit WARP fallback addresses.
+- The consuming Go modules must carry the correct local replacements themselves. Do not publish candidate binaries before the combined regression and release build gates pass.
+"""
+
+# Keep the original project's historical changelog, then retain every
+# fork-only section verbatim. A common heading is already in the original
+# history; retain the fork version too if the actual text differs.
+for path, own_sha, new_sha, label in (
+    ("docs/hiddify/bugfix/v5.en.md", "a3b7e8c03009c7d741217576713926de65ba9164", "121c3fc9e0ba2867ae63d3032bab1a3597b1e8eb", b"# VetrOFF fork history (separate from upstream)"),
+    ("docs/hiddify/bugfix/v5.fa.md", "4084b7e4e581d3f9787cf457d7a1e177c7cebde8", "c1a4c39534df9afaf2052791b63e9a107d37de34", "# تاریخچهٔ فورک VetrOFF (جدا از بالادست)".encode()),
+):
+    own = checked_blob(data["patched_tree"], path, own_sha)
+    new = checked_blob(data["upstream"], path, new_sha)
+    def sections(blob):
+        return [part.strip() for part in re.split(rb"(?m)(?=^## )", blob)[1:]]
+    a = sections(own.replace(b"</div>", b""))
+    b = sections(new.replace(b"</div>", b""))
+    assert len(a) == 151 and len(b) == 190, path
+    missing = [part for part in a if part not in set(b)]
+    assert len(missing) >= 13, path
+    body = new.rstrip()
+    rtl = path.endswith(".fa.md")
+    if rtl:
+        assert body.endswith(b"</div>")
+        body = body[:-len(b"</div>")].rstrip()
+    candidate = body + b"\n\n---\n\n" + label + b"\n\n" + b"\n\n".join(missing) + b"\n"
+    if rtl:
+        candidate += b"\n</div>\n"
+    assert all(part in candidate for part in a)
+    resolutions[path] = candidate
+
+# Monitoring behavior was reviewed together with its staged tests, lazy
+# outbounds and DNS-tunnel timeout factors. Adopt the newer documentation.
+for path, own_sha, new_sha in (
+    ("docs/hiddify/features/groups/monitoring.en.md", "1a5afd744936761055036c93fb744d50fced991f", "73028a3a410551ec078a5711d622206212f803c2"),
+    ("docs/hiddify/features/groups/monitoring.fa.md", "b4a57a1202b993e7a1d72bc60e56a6fd8b2841b5", "44c54838768375d9dd3af1ed616b2242fc0820dd"),
+):
+    own = checked_blob(data["patched_tree"], path, own_sha)
+    new = checked_blob(data["upstream"], path, new_sha)
+    keys = lambda blob: set(re.findall(rb"(?m)^\| \x60([a-z_]+)\x60 \|", blob))
+    assert keys(own) <= keys(new)
+    assert b"keep_top" in new and b"masterdns" in new and b"on_demand_timeouts" in new
+    resolutions[path] = new
+
+# Preserve explicit WARP fallback configuration while adopting the newer
+# scanner descriptions. Do not delete the fork's compatibility option.
+for path, own_sha, new_sha in (
+    ("docs/hiddify/features/protocols/warp.en.md", "2a011097b7dd15261b0cbee755ebb204b4415842", "fe0c8bfb952f9bea40f8fb35a7d5c467eb3733a5"),
+    ("docs/hiddify/features/protocols/warp.fa.md", "371dfc7c4c3238a853b9fe9c2ce471cf4bbfbe49", "b91566379398334c62f188ed3805db8326c7d33b"),
+):
+    own = checked_blob(data["patched_tree"], path, own_sha)
+    new = checked_blob(data["upstream"], path, new_sha)
+    row = re.findall(rb"(?m)^\| \x60fallback_address\x60.*$", own)
+    marker = re.findall(rb"(?m)^\| \x60private_key\x60.*$", new)
+    assert len(row) == len(marker) == 1
+    assert b"fallback_address" not in new
+    candidate = replace_once(new, marker[0], row[0] + b"\n" + marker[0])
+    assert b"search_timeout" in candidate and b"deep_concurrency" in candidate
+    assert b"block_bits_ipv4" in candidate and b"fallback_address" in candidate
+    resolutions[path] = candidate
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"
