@@ -534,3 +534,24 @@ and gitlink conflicts remain open until the combined results are reviewed.
 Expected: 43/44 Core and 151/166 sing-box (194/210; 16 remaining).
 192 source-confirmed at the last Telemost audit; two await source verification.
 Stable release pins and ROADMAP task status remain unchanged.
+
+### Documentation reconciliation and generated schema gate
+
+The source gate in audit 45486050695 confirmed 43/44 Core and 151/166
+sing-box conflicts (194/210). Eight documentation paths are submitted:
+README, app integration notes, English/Persian bug histories, monitoring
+and WARP documentation. Preserve fork branding, licenses, additional
+protocols, historical bug reports, native dependency compatibility and
+explicit fallback_address. Upstream history is not a claim that the
+combined candidate has passed its build matrix. Monitoring and WARP
+pages describe the reviewed upstream candidate behavior.
+The combined candidate workflow now generates its JSON Schema from the
+actual compiled registry and checks local references and required fork
+configuration fields. The generated schema conflict remains open until
+that artifact passes validation and is reviewed. The earlier combined
+probe 45486170730 passed source audit and was running its build when
+checked; no successful integrated build is claimed.
+Expected: 43/44 Core and 159/166 sing-box (202/210; 8 remaining).
+194 source-confirmed; eight await the new source gate. Remaining: three
+module manifests, four nested gitlinks and generated JSON schema.
+Stable pins and ROADMAP completion remain unchanged.
