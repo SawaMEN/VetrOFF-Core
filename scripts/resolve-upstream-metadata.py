@@ -1675,4 +1675,60 @@ plain = replace_once(new, b'for _, label := range strings.Split(zone, ".") {',
                      b'for label := range strings.SplitSeq(zone, ".") {')
 assert [l for l in normalize_imports(plain).splitlines() if l.strip()] == [l for l in normalize_imports(own).splitlines() if l.strip()]
 resolutions[path] = own
+
+# MTU search: the two implementations differ only in the redundant initial
+# high bound. Keep the fork's simpler declaration and all upstream behavior.
+path = "hiddify/mtusearch/mtusearch.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("8fa13ca0ce5fcd5006ed0f72ea92086fd6bad8c4",
+     "74c7b27337785fcc4174c952bf5fea1575830342",
+     "5e262529c7c30c519748c051c1a021742d7075da")))
+plain = replace_once(new, b"low, high := 0, len(sizes)", b"low := 0")
+plain = replace_once(plain, b"\thigh = len(sizes) - 1", b"\thigh := len(sizes) - 1")
+assert plain == own
+resolutions[path] = own
+
+# Peer fallback: retain per-instance timing from the fork, and upstream's
+# separate move lock so Close does not wait on a blocked device operation.
+path = "hiddify/peerfallback/peerfallback.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("4683906b0ac95192e064f99e83b9c757221da221",
+     "d6e3f31f864454c30bbc9b104a4518bba1816d33",
+     "7324c8e37cdb3f4d3bf70c85a5858a2bcb7dfbdb")))
+candidate = replace_once(new, b"\toptions Options\n",
+    b"\toptions Options\n\twait time.Duration\n\tinterval time.Duration\n")
+candidate = replace_once(candidate, b"&Fallback{options: options, since: time.Now()}",
+    b"&Fallback{options: options, since: time.Now(), wait: Wait, interval: Interval}")
+candidate = replace_once(candidate, b"time.NewTicker(Interval)", b"time.NewTicker(f.interval)")
+candidate = replace_once(candidate, b"time.Since(f.since) < Wait", b"time.Since(f.since) < f.wait")
+assert b"moveAccess sync.Mutex" in candidate
+assert b"f.closed = true" in candidate
+assert b"f.access.Unlock()\n\tif cancel != nil" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# The fork's MemoryTun API and stack-only port semantics are retained by
+# the clean merge of device.go. Restore upstream's construction cleanup and
+# error logging without reintroducing incompatible front/rear-space fields.
+path = "transport/device/stack.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("2c3cc6d10c58f526595a7671b62989b3365f12a8",
+     "8e62858ced6d7a77bea1d09b89c24ec27c36504a",
+     "1cbc604d6bf103a64b349b500587ab2e14d72d43")))
+device_api = checked_blob(data["tentative_tree"], "transport/device/device.go",
+                          "ef8c72619251033f4161580c4bc5268e75cf24b0")
+assert b"PacketHeadroom" in device_api and b"PacketFrontHeadroom" not in device_api
+for signature in (b"func (d *stackDevice) UpdateConfiguration(",
+                  b"func (d *stackDevice) DialContext(",
+                  b"func (d *stackDevice) ListenPacket(",
+                  b"func (d *stackDevice) bindAddressLocked("):
+    assert function_blob(own, signature) == function_blob(new, signature)
+candidate = replace_once(own, b"\t\t\t_ = device.writeOutbound(packets)\n",
+    b"\t\t\tif err := device.writeOutbound(packets); err != nil {\n\t\t\t\toptions.Logger.Debug(E.Cause(err, \"write packet batch\"))\n\t\t\t}\n")
+candidate = replace_once(candidate, b"device.stack, err = newStack(options, device.memoryTun)\n\tif err != nil {\n\t\treturn nil, err",
+    b"device.stack, err = newStack(options, device.memoryTun)\n\tif err != nil {\n\t\tdevice.memoryTun.Close()\n\t\treturn nil, err")
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
 apply_reviewed(data, resolutions)

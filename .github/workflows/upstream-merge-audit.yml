@@ -8,6 +8,8 @@ on:
       - 'scripts/resolve-upstream-metadata.py'
       - 'scripts/prepare-dependency-candidates.py'
       - '.github/workflows/upstream-merge-audit.yml'
+      - 'scripts/test-reviewed-tunnel-helpers.sh'
+      - 'migration/tests/**'
 permissions:
   contents: read
 jobs:
@@ -20,6 +22,12 @@ jobs:
           persist-credentials: false
       - name: Verify reviewed resolutions against the locked baseline
         run: bash scripts/audit-upstream-merge.sh 4e5a9a357003d0a995360586702fd24c53042e3f
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: .build/hiddify-core/hiddify-sing-box/go.mod
+          cache-dependency-path: .build/hiddify-core/hiddify-sing-box/go.sum
+      - name: Test reviewed tunnel helpers with the race detector
+        run: bash scripts/test-reviewed-tunnel-helpers.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:

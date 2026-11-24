@@ -22,3 +22,10 @@ complete build matrix before updating any stable gitlinks or expected trees.
 Checkpoint replay checks both saved Git tree IDs and selected index entries.
 The sing-box tree ID refers only to the partial replay, not the full merge.
 The verification does not compile the candidate.
+
+## Tunnel helper reconciliation
+
+The current-baseline audit additionally reconciles MTU search, peer fallback
+and the device stack. The audit workflow runs a scoped race-detector check
+of these three reviewed files with locked dependencies. This is not a full
+WireGuard/AWG migration or a test of the combined upstream dependency set.
