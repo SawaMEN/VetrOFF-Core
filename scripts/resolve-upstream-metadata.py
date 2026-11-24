@@ -3701,9 +3701,9 @@ for path, own_sha, new_sha in (
     own = checked_blob(data["patched_tree"], path, own_sha)
     new = checked_blob(data["upstream"], path, new_sha)
     row = re.findall(rb"(?m)^\| \x60fallback_address\x60.*$", own)
-    marker = re.findall(rb"(?m)^\| \x60private_key\x60.*$", new)
+    marker = re.findall(rb"(?m)^\| \x60private_key\x60[^\n]*\x60interface\x60[^\n]*\x60peers\x60.*$", new)
     assert len(row) == len(marker) == 1
-    assert b"fallback_address" not in new
+    assert not re.search(rb"(?m)^\| \x60fallback_address\x60.*$", new)
     candidate = replace_once(new, marker[0], row[0] + b"\n" + marker[0])
     assert b"search_timeout" in candidate and b"deep_concurrency" in candidate
     assert b"block_bits_ipv4" in candidate and b"fallback_address" in candidate
