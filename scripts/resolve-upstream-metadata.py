@@ -896,6 +896,78 @@ assert before.count(extra_imports) == 1
 assert [line for line in before.replace(extra_imports, b"").splitlines() if line.strip()] == [line for line in own.splitlines() if line.strip()]
 resolutions[path] = new
 
+# Configuration RPCs: validate and persist a complete settings snapshot
+# before publishing it. Retain the fork's import and GenerateConfig APIs.
+# Adopt the upstream temporary log-level scheduler under the settings lock.
+path = "v2/hcore/buildconfighelper.go"
+own = checked_blob(patched, path, "2186d34c8f521269c57e2387d8c315cba14005db")
+new = checked_blob(upstream, path, "a5fa106842f412a9c8257adba1564e58482ab316")
+candidate = own
+lifecycle_edit(b'\t\terr = recovered\n\t\tLog(LogLevel_ERROR, LogType_CONFIG, recovered.Error())\n\t})\n\n\tpath := in.TempPath', b'\t\tresponse = &ParseResponse{ResponseCode: hcommon.ResponseCode_FAILED, Message: recovered.Error()}\n\t\terr = recovered\n\t\tLog(LogLevel_ERROR, LogType_CONFIG, recovered.Error())\n\t})\n\n\tpath := in.TempPath')
+lifecycle_edit(b'\t\terr = recovered\n\t\tLog(LogLevel_ERROR, LogType_CONFIG, recovered.Error())\n\t})\n\tconfig, err := config.ParseBuildConfigBytes', b'\t\tresponse, err = nil, recovered\n\t\tLog(LogLevel_ERROR, LogType_CONFIG, recovered.Error())\n\t})\n\tconfig, err := config.ParseBuildConfigBytes')
+start, end = b"\tswitch next.LogLevel {", b"\n\treturn &CoreInfoResponse{}, nil"
+lifecycle_edit(lifecycle_section(own, start, end), b"\tapplyLogLevel(next.LogLevel)\n\tscheduleLogLevelEnd(next)\n")
+assert b"settingsSnapshot()" in candidate
+assert b"if err := db.GetTable[hcommon.AppSettings]().UpdateInsert" in candidate
+assert b"func (s *CoreService) GenerateConfig(" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Timer callbacks use the same lock ordering as ChangeHiddifySettings:
+# settingsLock, then logLevelEnd. A replaced timer cannot change a newer
+# profile. Snapshot reads never race the timer's option updates.
+path = "v2/hcore/log_level_until.go"
+candidate = core_clean[path]
+lifecycle_edit(b"\t\tlogLevelEnd.Lock()\n\t\tdefer logLevelEnd.Unlock()\n", b"\t\tstatic.settingsLock.Lock()\n\t\tdefer static.settingsLock.Unlock()\n\t\tlogLevelEnd.Lock()\n\t\tdefer logLevelEnd.Unlock()\n")
+lifecycle_edit(b"\tstatic.debug.Store(static.setupDebug || level <= LogLevel_DEBUG)", b"\tstatic.stateLock.RLock()\n\tsetupDebug := static.setupDebug\n\tstatic.stateLock.RUnlock()\n\tstatic.debug.Store(setupDebug || level <= LogLevel_DEBUG)")
+core_clean[path] = subprocess.check_output(["gofmt"], input=candidate)
+path = "v2/hcore/grpc_server.go"
+candidate = resolutions[path]
+lifecycle_edit(b"\tstatic.stateLock.Unlock()\n\tstatic.setupDebug = params.Debug", b"\tstatic.setupDebug = params.Debug\n\tstatic.stateLock.Unlock()")
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Mobile bindings: add device memory hints and a stopped callback but keep
+# the fork's error-returning Close and native privacy methods.
+path = "platform/mobile/mobile.go"
+own = checked_blob(patched, path, "f429ba1aaaddad7574b77b9c2b6105a8e6bd8f1d")
+new = checked_blob(upstream, path, "2d3c89fd3b502b713479f94e6516e4aca0a04cf4")
+candidate = own
+lifecycle_edit(b"\tMemoryLimit     int64\n", b"\t// MemoryLimit is the platform-provided memory budget in bytes.\n\tMemoryLimit int64\n\t// LowMemory requests the low-memory relay path.\n\tLowMemory bool\n")
+lifecycle_edit(b"\treturn hcore.Setup(&hcore.SetupRequest{", b"\thcore.SetDeviceMemory(opt.MemoryLimit, opt.LowMemory)\n\treturn hcore.Setup(&hcore.SetupRequest{")
+callback = lifecycle_section(new, b"// CoreStoppedListener", b"func Stop() error")
+lifecycle_edit(b"func Stop() error", callback + b"func Stop() error")
+assert b"func Close(mode int) error" in candidate
+assert b"func ApplyRegionalPrivacy(" in candidate and b"func ApplyDevicePrivacy(" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Preserve Android's resolved chain-stage snapshot and legacy chain
+# validation; adopt the new direct DNS resolver on detoured dialers.
+# Retain normalization of the existing Psiphon region and pairing fields.
+path = "v2/config/chain.go"
+own = checked_blob(patched, path, "14b5a08f5c34ea791c5025a5c0f6f816bdf0e766")
+new = checked_blob(upstream, path, "c3446c37ff45df63f6ef77dcd72c1966d6642e64")
+candidate = new
+marker = b"// setChainHop adds"
+lifecycle_edit(marker, lifecycle_section(own, b"// Android sends both", marker) + marker)
+lifecycle_edit(b"\tregion := psiphon.Region\n", b"\tregion := strings.ToUpper(strings.TrimSpace(psiphon.Region))\n")
+lifecycle_edit(b'options := &option.PsiphonOutboundOptions{Config: "hiddify", EgressRegion: region}', b'options := &option.PsiphonOutboundOptions{Config: "hiddify", EgressRegion: region, ConduitPairingID: strings.TrimSpace(psiphon.ConduitPairingID)}')
+assert b"dialer.DomainResolver = resolver" in candidate
+assert b"opt.ChainStage != nil" in candidate
+assert b"ChainSearchOptions" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# DNS tests: adopt upstream's remote/direct transport ordering checks and
+# keep the fork's dependency-order and no-duplicate member regressions.
+path = "v2/config/dns_group_test.go"
+own = checked_blob(patched, path, "5bae98e2465dc3c139849a70a47e610e16acd13a")
+new = checked_blob(upstream, path, "1ef41ee72d057f4b005f837eadf418dc26ae9472")
+candidate = new.rstrip() + b"\n\n" + own[own.index(b"// Remote DoH bootstrap"):].rstrip() + b"\n"
+marker = b"\t\tfor i, member := range g.Servers {\n"
+lifecycle_edit(marker, b"\t\tseen := make(map[string]bool)\n" + marker + b'\t\t\tif _, found := servers[member]; !found || seen[member] {\n\t\t\t\tt.Fatalf("%s: missing or duplicate member %q", tag, member)\n\t\t\t}\n\t\t\tseen[member] = true\n')
+assert b"func TestDNSBootstrapResolverIsDeclaredFirst" in candidate
+assert b"func TestBuildConfigRemoteDNSLocal" in candidate
+assert b"func TestTCPFirstOrder" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
 apply_reviewed(data, resolutions, core_clean)
 
 repo = repo / "hiddify-sing-box"
