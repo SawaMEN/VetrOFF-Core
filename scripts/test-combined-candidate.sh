@@ -75,7 +75,7 @@ for name, sha in sorted(pins.items()):
     assert git(destination, "rev-parse", "HEAD").decode().strip() == sha
     subprocess.run(["git", "-C", str(destination), "-c", "url.https://github.com/.insteadOf=git@github.com:",
                     "submodule", "update", "--init", "--recursive", "--jobs", "4"], check=True)
-for module, directory in (("hiddify-core", target), ("hiddify-sing-box", sing_dest)):
+for module, directory in (("hiddify-core", target), ("hiddify-sing-box", sing_dest), ("hiddify-sing-box-test", sing_dest / "test")):
     manifest = (report / (module + "-go.mod.candidate")).read_bytes()
     (directory / "go.mod").write_bytes(manifest)
     env = dict(os.environ, GOTOOLCHAIN="local", GOPROXY="off", GOSUMDB="off")
@@ -116,6 +116,13 @@ probe sing-modules go list -mod=mod -m all
 probe sing-tests go test -mod=mod -count=1 -timeout=6m -tags "$tags,with_xdrive" -ldflags '-checklinkname=0' \
   -run '^TestH_(NetworkResetReachesTheDNSServers|Psiphon|XDrive|EveryPeerBridgeHasTheSessionsHandlers)' \
   ./route ./protocol/psiphon ./transport/call/telemost ./transport/v2rayxdrive .
+# The integration test module must use exactly the reviewed root
+# replacements. Compile it without executing tests that require containers,
+# remote services or privileged network operations.
+cd "$candidate/hiddify-sing-box/test"
+probe test-modules go list -mod=mod -m all
+probe test-compile go test -mod=mod -exec /bin/true -run '^$' -tags "$tags" -ldflags '-checklinkname=0' ./...
+cd "$candidate/hiddify-sing-box"
 # The checked-in schema is generated output. Regenerate from the actual
 # candidate's registries, not by merging JSON conflict markers. Validate
 # local references and the presence of the fork compatibility options.
