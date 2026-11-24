@@ -457,6 +457,147 @@ assert own.count(old_call) == 1 and new.count(new_call) == 1
 clean = git("show", data["tentative_tree"] + ":" + path)
 assert clean in (new, new.replace(new_call, old_call, 1)), path
 core_clean = {path: new} if clean != new else {}
+# Service lifecycle: retain the fork's settings and context locks, atomic
+# debug flag and cancellation helpers, but publish the service atomically
+# as upstream does. All direct StartedService callers must be migrated.
+path = "v2/hcore/static_data.go"
+own = checked_blob(patched, path, "b4e9d99d1fb67f20cc7387e5552eb6489bf1ddb7")
+new = checked_blob(upstream, path, "e5256b3b1ef64095de599fe3bb5e3d3e255c38bc")
+candidate = own
+start = new.index(b"\t// startedService is the running service.")
+end = new.index(b"\tHiddifyOptions", start)
+assert candidate.count(b"\tStartedService *daemon.StartedService\n") == 1
+candidate = candidate.replace(b"\tStartedService *daemon.StartedService\n", new[start:end], 1)
+before = b"\tstatic.stateLock.Lock()\n\tstatic.StartedService = ss\n\tstatic.stateLock.Unlock()"
+assert candidate.count(before) == 1
+candidate = candidate.replace(before, b"\tstatic.startedService.Store(ss)", 1)
+before = b"\tdebug                     atomic.Bool\n"
+assert candidate.count(before) == 1
+candidate = candidate.replace(before, before + b"\tsetupDebug bool // initial platform debug setting; guarded by the lifecycle lock\n\tprivateConfig bool // running profile must not be persisted; guarded by the lifecycle lock\n", 1)
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Keep the fork's separate startup/lifetime contexts and shutdown semantics;
+# add the upstream coherent running snapshot and optional stop channel API.
+path = "v2/hcore/service.go"
+own = checked_blob(patched, path, "e48b2cb9755826c6b395917f75b92023283723c1")
+new = checked_blob(upstream, path, "9f2ebe8c243f00d7eeb5608e4355672fdf52c740")
+before = b"func NewService(ctx context.Context, options option.Options) (*daemon.StartedService, error) {\n\treturn NewServiceWithStartupContext(ctx, ctx, options)\n}\nfunc NewServiceWithStartupContext(ctx, startupCtx context.Context, options option.Options) (*daemon.StartedService, error) {"
+after = b"""// NewService retains two-argument callers and accepts the upstream optional stop channel.
+func NewService(ctx context.Context, options option.Options, stop ...<-chan struct{}) (*daemon.StartedService, error) {
+	if len(stop) > 1 {
+		return nil, errors.New("multiple startup stop channels")
+	}
+	if len(stop) == 1 {
+		return newService(ctx, ctx, options, stop[0])
+	}
+	return NewServiceWithStartupContext(ctx, ctx, options)
+}
+
+func NewServiceWithStartupContext(ctx, startupCtx context.Context, options option.Options) (*daemon.StartedService, error) {
+	return newService(ctx, startupCtx, options, stopSignal(startupCtx))
+}
+
+func newService(ctx, startupCtx context.Context, options option.Options, stop <-chan struct{}) (*daemon.StartedService, error) {"""
+assert own.count(before) == 1
+candidate = own.replace(before, after, 1)
+before = b"\tif stop := stopSignal(startupCtx); stop != nil {"
+assert candidate.count(before) == 1
+candidate = candidate.replace(before, b"\tif stop != nil {", 1)
+before = b"\th.stateLock.RLock()\n\tss := h.StartedService\n\th.stateLock.RUnlock()"
+assert candidate.count(before) == 1
+candidate = candidate.replace(before, b"\tss := h.startedService.Load()", 1)
+start = new.index(b"// running is the box and context")
+end = new.index(b"func (h *HiddifyInstance) Instance()", start)
+before = b"func (h *HiddifyInstance) Instance()"
+assert candidate.count(before) == 1
+candidate = candidate.replace(before, new[start:end] + before, 1)
+assert b"StartOrReloadService(startupCtx," in candidate
+assert b"errors.Is(err, os.ErrClosed)" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Start: use the actual patched tree, including the later path portability
+# patch. Keep its path traversal safeguards and the native no-persistence API.
+path = "v2/hcore/start.go"
+own = checked_blob(patched, path, "a4a0d026d716c4c56197c5630da8ac05e9d687ee")
+new = checked_blob(upstream, path, "f31f60ecaa3d414a6c5baf58649543e7ca4ab061")
+candidate = new
+def lifecycle_edit(before, after, count=1):
+    global candidate
+    assert candidate.count(before) == count, (path, before)
+    candidate = candidate.replace(before, after)
+
+def lifecycle_section(blob, start, end):
+    i = blob.index(start)
+    return blob[i:blob.index(end, i)]
+
+start, end = b"// workingRelative", b"func loadLastStartRequestIfNeeded("
+lifecycle_edit(lifecycle_section(new, start, end), lifecycle_section(own, start, end))
+assert b"filepath.IsLocal(relative)" in candidate
+assert b"lastStartRequestDisableMemoryLimit" in candidate
+start, end = b"// noConfigPersistenceKey", b"// startServiceLocked"
+lifecycle_edit(end, lifecycle_section(own, start, end) + end)
+lifecycle_edit(b"\tqueueStartLocked(static.BaseContext, in)", b"\tstatic.stateLock.RLock()\n\tbaseCtx := static.BaseContext\n\tstatic.stateLock.RUnlock()\n\tqueueStartLocked(baseCtx, in)")
+lifecycle_edit(b"\tsaveLastStartRequest(in)\n", b"\tprivateConfig := ctx.Value(noConfigPersistenceKey{}) != nil\n\tif !privateConfig {\n\t\tsaveLastStartRequest(in)\n\t}\n")
+# The retry path must obey the same policy as the first attempt.
+for indent in (b"\t", b"\t\t\t\t"):
+    lifecycle_edit(b"\n" + indent + b"config.SaveCurrentConfig(ctx, currentBuildConfigPath, *options)\n",
+                   b"\n" + indent + b"if !privateConfig {\n" + indent + b"\tconfig.SaveCurrentConfig(ctx, currentBuildConfigPath, *options)\n" + indent + b"}\n")
+lifecycle_edit(b"\tif static.debug {", b"\tif static.debug.Load() && !privateConfig {", 2)
+lifecycle_edit(b"NewService(serviceContext(ctx), *options, stopSignal(ctx))",
+               b"NewServiceWithStartupContext(serviceContext(ctx), ctx, *options)", 2)
+lifecycle_edit(b"\tstatic.startedService.Store(instance)\n", b"\tstatic.privateConfig = privateConfig\n\tstatic.startedService.Store(instance)\n")
+# Private profiles may still report their names in memory, but not store
+# their raw config or print its credentials into the debug log.
+lifecycle_edit(b"\tengineApplied(true)\n", b"\tif privateConfig {\n\t\tcurrentProfileName.Store(in.ConfigName)\n\t}\n\tengineApplied(true)\n")
+assert b"config.DropAutoRedirect(options)" in candidate
+assert b"config.RouterModeError(err)" in candidate
+assert b"restoreRouterHost()" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Stop merged textually; check both exact source versions and preserve
+# upstream's atomic unpublication and router cleanup, clearing the
+# private-profile flag only after the watcher is stopped.
+path = "v2/hcore/stop.go"
+own = checked_blob(patched, path, "7dcead91c7c1d157b6cbd0b755010494565b2140")
+new = checked_blob(upstream, path, "960f4ba3151c97978ad9a0564dbfdab03633f2ea")
+assert b"cacheSpeedTests()" in own and b"cacheSpeedTests()" in new
+assert git("show", data["tentative_tree"] + ":" + path) == new, path
+before = b"\tss := static.startedService.Swap(nil)\n"
+assert new.count(before) == 1
+core_clean[path] = new.replace(before, before + b"\tstatic.privateConfig = false\n", 1)
+
+# Hot reload must not write a native private profile to disk, even when
+# the reload caller does not carry the original startup context.
+path = "v2/hcore/hotreload.go"
+candidate = resolutions[path]
+before = b'\tsaveLastStartRequest(in)\n\tconfig.SaveCurrentConfig(ctx, filepath.Join(sWorkingPath, "data/current-config.json"), *options)'
+assert candidate.count(before) == 1
+candidate = candidate.replace(before, b'''\tif static.privateConfig || ctx.Value(noConfigPersistenceKey{}) != nil {
+		static.privateConfig = true
+		currentProfileName.Store(in.ConfigName)
+	} else {
+		saveLastStartRequest(in)
+		config.SaveCurrentConfig(ctx, filepath.Join(sWorkingPath, "data/current-config.json"), *options)
+	}''', 1)
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# New clean log-level files need the retained atomic debug field.
+for path, sha, edits in (
+    ("v2/hcore/log_level_until.go", "d6acf4941219c4e0e7d83427fed31789b2494454", (
+        (b"static.debug = static.setupDebug || level <= LogLevel_DEBUG", b"static.debug.Store(static.setupDebug || level <= LogLevel_DEBUG)"),
+    )),
+    ("v2/hcore/log_level_until_test.go", "8b50e82a959c1bfc73ef99d5c0ba5f07b82775da", (
+        (b"require.True(t, static.debug)", b"require.True(t, static.debug.Load())"),
+        (b"require.Equal(t, static.setupDebug, static.debug)", b"require.Equal(t, static.setupDebug, static.debug.Load())"),
+    )),
+):
+    new = checked_blob(upstream, path, sha)
+    assert git("show", data["tentative_tree"] + ":" + path) == new, path
+    candidate = new
+    for before, after in edits:
+        lifecycle_edit(before, after)
+    core_clean[path] = subprocess.check_output(["gofmt"], input=candidate)
+
 apply_reviewed(data, resolutions, core_clean)
 
 repo = repo / "hiddify-sing-box"
