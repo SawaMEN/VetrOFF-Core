@@ -3231,6 +3231,43 @@ assert b"return E.New(\"user \", request.DestinationUUID, \" not found\")" in ca
 assert b"case oldConn := <-ch:" in candidate and b"oldConn.Close()" in candidate
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 
+# Network manager and router are one coordinated lifecycle change:
+# upstream routes interface changes through the DNS/HTTP cache reset once,
+# registers scope-owned cleanup and avoids opening a second neighbor resolver.
+path = "route/network.go"
+own = checked_blob(data["patched_tree"], path, "1ae3cedb2f96f857e16eee20b16251505923d809")
+new = checked_blob(data["upstream"], path, "ce6a86e7802ee17f2cf4c22cef0e0dcad9424f26")
+candidate = new
+# Do not notify an already stopped network scope. Early notifications
+# still set networkResetPending so post-start can dispatch them.
+lifecycle_edit(b"\tif r.startedCtx != nil {\n\t\tr.dispatchInterfaceUpdateLocked()", b"\tif r.startedCtx != nil && r.startedCtx.Err() == nil {\n\t\tr.dispatchInterfaceUpdateLocked()")
+lifecycle_edit(b"started := r.startedCtx != nil\n", b"started := r.startedCtx != nil && r.startedCtx.Err() == nil\n")
+# Preserve the fork's monitoring notification when the platform explicitly
+# flushes DNS, in addition to upstream's native inbound cache flush.
+lifecycle_edit(b"\t\t\tflusher.FlushSystemDNSCache()\n\t\t}\n\t}\n}", b"\t\t\tflusher.FlushSystemDNSCache()\n\t\t}\n\t}\n\tr.networkChanged()\n}")
+lifecycle_edit(b"\tr.router.ResetNetwork()\n", b"\tif r.router != nil {\n\t\tr.router.ResetNetwork()\n\t}\n")
+assert b"r.startedCtx = scope.Context()" in candidate
+assert b"r.interfaceMonitor.UnregisterCallback(interfaceUpdateElement)" in candidate
+assert b"scope.Add(r.powerListener.Close)" in candidate
+assert b"monitor.InterfaceUpdated(ctx)" in candidate
+assert b"r.connectionManager.CloseAll()" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "route/router.go"
+own = checked_blob(data["patched_tree"], path, "0aa84c4b5e1779adf1951863f60181ad95dbe563")
+new = checked_blob(data["upstream"], path, "5c89a4ae3c13351db1361a182638903d1a4e2904")
+# Keep the initialization-stage neighbor resolver (including native
+# platform resolution), not the duplicate start-stage initialization.
+assert b"r.needFindNeighbor = needFindNeighbor" in own
+assert b"r.needFindNeighbor = needFindNeighbor" not in new
+assert b"newPlatformNeighborResolver" in new and b"scope.Add(resolver.Close)" in new
+assert b"scope.Add(r.processSearcher.Close)" in new
+assert b"hSetIPv6Fallback(router.connection, options.IPv6Fallback)" in new
+assert b"dnsHijackSlots:" in new
+assert b"r.network.ResetNetwork(r.ctx)" not in new
+assert b"r.httpClientManager.ResetNetwork()" in new and b"r.dns.ResetNetwork()" in new
+resolutions[path] = new
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"
