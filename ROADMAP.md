@@ -38,4 +38,6 @@ Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Cli
 - [ ] Integrate actual profile validation and mux lifecycle into the selector owner.
 - [x] Add opt-in logical connection budget candidate with race-safe reservations.
 - [ ] Wire connection budget into actual dial/close lifecycle and verify transport resource usage.
+- [x] Add bounded opt-in in-memory availability history and probe ordering candidate.
+- [ ] Bind process-local network/profile identities and existing probe lifecycle to history.
 - [ ] Validate candidate builds and real network behavior before promotion.
