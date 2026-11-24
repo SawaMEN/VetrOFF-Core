@@ -834,3 +834,16 @@ selected module graphs, not full protocol interoperability. No further
 version bumps are made until this evidence and the remaining Core tests
 are available. Stable pins and the 205/210 source review count remain
 unchanged.
+
+### Candidate evidence preflight (no automatic promotion)
+
+The combined candidate with the shared-network checks was queued as
+run 45501211366. The independent preflight checks a specified successful
+combined CI run and exact commit, nested pins, MasterDNS overlay and
+caller evidence, six effective manifest hashes, Core/network PASS
+markers, generated schema references and SHA-256. It records unresolved
+paths and shared source differences. It never modifies sources or
+publishes a release. Push CI runs validator unit tests; manually dispatch
+Candidate evidence preflight with the successful run ID and exact head
+SHA when available. Older incomplete evidence is intentionally rejected.
+Stable pins unchanged; 205/210 source paths reviewed, 36/53 roadmap tasks.

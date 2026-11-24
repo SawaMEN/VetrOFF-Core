@@ -1,0 +1,69 @@
+name: Candidate evidence preflight
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/verify-candidate-evidence.py'
+      - '.github/workflows/candidate-evidence.yml'
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Successful combined candidate integration run ID'
+        required: true
+        type: string
+      candidate_sha:
+        description: 'Exact commit SHA of the integration run'
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test evidence validator
+        run: python3 scripts/verify-candidate-evidence.py --self-test
+      - name: Verify integration run identity
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" > run.json
+          python3 - <<'PY'
+          import json, os
+          with open("run.json") as stream:
+              run = json.load(stream)
+          assert run["path"] == ".github/workflows/combined-candidate.yml"
+          assert run["head_branch"] == "main"
+          assert run["head_sha"] == os.environ["CANDIDATE_SHA"]
+          assert run["status"] == "completed" and run["conclusion"] == "success"
+          assert run["head_repository"]["full_name"].lower() == os.environ["GITHUB_REPOSITORY"].lower()
+          PY
+      - uses: actions/download-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: combined-candidate-diagnostics
+          path: evidence
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Validate complete candidate evidence
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-candidate-evidence.py evidence | tee candidate-preflight.json
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch' && success()
+        with:
+          name: candidate-preflight
+          path: candidate-preflight.json
+          if-no-files-found: error
