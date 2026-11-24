@@ -721,11 +721,11 @@ def proto_inventory(blob):
                 member, request, response = match.groups()
                 value = (request.strip(), response.strip())
             else:
-                match = re.fullmatch(rb"(.+?)\s*=\s*(\d+)", stmt)
+                match = re.fullmatch(rb'(.+?)\s*=\s*(\d+)(?:\s*\[\s*json_name\s*=\s*"([^"]+)"\s*\])?', stmt)
                 assert match, stmt
-                value, member = match.groups()
-                # Whitespace around map type punctuation is immaterial.
-                value = re.sub(rb"\s*([<>,])\s*", rb"\1", value)
+                declaration, member, json_name = match.groups()
+                # Preserve explicit JSON names as well as wire types and numbers.
+                value = (re.sub(rb"\s*([<>,])\s*", rb"\1", declaration), json_name)
             assert member not in members, (key, member)
             members[member] = value
         groups[key] = members
