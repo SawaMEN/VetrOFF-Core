@@ -26,6 +26,7 @@ on:
       - '.github/workflows/upstream-merge-audit.yml'
       - '.github/workflows/combined-candidate.yml'
       - '.github/workflows/verify-migration-checkpoints.yml'
+      - '.github/workflows/publish-004.yml'
   pull_request:
   schedule:
     - cron: '15 5 * * 1'
@@ -176,5 +177,12 @@ jobs:
             echo "Release $tag already exists"
             exit 0
           fi
-          gh release create "$tag" release/* --target "$GITHUB_SHA" \
+          mkdir publish
+          for name in vetroff-core-darwin-amd64 vetroff-core-darwin-arm64 vetroff-core-linux-amd64 vetroff-core-linux-arm64 vetroff-core-windows-amd64.exe; do
+            (cd release && sha256sum -c "$name.sha256")
+            test -s "release/$name"
+            cp "release/$name" "publish/$name"
+          done
+          (cd publish && sha256sum vetroff-core-* > SHA256SUMS && sha256sum -c SHA256SUMS)
+          gh release create "$tag" publish/* --target "$GITHUB_SHA" \
             --title "VetrOFF-Core $version" --generate-notes

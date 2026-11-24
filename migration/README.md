@@ -905,3 +905,19 @@ exactly. The nested checkout, overlay and manifest checks remain intact.
 A narrowly scoped push trigger retries the matrix using only the approved
 successful integration 45501843656 unless manually dispatched. No source
 pin, VERSION or stable release changes. Matrix retry pending.
+
+### Publish 0.0.4 verified desktop binaries
+
+The final combined integration 45501843656 succeeded with all 210
+conflicts resolved. Candidate matrix 45506329292 successfully reconstructed
+the tested source trees and is compiling the five desktop targets. User
+approved publication of 0.0.4. A separate publish workflow is restricted
+to that matrix run and its exact SHA. It requires all five successful
+build jobs, checks each binary against its artifact checksum, and
+publishes five binaries plus a single SHA256SUMS. No TXT provenance or
+per-binary checksum assets are included; source tree identities and CI
+links are retained in release notes. Create a draft first, verify the six
+uploaded assets, then publish as latest. The existing locked-source
+release pipeline also uses the six-asset layout in future versions.
+The stable patch-stack promotion remains separate; VERSION and locked
+0.0.3 source pins are unchanged. No unverified binary is published.
