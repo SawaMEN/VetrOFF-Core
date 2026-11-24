@@ -7,6 +7,7 @@ on:
       - 'scripts/audit-upstream-merge.sh'
       - 'scripts/resolve-upstream-metadata.py'
       - 'scripts/prepare-dependency-candidates.py'
+      - 'scripts/prepare-tailscale-callers.py'
       - '.github/workflows/upstream-merge-audit.yml'
       - 'scripts/test-reviewed-tunnel-helpers.sh'
       - 'scripts/test-reviewed-tunnel-transports.sh'
