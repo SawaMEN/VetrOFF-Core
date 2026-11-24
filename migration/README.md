@@ -277,3 +277,19 @@ excludes the lazy KeepTop implementation until the paired sing-box and
 hcore lifecycle are reconciled. Three additional Core conflict resolutions
 are submitted (14/44, expected 30 remaining), pending the new CI gate.
 Stable pins and published packages are unchanged.
+
+### KeepTop runtime and HotReload reconciliation
+
+Run 45474731669 passed the merged Core option/port regression gate.
+Run 45473904930 also completed all previously scoped sing-box checks
+(134 reviewed conflicts, 32 remaining). Adopt the upstream lazy KeepTop
+runtime while retaining the fork's multi-format ParseConfig call and its
+Naive/Trojan share-link and JSON startup regression. The new runtime tests
+replace the old private reload-driven selection tests. HotReload retains
+the protected BaseContext read, uses one captured service pointer, and
+imports delegated proxy bookkeeping and engine application reporting.
+Check the clean connectivity merge for the exact obsolete watcher call.
+Three additional Core paths are submitted (17/44, expected 27 remaining).
+The start/stop paths, atomic service publication and full lazy monitoring
+integration are still pending; this is not an integrated runtime build.
+Stable pins are unchanged.
