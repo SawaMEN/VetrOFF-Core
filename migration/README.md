@@ -458,3 +458,23 @@ Expected resolutions: 43/44 Core and 139/166 sing-box (182/210; 28 remaining).
 pacing failures are not considered fixed until the regression suite passes;
 no throughput or CPU improvement is claimed without measurement. Stable pins
 remain unchanged.
+
+### XDrive security regressions and Xray interoperability
+
+Audit 45482278797 passed the reviewed-source gate, confirming 182/210
+resolutions. Four additional sing-box paths are submitted: the box-level
+XDrive test, Xray interop test and both XDrive documentation translations.
+Retain encrypted VLESS and add an explicit plaintext rejection regression,
+plus a bounded write deadline and full-write assertion for the local round
+trip. Adopt upstream's additional XHTTP interoperability cases and TLS
+fingerprint regression. Keep the locked Xray release's existing documented
+limits rather than claiming the newer backend defaults. Include attribution.
+The scoped protocol gate now includes XDrive transport lifecycle tests under
+the race detector. Box-level and real Xray binary interoperability tests still
+need an integrated build; the newer Xray/Reality pair remains unpromoted.
+Psiphon remains open: the upstream controller restart loop and SOCKS bridge
+must be reconciled with the fork's close synchronization, Android DeviceBinder,
+Conduit pairing, detour validation and isolated data directories. Preserve
+these requirements before adopting the new scanner or changing bootstrap.
+Expected count: 43/44 Core and 143/166 sing-box (186/210; 24 remaining).
+182 source-confirmed, four await the latest source gate. Stable pins unchanged.
