@@ -234,3 +234,15 @@ compatibility metadata and scoped cleanup. Explicit Close shares that
 cleanup. The outbound is tested with locked fork dependencies and new
 upstream close tests. Full candidate integration remains required; stable
 pins unchanged.
+
+### FinalMask reconciliation and WARP diagnostics
+
+Audit 45471276316 confirmed 128 conflicts, VLESS race tests and stable
+build. WARP compiled; two runtime assertions expected the old generic
+address error instead of the fork's more precise IPv4/IPv6 diagnostic.
+Keep the validation and update only the two exact expectations. Resolve
+six FinalMask paths: preserve compact fragment ranges, domain checks and
+modern iteration; adopt the upstream IPv4-only test socket helper and
+larger UDP hop test pool. Run the full FinalMask package with the race
+detector using the existing locked Xray dependency. No stable pins are
+changed; the new candidate still requires CI verification.

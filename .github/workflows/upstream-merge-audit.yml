@@ -59,7 +59,7 @@ jobs:
         id: masque_tests
         if: ${{ !cancelled() && steps.warp_tests.outcome == 'success' }}
         run: bash scripts/test-reviewed-masque.sh
-      - name: Test reviewed DNSTT, Shadowsocks and SSH packages
+      - name: Test reviewed DNSTT, Shadowsocks, SSH and FinalMask packages
         if: ${{ !cancelled() && steps.dns_tests.outcome == 'success' }}
         run: bash scripts/test-reviewed-protocols.sh
       - name: Test reviewed VLESS outbound with fork dependencies

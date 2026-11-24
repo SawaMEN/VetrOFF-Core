@@ -1464,6 +1464,9 @@ candidate += b"\n" + function_blob(own, b"func TestH_WARPIPv6PeerAddress(") + b"
 assert b"func TestH_WARPIncompleteProfileIsNotUsed(" in candidate
 assert b"func TestH_WARPIncompleteRegisteredDeviceFails(" in candidate
 assert b"func TestH_WARPIncompleteSavedDeviceIsRetired(" in candidate
+# The fork deliberately retains the more precise interface-address diagnostic.
+assert candidate.count(b"no interface address") == 2
+candidate = candidate.replace(b"no interface address", b"WARP interface is missing IPv4 and IPv6 addresses")
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 
 path = "h_warp_detour_live_test.go"
@@ -2237,6 +2240,75 @@ for marker in (b"SetVisionTestseed(options.Testseed)", b"newPreconnectPool(", b"
     assert marker in candidate, marker
 assert candidate.count(b"context.AfterFunc(ctx, closeRaw)") == 2
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+
+# FinalMask: preserve the fork's compact range parser and modern Go
+# iteration, while bringing over the upstream IPv4 test socket fix.
+path = "hiddify/finalmask/dialer.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("e55c64742e1c30f08ea97273c67dea31c377356a",
+     "ec1233fcd16f3659a90b371893c978eea570c2aa",
+     "81af2878a478f333ffc910e8adc8b1a02fb0a882")))
+plain = replace_once(new, b"for i := len(m.tcp) - 1; i >= 0; i-- {", b"for _, v := range slices.Backward(m.tcp) {")
+plain = replace_once(plain, b"m.tcp[i].WrapConnServer(conn)", b"v.WrapConnServer(conn)")
+plain = replace_once(plain, b"destination.IsFqdn()", b"destination.IsDomain()")
+assert plain == own
+resolutions[path] = own
+
+path = "hiddify/finalmask/h_xdns_legacy.go"
+own, new = added_pair(path, "b6308a2cbae093800c4a9725c5a728d823991d14",
+                      "b0c5884cecc0b9abad79049f79d918beb2ca86f9")
+assert own.splitlines() == new.splitlines()
+resolutions[path] = own
+
+path = "hiddify/finalmask/xray_tls.go"
+own, new = added_pair(path, "7070bfe749180c4df93d3cf09c3f04c8d956c474",
+                      "86328c3c098d71c0d4c39587aeb8fda446bccd35")
+plain = replace_once(new, b'for _, rangeStr := range strings.Split(listStr, ",") {',
+                     b'for rangeStr := range strings.SplitSeq(listStr, ",") {')
+assert plain == own
+resolutions[path] = own
+
+path = "hiddify/finalmask/xray_conf.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("c766f97a89881cc44ac8017241a2d2193fc2317c",
+     "f5fa47e690a239d09db5b79b80cba980538342c6",
+     "2f2a1c47e1fa9ece4082451105ff742133a9ec6e")))
+plain = replace_once(new, b'for _, mode := range strings.Split(c.Mode, ",") {',
+                     b'for mode := range strings.SplitSeq(c.Mode, ",") {')
+plain = replace_once(plain, b'Lengths  Int32RangeList', b'Lengths  hInt32Ranges')
+plain = replace_once(plain, b'Delays   Int32RangeList', b'Delays   hInt32Ranges')
+assert b"".join(plain.split()) == b"".join(own.replace(b" // H: accept old compact ranges", b"").replace(b"  // H: accept old compact ranges", b"").split())
+helper = checked_blob(data["tentative_tree"], "hiddify/finalmask/h_fragment_ranges.go", "5d15380247c0b4a5645a073905e207250d516ae5")
+assert b"func (r *hInt32Ranges) UnmarshalJSON(" in helper
+resolutions[path] = own
+
+path = "hiddify/finalmask/finalmask_test.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("6efed322afa1913460822a4c366bb88739af9b20",
+     "7ae30bd9d216d5f628efc808d8ed3f41d80f7cee",
+     "e81a555b2b0ba36b20e944d99d80cfb885dc4e41")))
+i = new.index(b"// listenPacket opens")
+j = new.index(b"// wrapTCP", i)
+plain = new[:i] + new[j:]
+plain = replace_once(plain, b"N.SystemDialer.DialContext, listenPacket)", b"N.SystemDialer.DialContext, N.SystemDialer.ListenPacket)")
+plain = replace_once(plain, b"packetConn, err := listenPacket(ctx, destination)", b"packetConn, err := N.SystemDialer.ListenPacket(ctx, destination)")
+assert plain == own
+resolutions[path] = new
+
+path = "hiddify/finalmask/h_xray_v26_10_test.go"
+own, new = added_pair(path, "327d41fed652b6ffbb886b18f14156ad26308d69",
+                      "3a5a1ff42c74baedfa9eb43673ac00bf911a3f1d")
+plain = replace_once(new, b"return listenPacket(ctx, destination)", b"return N.SystemDialer.ListenPacket(ctx, destination)")
+plain = replace_once(plain,
+    b"// a hop picks any of the ports, the current one too: with 16 the connection stays on its first\n\t// port through the three hops of the 20 s below once in 4096 runs (once in 27 with three ports)",
+    b"// A larger pool makes a repeated random selection vanishingly unlikely.")
+plain = replace_once(plain, b"for range 16 {", b"for range 8 {")
+assert plain == own
+resolutions[path] = new
 
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
