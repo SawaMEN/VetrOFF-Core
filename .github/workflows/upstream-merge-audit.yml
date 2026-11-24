@@ -128,7 +128,7 @@ jobs:
           cd "$sing"
           CGO_ENABLED=1 go test -race -mod=mod -overlay "$tmp/overlay.json" -count=1 -timeout=3m -ldflags '-checklinkname=0' \
             -run '^TestH_(NetworkResetReachesTheDNSServers|ReadPace|WakePace|PacedRawConn|TrackedDatagramSocket|TrackedSockets|PathRoundTrip|BusyDatagramSocket)' -v ./route 2>&1 | tee "$report/network-reset-candidate-test.log"
-          for test in TestH_NetworkResetReachesTheDNSServers TestH_TrackedDatagramSocketKeepsItsReader TestH_WakePaceNeedsALongPath; do
+          for test in TestH_NetworkResetReachesTheDNSServers TestH_TrackedDatagramSocketKeepsItsReader TestH_WakePaceNeedsALongPath TestH_ReadPaceLeavesAnExchangeAlone TestH_PacedRawConnWaitsAfterAWakeUp; do
             grep -Fq -- "--- PASS: $test" "$report/network-reset-candidate-test.log"
           done
           HIDDIFY_NO_READ_PACE=1 CGO_ENABLED=1 go test -race -mod=mod -overlay "$tmp/overlay.json" -count=1 -timeout=3m -ldflags '-checklinkname=0' \
