@@ -14,6 +14,7 @@ on:
       - 'scripts/fix-masterdns-session-readiness.py'
       - 'scripts/audit-upstream-merge.sh'
       - 'scripts/resolve-upstream-metadata.py'
+      - 'scripts/resolve-reviewed-gitlinks.py'
       - '.github/workflows/combined-candidate.yml'
 permissions:
   contents: read

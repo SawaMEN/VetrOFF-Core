@@ -58,8 +58,15 @@ for line in git(sing_src, "ls-tree", "-r", sing["reviewed_tree"]).decode().split
         continue
     assert kind == "commit" and name.startswith("replace/"), name
     if name in links:
-        sha = links[name]
-        assert git(sing_src, "rev-parse", sing["upstream"] + ":" + name).decode().strip() == sha
+        expected = links[name]
+        assert git(sing_src, "rev-parse", sing["upstream"] + ":" + name).decode().strip() == expected
+        if name in sing.get("reviewed_gitlinks", {}):
+            assert sha == expected, (name, sha)
+            assert sing["reviewed_gitlinks"][name]["upstream"] == expected
+            assert name not in sing["remaining_conflicts"]
+        else:
+            assert name in sing["remaining_conflicts"], name
+            sha = expected
     pins[name] = sha
 assert set(links) <= set(pins)
 for name, sha in sorted(pins.items()):

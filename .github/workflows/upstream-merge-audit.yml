@@ -6,6 +6,7 @@ on:
     paths:
       - 'scripts/audit-upstream-merge.sh'
       - 'scripts/resolve-upstream-metadata.py'
+      - 'scripts/resolve-reviewed-gitlinks.py'
       - 'scripts/prepare-dependency-candidates.py'
       - 'scripts/prepare-tailscale-callers.py'
       - '.github/workflows/upstream-merge-audit.yml'

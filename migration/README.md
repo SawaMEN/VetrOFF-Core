@@ -683,3 +683,20 @@ reported for review, not automatically downgraded or treated as failures.
 Four offline helper self-tests run before the expensive integration.
 202/210 original source conflicts confirmed; eight pending. ROADMAP 9/16.
 No stable dependency pins or release inputs changed.
+
+### Two reviewed nested gitlinks staged in the current candidate
+
+The current locked fork still pins the same sing and Soar revisions as the
+historical migration. The sing cached-connection regression blob is exactly
+identical on both sides (419a876), and upstream contains the original race
+fix dcc5d99. Soar's only fork-side commit 71ae9fb has the same two added
+file blobs as upstream c2af37c, followed by upstream resolver corrections.
+Combined run 45488228887 passed the scoped library tests at these targets.
+A separate hash-guarded index step now selects b40ea07 and e18587b for the
+reviewed candidate, retaining mode 160000 and verifying the tree delta.
+The combined build must consume those exact staged gitlinks. This does not
+change root submodules, stable patches or any published binary.
+Expected after the new source gate: 204/210 (43/44 Core, 161/166 sing-box),
+six outstanding: MasterDNS, Tailscale, three go.mod files and schema.
+202/210 remain CI-confirmed until this commit's audit passes. ROADMAP 9/16.
+The full combined build and cross-platform release gates remain mandatory.
