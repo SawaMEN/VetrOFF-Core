@@ -3386,7 +3386,8 @@ lifecycle_edit(function_blob(new, b"func (p *Psiphon) Close()"), b"""func (p *Ps
 	p.closeDataStore()
 	p.connected.Store(false)
 	return nil
-}""")
+}
+""")
 lifecycle_edit(b"func NewPsiphon(ctx context.Context, l logger.ContextLogger, config *psiphon.Config, tag string) (*Psiphon, error) {\n\tp := Psiphon{", b"func NewPsiphon(ctx context.Context, l logger.ContextLogger, config *psiphon.Config, tag string) (*Psiphon, error) {\n\tctx, instanceCancel := context.WithCancel(ctx)\n\tp := Psiphon{\n\t\tinstanceCancel: instanceCancel,")
 lifecycle_edit(b"func (p *Psiphon) Start() error {\n\tctx, cancel := context.WithCancel(p.ctx)", b"""func (p *Psiphon) Start() (err error) {
 	p.lifeMu.Lock()
@@ -3528,7 +3529,7 @@ new = checked_blob(data["upstream"], path, "9b140a294335c4338371aca6e594e1cc61f9
 candidate = new
 lifecycle_edit(b'\t"encoding/base64"\n', b'\t"encoding/base64"\n\t"net"\n')
 lifecycle_edit(b'\t\tEgressRegion:                            "DE",', b'\t\tEgressRegion:                            "DE",\n\t\tConduitPairingID:                        "pair",')
-lifecycle_edit(b'\trequire.Equal(t, "DE", config.EgressRegion)\n', b'\trequire.Equal(t, "DE", config.EgressRegion)\n\trequire.Equal(t, "pair", config.InproxyClientPersonalCompartmentID)\n')
+lifecycle_edit(b'\trequire.Equal(t, "DE", config.EgressRegion)\n\trequire.Equal(t, "PC", config.PropagationChannelId)', b'\trequire.Equal(t, "DE", config.EgressRegion)\n\trequire.Equal(t, "pair", config.InproxyClientPersonalCompartmentID)\n\trequire.Equal(t, "PC", config.PropagationChannelId)')
 lifecycle_edit(b"require.Equal(t, defaultDataDirectory, config.MigrateDataStoreDirectory)", b'require.Equal(t, filepath.Join(defaultDataDirectory, "psiphon"), config.MigrateDataStoreDirectory)')
 lifecycle_edit(b"require.Equal(t, defaultDataDirectory, config.MigrateObfuscatedServerListDownloadDirectory)", b'require.Equal(t, filepath.Join(defaultDataDirectory, "psiphon"), config.MigrateObfuscatedServerListDownloadDirectory)')
 lifecycle_edit(b'filepath.Join(defaultDataDirectory, "server_list_compressed")', b'filepath.Join(defaultDataDirectory, "psiphon", "server_list_compressed")')
