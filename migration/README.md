@@ -921,3 +921,16 @@ uploaded assets, then publish as latest. The existing locked-source
 release pipeline also uses the six-asset layout in future versions.
 The stable patch-stack promotion remains separate; VERSION and locked
 0.0.3 source pins are unchanged. No unverified binary is published.
+
+### Retry release publication after HTTP 403
+
+Matrix 45506329292 completed successfully for all five desktop targets.
+Publication 45507384320 verified all binary checksums and the six-asset
+layout, but GitHub rejected release creation with HTTP 403 even though
+the job reported Contents: write. Retry from a main-branch push rather
+than only workflow_run and target the publishing workflow's own commit
+for tag creation instead of the earlier matrix commit (an older-target
+tag restriction is a possible cause, not confirmed). Preserve the exact
+approved matrix and integration identities, binary checksums, and tested
+source trees in release notes. No rebuild, credentials escalation, or
+changes to the verified binaries. Success requires a new CI result.

@@ -1,5 +1,9 @@
 name: Publish verified VetrOFF-Core 0.0.4
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-004.yml'
   workflow_run:
     workflows: ['VetrOFF-Core 0.0.4 candidate matrix']
     branches: [main]
@@ -15,6 +19,7 @@ jobs:
   publish:
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
       (github.event.workflow_run.id == 45506329292 &&
        github.event.workflow_run.head_sha == 'd3b70cdc85d013f47a93e3105965b139b28486a6' &&
        github.event.workflow_run.conclusion == 'success')
@@ -102,6 +107,7 @@ jobs:
               "",
               "Integration: https://github.com/SawaMEN/VetrOFF-Core/actions/runs/45501843656",
               "Build matrix: https://github.com/SawaMEN/VetrOFF-Core/actions/runs/45506329292",
+              "The release tag identifies the publication workflow revision; the exact tested source trees are listed below.",
               "",
               "Tested source trees:",
           ]
@@ -117,8 +123,11 @@ jobs:
             echo "v0.0.4 already exists; refusing to overwrite" >&2
             exit 1
           fi
+          # Create the release tag at the publishing workflow's own main
+          # commit. The tested matrix SHA remains separately verified above.
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
           gh release create v0.0.4 release/* --repo "$GITHUB_REPOSITORY" \
-            --target "$MATRIX_SHA" --title "VetrOFF-Core 0.0.4" \
+            --target "$GITHUB_SHA" --title "VetrOFF-Core 0.0.4" \
             --notes-file release-notes.md --draft
           gh release view v0.0.4 --repo "$GITHUB_REPOSITORY" --json assets,isDraft > release-state.json
           python3 - <<'PY'
