@@ -18,7 +18,7 @@ def git(*args):
     return subprocess.check_output(["git", "-C", str(sing), *args])
 groups = ("protocol/hiddify/dnstt", "protocol/shadowsocks", "transport/simple-obfs", "protocol/ssh",
           "hiddify/readahead", "common/wholepacket", "hiddify/finalmask", "protocol/tunnel", "transport/v2rayxdrive", "protocol/psiphon", "common/proxybridge", "hiddify/edgescan", "transport/call", "protocol/call")
-extra = ("option/shadowsocks.go", "option/dnstt.go", "option/ssh.go", "option/psiphon.go", "option/h_psiphon_scanner.go", "option/h_edge_search.go", "option/h_call.go")
+extra = ("option/shadowsocks.go", "option/dnstt.go", "option/ssh.go", "option/psiphon.go", "option/h_psiphon_scanner.go", "option/h_edge_search.go", "option/h_call.go", "adapter/h_deep_search.go")
 # Some option filenames differ by revision: only include paths that exist.
 extra = tuple(p for p in extra if git("ls-tree", tree, "--", p))
 blocked = [p for p in meta["remaining_conflicts"] if p in extra or any(p.startswith(g + "/") for g in groups)]
@@ -50,10 +50,21 @@ with tempfile.TemporaryDirectory() as tmp:
         env = dict(os.environ, CGO_ENABLED="1")
         failed = []
         for name, package in (("readahead", "./hiddify/readahead"), ("wholepacket", "./common/wholepacket"), ("dnstt", "./protocol/hiddify/dnstt"), ("shadowsocks", "./protocol/shadowsocks"), ("ssh", "./protocol/ssh"), ("finalmask", "./hiddify/finalmask"), ("tunnel-server", "./protocol/tunnel"), ("xdrive-lifecycle", "./transport/v2rayxdrive"), ("psiphon", "./protocol/psiphon"), ("telemost", "./transport/call/telemost"), ("call-relay", "./transport/call/tunnel"), ("call-config", "./transport/call"), ("call-retry", "./protocol/call")):
+            # Psiphon's reviewed scanner requires the upstream tunnel-core fork.
+            # Use that exact replacement only for its own test, then restore
+            # both manifests so other packages still test locked dependencies.
+            if name == "psiphon":
+                assert b"github.com/CluvexStudio/psiphon-tunnel-core v0.0.0-20260828000332-83aa73b9b982" in (report / "hiddify-sing-box-go.mod.candidate").read_bytes()
+                saved_mod = (sing / "go.mod").read_bytes()
+                saved_sum = (sing / "go.sum").read_bytes()
+                subprocess.run(["go", "mod", "edit", "-replace=github.com/Psiphon-Labs/psiphon-tunnel-core=github.com/CluvexStudio/psiphon-tunnel-core@v0.0.0-20260828000332-83aa73b9b982"], cwd=sing, env=env, check=True)
             with (report / (name + "-candidate-test.log")).open("wb") as log:
                 result = subprocess.run(["go", "test", "-race", "-mod=mod", "-count=1",
                     "-timeout=5m", "-ldflags", "-checklinkname=0", package], cwd=sing, env=env,
                     stdout=log, stderr=subprocess.STDOUT)
+            if name == "psiphon":
+                (sing / "go.mod").write_bytes(saved_mod)
+                (sing / "go.sum").write_bytes(saved_sum)
             print((report / (name + "-candidate-test.log")).read_text(), flush=True)
             if result.returncode:
                 failed.append(name)
