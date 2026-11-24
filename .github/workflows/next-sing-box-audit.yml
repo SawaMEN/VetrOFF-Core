@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - 'scripts/audit-next-sing-box.py'
+      - 'scripts/resolve-next-sing-box.py'
       - '.github/workflows/next-sing-box-audit.yml'
   workflow_dispatch:
 permissions:

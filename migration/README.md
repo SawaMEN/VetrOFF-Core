@@ -967,3 +967,16 @@ in disposable bare repositories and record availability and fetch logs.
 Missing revisions remain hard blockers even if the parent merge is
 clean. Do not substitute old pins, change stable sources or publish a
 partial 0.0.5. The corrected audit is pending CI.
+
+### Resolve four v5 update conflicts
+
+Audit 45511347491 identified four conflicts and confirmed both unavailable
+nested gitlinks. Lock the released sing-box tree f76b0611b09245e2f636692487b774c03a18d6c2
+and four target blobs. Extend the fork inbound metadata with the new IPv6
+route lookahead field; retain the fork MASQUE lifecycle and peer metadata
+while merging the upstream callback integration; preserve the fork app
+notes with a separate pointer to the target's integration notes. Stage
+only those four paths into the tentative tree and export the reviewed
+patch and files. Remaining conflicts and unavailable dependencies are
+reported independently. The updated source choices are pending CI;
+no build or release can pass while sing and Soar pins are unavailable.

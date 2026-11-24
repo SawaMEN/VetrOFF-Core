@@ -108,6 +108,9 @@ def main(work, local, evidence, report):
     (report / "upstream-diff.patch").write_bytes(git(repo, "diff", "--binary", "--full-index", OLD, NEW))
     (report / "tentative-update.patch").write_bytes(git(repo, "diff", "--binary", "--full-index", baseline, tree))
     (report / "merge-stderr.log").write_bytes(result.stderr)
+    resolver = module("next_resolutions", "resolve-next-sing-box.py")
+    reviewed_tree, resolved_paths = resolver.resolve(repo, baseline, tree, conflicts, report)
+    remaining = sorted(set(conflicts) - set(resolved_paths))
     dependencies = check_dependencies(repo, report)
     blocked = sorted(path for path, info in dependencies.items() if not info["available"])
     details = {
@@ -120,16 +123,19 @@ def main(work, local, evidence, report):
         "changed_upstream_paths": changed,
         "conflicts": conflicts,
         "conflict_count": len(conflicts),
+        "reviewed_tree": reviewed_tree,
+        "resolved_conflicts": resolved_paths,
+        "remaining_conflicts": remaining,
         "dependencies": dependencies,
         "unavailable_dependencies": blocked,
         "status": ("dependency_fetch_blocked" if blocked else
-                   "review_required" if conflicts else "clean_merge_tests_required"),
+                   "review_required" if remaining else "clean_merge_tests_required"),
         "stable_promotion": False,
     }
     (report / "update-audit.json").write_text(json.dumps(details, indent=2, sort_keys=True) + "\n")
     print(json.dumps(details, indent=2, sort_keys=True))
     # Even a clean merge still needs its own full integration and matrix.
-    return 1 if conflicts or blocked else 0
+    return 1 if remaining or blocked else 0
 
 
 if __name__ == "__main__":
