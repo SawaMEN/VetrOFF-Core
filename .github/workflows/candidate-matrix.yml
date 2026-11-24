@@ -1,5 +1,10 @@
 name: VetrOFF-Core 0.0.4 candidate matrix
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/replay-final-candidate.py'
+      - '.github/workflows/candidate-matrix.yml'
   workflow_run:
     workflows: ['Combined candidate integration']
     branches: [main]
@@ -17,12 +22,16 @@ on:
 permissions:
   contents: read
   actions: read
+concurrency:
+  group: vetroff-candidate-matrix-004
+  cancel-in-progress: false
 jobs:
   source:
     # Auto-build only the explicitly approved final integration revision.
     # Manual dispatch remains available for later verified candidates.
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.id == 45501843656 &&
        github.event.workflow_run.head_sha == 'ce43716bb022c8f042a74490841303e9bc23d92d')
@@ -39,8 +48,8 @@ jobs:
       - name: Verify run identity
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ inputs.run_id || github.event.workflow_run.id }}
-          CANDIDATE_SHA: ${{ inputs.candidate_sha || github.event.workflow_run.head_sha }}
+          RUN_ID: ${{ inputs.run_id || github.event.workflow_run.id || '45501843656' }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha || github.event.workflow_run.head_sha || 'ce43716bb022c8f042a74490841303e9bc23d92d' }}
         run: |
           set -euo pipefail
           [[ "$RUN_ID" =~ ^[0-9]+$ ]]
@@ -60,11 +69,11 @@ jobs:
         with:
           name: combined-candidate-diagnostics
           path: evidence
-          run-id: ${{ inputs.run_id || github.event.workflow_run.id }}
+          run-id: ${{ inputs.run_id || github.event.workflow_run.id || '45501843656' }}
           github-token: ${{ github.token }}
       - name: Replay exact final source trees
         env:
-          CANDIDATE_SHA: ${{ inputs.candidate_sha || github.event.workflow_run.head_sha }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha || github.event.workflow_run.head_sha || 'ce43716bb022c8f042a74490841303e9bc23d92d' }}
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=1 origin "$CANDIDATE_SHA"

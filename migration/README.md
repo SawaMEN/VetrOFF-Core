@@ -890,3 +890,18 @@ head SHA and successful conclusion. Reuse the existing API identity and
 artifact validation before building. Failed or unrelated runs cannot
 start the matrix; manual dispatch remains available for later candidates.
 No automatic stable release, source promotion, version bump or tag.
+
+### Fix final candidate replay without weakening tree verification
+
+Matrix run 45506043579 failed before compilation: the tentative Core
+merge tree differed across otherwise identical audits. Conflict marker
+labels can contain the synthetic commit ID. Reconstruct from the locally
+staged candidate tree instead of applying a patch against the provisional
+merge tree. Require the locked input identities, conflict coverage and
+reviewed resolution lists; restore the exact six effective manifest files
+and generated schema after validating their recorded hashes. Require the
+resulting final Git tree ID to match the successful integration evidence
+exactly. The nested checkout, overlay and manifest checks remain intact.
+A narrowly scoped push trigger retries the matrix using only the approved
+successful integration 45501843656 unless manually dispatched. No source
+pin, VERSION or stable release changes. Matrix retry pending.

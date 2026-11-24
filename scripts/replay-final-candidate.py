@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """Reconstruct the tested final candidate from exact integration evidence."""
+import hashlib
 import importlib.util
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
 
 
-def git(repo, *args, env=None):
-    return subprocess.check_output(["git", "-C", str(repo), *args], env=env)
+def git(repo, *args):
+    return subprocess.check_output(["git", "-C", str(repo), *args])
 
 
 def require(condition, message):
@@ -33,15 +32,36 @@ def archive(repo, tree, dest):
 def replay(repo, component, local, evidence, expected):
     before = load(local / f"{component}-reviewed.json")
     original = load(evidence / f"{component}-reviewed.json")
-    for key in ("base", "upstream", "patched_tree", "tentative_tree", "reviewed_tree"):
+    # Provisional merge-tree conflict labels may contain a synthetic commit
+    # ID which changes between audit runs. Require exact FINAL tree identity.
+    for key in ("base", "upstream", "patched_tree", "conflicts",
+                "reviewed_resolutions", "remaining_conflicts"):
         require(before[key] == original[key], f"{component}: source drift in {key}")
-    with tempfile.TemporaryDirectory() as tmp:
-        env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "index"))
-        git(repo, "read-tree", before["tentative_tree"], env=env)
-        patch = evidence / f"{component}-final-candidate.patch"
-        git(repo, "apply", "--cached", "--binary", "--whitespace=nowarn", str(patch.resolve()), env=env)
-        tree = git(repo, "write-tree", env=env).decode().strip()
-    require(tree == expected, f"{component}: reconstructed tree mismatch")
+    staged = load(local / "staged-candidate-conflicts.json")["components"][component]
+    original_staged = load(evidence / "staged-candidate-conflicts.json")["components"][component]
+    for key in ("resolved_conflicts", "remaining_conflicts"):
+        require(staged[key] == original_staged[key], f"{component}: staged coverage mismatch")
+    require(staged["reviewed_tree"] == before["reviewed_tree"], "local staged checkpoint mismatch")
+    graph = load(evidence / "combined-effective-dependencies.json")
+    modules = (("hiddify-core", ""),) if component == "hiddify-core" else (
+        ("hiddify-sing-box", ""), ("hiddify-sing-box-test", "test/"))
+    files = {}
+    for module, prefix in modules:
+        for filename in ("go.mod", "go.sum"):
+            content = (evidence / f"combined-effective-{module}.{filename}").read_bytes()
+            require(hashlib.sha256(content).hexdigest() == graph["manifest_sha256"][module][filename],
+                    f"effective manifest digest mismatch: {module}/{filename}")
+            files[prefix + filename] = content
+    if component == "hiddify-sing-box":
+        schema = (evidence / "combined-schema.json").read_bytes()
+        final = load(evidence / "final-candidate-conflicts.json")
+        require(hashlib.sha256(schema).hexdigest() == final["schema"]["sha256"], "schema digest mismatch")
+        files["docs/schema.json"] = schema
+    spec = importlib.util.spec_from_file_location("stage", Path(__file__).with_name("stage-final-conflicts.py"))
+    stage = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(stage)
+    tree = stage.stage(repo, staged["tree"], files, {})
+    require(tree == expected, f"{component}: reconstructed tree mismatch: {tree} != {expected}")
     return tree
 
 
