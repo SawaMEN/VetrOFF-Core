@@ -170,3 +170,16 @@ library tests three times and exercises internal session/runtime tests.
 The WARP/MASQUE checks now run after successful DNS checks even when the
 independent MasterDNS test fails. This is a candidate-only patch, not a
 claim that every concurrent session field is safe; stable pins unchanged.
+
+### DNSTT and Shadowsocks reconciliation
+
+Audit 45464438820 passed the MasterDNS test stage after the readiness fix.
+The DNSTT outbound conflict retains the compact fork implementation: the
+upstream-only fields and duration helper have no code references in the
+reviewed package, and the remainder is equivalent after normalization.
+Shadowsocks single-user inbound adopts the upstream consolidated obfs
+server without changing its scoped lifecycle, normalization or service
+creation. The new independent package test gate exercises DNSTT and
+Shadowsocks with the race detector and restores its temporary overlays.
+The complete candidate still requires successful CI and full integration.
+Stable pins are unchanged.

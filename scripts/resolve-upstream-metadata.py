@@ -2048,6 +2048,57 @@ assert detour == checked_blob(data["upstream"], path, "25ec7f984b22fa4fbe7f2e369
 detour = replace_once(detour, b"outbound.Status()", b"OutboundStatus(outbound)")
 detour = subprocess.check_output(["gofmt"], input=detour)
 
+
+# DNSTT: the upstream-only members and duration helper are unused by the
+# reviewed package. Retain the fork's smaller structure and consistent
+# receiver names; prove the remaining code is identical.
+path = "protocol/hiddify/dnstt/outbound.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("d8277dc1fad8d04f45677c3a49aac55e92ed6ee4",
+     "b92057d822bc0c98d4c20dce7e9794dc52e653f5",
+     "c4113dc4653e00c2904014c2f84a2b937900dcb6")))
+plain = replace_once(new, b'\t"time"\n', b"")
+plain = replace_once(plain, b'\t"github.com/sagernet/sing/common/json/badoption"\n', b"")
+plain = replace_once(plain, function_blob(plain, b"func initDuration("), b"")
+for field in (b"dnsRouter", b"resolve", b"tunnel_index"):
+    plain, count = re.subn(rb"(?m)^\t" + field + rb"\s+[^\n]+\n", b"", plain)
+    assert count == 1, field
+plain = re.sub(rb"\b(?:c|w)\.", b"h.", plain.replace(b"(c *Outbound)", b"(h *Outbound)").replace(b"(w *Outbound)", b"(h *Outbound)"))
+def dnstt_code(blob):
+    return b"".join(normalize_imports(blob).split())
+assert dnstt_code(plain) == dnstt_code(own), path
+for name in ("dnstt_func.go", "tester.go", "tools.go", "h_dnstt_test.go", "h_registry_race_test.go"):
+    other = git("show", data["upstream"] + ":protocol/hiddify/dnstt/" + name)
+    code = b"\n".join(l.split(b"//", 1)[0] for l in other.splitlines())
+    assert not re.search(rb"\binitDuration\s*\(|\.(?:dnsRouter|resolve|tunnel_index)\b", code), name
+resolutions[path] = own
+
+# Shadowsocks: preserve the shared scoped lifecycle and method normalization,
+# and use the upstream consolidated obfs server, including host validation
+# and fallback handling. The old fork had the same service dispatch after
+# wrapping the connection in a mode-specific wrapper.
+path = "protocol/shadowsocks/inbound.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("e7d4c36bbbf8591194d3aafe9a4ce532a25bb028",
+     "8ddbe5673d03c087dbbc5865ad303109d129c962",
+     "01532b86fd78685563bc1f2d1093f23e9e36295f")))
+plain = replace_once(new, b'\t"github.com/sagernet/sing-shadowsocks"\n',
+    b'\tobfs "github.com/sagernet/sing-box/transport/simple-obfs"\n\tshadowsocks "github.com/sagernet/sing-shadowsocks"\n')
+plain = replace_once(plain, b"\tobfs     obfsServer\n", b"\tobfsMode string\n")
+i = plain.index(b"\tobfsServer, err := newObfsServer(options)")
+j = plain.index(b"\tinbound.router, err = mux.NewRouterWithOptions", i)
+a = own.index(b"\tswitch options.ObfsMode {")
+b = own.index(b"\tinbound.router, err = mux.NewRouterWithOptions", a)
+plain = plain[:i] + own[a:b] + plain[j:]
+signature = b"func (h *Inbound) NewConnection("
+plain = replace_once(plain, function_blob(plain, signature), function_blob(own, signature))
+assert b"".join(plain.replace(b"//H", b"// H").split()) == b"".join(own.split()), path
+assert b"scope.Add(h.listener.Close)" in new
+assert b"h.obfs.serve(" in new
+resolutions[path] = new
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"

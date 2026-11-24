@@ -13,6 +13,7 @@ on:
       - 'scripts/test-tailscale-candidate.sh'
       - 'scripts/test-reviewed-dns.sh'
       - 'scripts/test-reviewed-masterdns.sh'
+      - 'scripts/test-reviewed-protocols.sh'
       - 'scripts/fix-masterdns-session-readiness.py'
       - 'scripts/test-reviewed-warp.sh'
       - 'scripts/test-reviewed-masque.sh'
@@ -53,6 +54,9 @@ jobs:
         id: masque_tests
         if: ${{ !cancelled() && steps.warp_tests.outcome == 'success' }}
         run: bash scripts/test-reviewed-masque.sh
+      - name: Test reviewed DNSTT and Shadowsocks packages
+        if: ${{ !cancelled() && steps.dns_tests.outcome == 'success' }}
+        run: bash scripts/test-reviewed-protocols.sh
       - name: Probe combined WARP MASQUE and edgescan candidate
         if: ${{ !cancelled() && steps.masque_tests.outcome == 'success' }}
         run: bash scripts/test-warp-combined-candidate.sh
