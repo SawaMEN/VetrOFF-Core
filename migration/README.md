@@ -261,3 +261,372 @@ all upstream port policy tests remain. The HiddifyOptions struct and
 other callers still require reconciliation, so no integrated Core build
 is claimed. The expected current-baseline Core conflict count is 33
 (previously 38), subject to CI confirmation. Stable pins are unchanged.
+
+### Core option schema and KeepTop configuration
+
+Run 45473904930 passed the five-conflict Core source gate. The next
+candidate retains the fork's complete option schema (including the single
+LAN password JSON field) and imports eight upstream settings for logging,
+KeepTop, delegated system proxy, and router mode. Integer subscription
+overrides now use checked reflect.SetInt/SetUint instead of silently
+ignoring values whose concrete type is narrower than int64/uint64.
+KeepTop's config helpers and tests are a verified extension of the fork's
+existing code. The audit runs a separate Core option and inbound test
+using Go's overlay facility with locked dependencies; it deliberately
+excludes the lazy KeepTop implementation until the paired sing-box and
+hcore lifecycle are reconciled. Three additional Core conflict resolutions
+are submitted (14/44, expected 30 remaining), pending the new CI gate.
+Stable pins and published packages are unchanged.
+
+### KeepTop runtime and HotReload reconciliation
+
+Run 45474731669 passed the merged Core option/port regression gate.
+Run 45473904930 also completed all previously scoped sing-box checks
+(134 reviewed conflicts, 32 remaining). Adopt the upstream lazy KeepTop
+runtime while retaining the fork's multi-format ParseConfig call and its
+Naive/Trojan share-link and JSON startup regression. The new runtime tests
+replace the old private reload-driven selection tests. HotReload retains
+the protected BaseContext read, uses one captured service pointer, and
+imports delegated proxy bookkeeping and engine application reporting.
+Check the clean connectivity merge for the exact obsolete watcher call.
+Three additional Core paths are submitted (17/44, expected 27 remaining).
+The start/stop paths, atomic service publication and full lazy monitoring
+integration are still pending; this is not an integrated runtime build.
+Stable pins are unchanged.
+
+### Start/Stop lifecycle and private profiles
+
+Run 45475637081 passed the reviewed-source gate for KeepTop and HotReload.
+The next candidate reconciles Start, service construction and static
+state, retaining the separate startup/lifetime contexts, atomic debug
+flag and fork settings locks. The running service is published through
+an atomic pointer; Stop removes it before closing. The later portability
+patch's filepath.IsLocal guards are retained, alongside upstream's
+memory-limit restoration and router cleanup. Preserve the native
+no-config-persistence entrypoint across initial start, auto-redirect
+retry and subsequent hot reload; avoid the full config debug dump in
+private mode. Clean log-level callers use the atomic debug API.
+Three further Core resolutions are submitted (20/44, expected 24
+remaining). Stop and log-level adaptations are clean-tree adjustments.
+Other direct service readers, setup/grpc and admin service callers still
+need review; full runtime and private-profile tests are not yet complete.
+No stable pin changes.
+
+### Authenticated gRPC, setup and status reporting
+
+Run 45476214954 passed the lifecycle reviewed-source gate. Four more
+Core conflicts are submitted: grpc_server.go, setup.go, commands.go and
+custom.go (24/44, expected 20 remaining). The candidate keeps locked
+listener publication, IPv6-safe address validation, local API secrets,
+dynamic mTLS trust snapshots, defensive certificate copies, explicit
+libbox setup error handling and the fork's memory-limit override. Adopt
+upstream certificate reuse, client certificate PEM handling and device
+memory hints. A bare PUBLIC KEY is no longer accepted for TLS client
+authentication; callers must provide a CERTIFICATE PEM. Use the atomic
+service reference for status reads and report the actual shutdown error
+once, after closing the service. The updated candidate must still pass
+source verification and integrated builds; the generated RPC schemas,
+admin service and mobile wrappers are not yet reconciled. Stable pins
+remain unchanged.
+
+### Protobuf and elevated service reconciliation
+
+Run 45476707575 passed the reviewed-source gate for gRPC and service
+commands. The next candidate replays only the five protobuf source and
+generated files from the verified historical Core checkpoint, checks their
+exact blob IDs and verifies that the schema contains the union of both
+current source inventories (wire numbers, field types, RPC signatures).
+This avoids editing generated code by hand. Adopt upstream elevated
+service reload/restart and delegated proxy status, retain nonblocking
+liveness checks and both regression tests, and fail a new start when the
+previous engine could not be closed. Preserve the authenticated privileged
+RPC allowlist and the inline-only diagnostics guard, including generic
+files. Seven further conflict resolutions are submitted (31/44, expected
+13 remaining), plus the service schema clean-tree adjustment if needed.
+Schema verification and integrated build are pending; no stable pins
+have changed.
+
+### Diagnostics and proxy monitoring reconciliation
+
+Run 45476707575 completed successfully. Run 45478210412 stopped at
+protobuf inventory parsing: the checker did not accept explicit json_name
+annotations. Commit 60825a8 extends the checker to compare these annotations
+without relaxing the field/type/number compatibility assertions. Recheck
+45478958857 is pending.
+The next candidate combines the bounded fork network probe and IP lookup
+with the upstream crash report export. Adopt lazy proxy display conversion,
+resting status and duplicate stream suppression while retaining the fork's
+extra-security selector entry, endpoint fallback and readiness interface.
+Copy group-local display records before setting selection flags. Speed tests
+of an auto-selected group now target its representative proxy rather than
+repeatedly measuring all members, and bulk tests skip parked proxies.
+Five further Core conflicts are submitted (36/44 expected, 8 remaining;
+170/210 total expected). The last fully confirmed source audit covered
+158/210; the newer 12 resolutions require CI. Runtime and integration
+verification remain pending; stable pins are unchanged.
+
+### Native bindings, settings and DNS/chain configuration
+
+Run 45478958857 passed the reviewed-source gate for protobuf and admin
+service reconciliation, confirming 31 Core and 134 sing-box resolutions.
+Run 45479211273 failed on the speed-test import-block whitespace comparison;
+commit efada1a corrects the comparison while still requiring all nonblank
+lines of the original tests to be retained.
+Four further Core paths are submitted: buildconfighelper.go, mobile.go,
+chain.go and dns_group_test.go. Retain validated settings snapshots and
+GenerateConfig, synchronize the temporary log-level timer with settings
+publication, preserve native Close errors and privacy bindings, add device
+memory hints and stopped callbacks. Retain the Android chain-stage and
+legacy-chain validation, preserve Psiphon pairing/region normalization,
+and combine DNS dependency-order and duplicate-member tests with upstream
+transport-order regressions. The expected candidate count is now 40/44
+Core and 134/166 sing-box (174/210 total), of which 165 are confirmed by
+source audit and 9 require the newer gate. Remaining Core paths expected:
+Makefile, docs/hiddifyrpc.md, go.mod, v2/config/builder.go. Full integration
+build and dependency promotion remain pending; stable pins unchanged.
+
+### Builder and native build recipe reconciliation
+
+Run 45480059452 passed the reviewed-source gate, confirming 40 Core and
+134 sing-box resolutions. The next candidate resolves builder.go, Makefile
+and docs/hiddifyrpc.md. The builder retains the fork's serialized snapshots,
+privacy policy, adaptive-network settings and resolved chain-stage handling,
+while incorporating native IPv6-only host adaptation, router validation,
+fake-IP cache persistence and adaptive processor defaults. On native desktop
+systems with IPv6 support, the TUN also captures IPv6 in IPv4-only DNS mode;
+Android/iOS retain their platform-specific address contract. The updated
+regression tests this distinction; traffic and leak testing on actual
+platforms remain required. The Makefile candidate retains pinned generators,
+Android API 24 and arm64 targets, web RPC builds and non-mutating module
+preparation; adopts upstream Windows launchers (plus the legacy CLI filename),
+Apple static Cronet tags and Linux library runpath. All old RPC documentation
+table-member names were checked against the newer source.
+Expected resolution count: 43/44 Core, 134/166 sing-box (177/210 total).
+174 are confirmed at source level; three await audit 45480444831.
+Core go.mod remains deliberately unresolved until the combined dependency
+candidate builds and passes regression tests. No stable pins changed.
+
+### Outbound manager and tunnel server reconciliation
+
+Audit 45480444831 rejected the builder blob ID: the later FakeDNS cache
+patch was already applied. Commit 5c547c5 uses the exact patched blob and
+asserts the existing StoreFakeIP setting rather than inserting it twice.
+The previous audit 45480059452 passed the reviewed-source and Core options
+gates (174/210 source conflicts confirmed). The corrected three Core
+resolutions and two additional sing-box resolutions are submitted, giving
+43/44 Core and 136/166 sing-box expected (179/210, 31 remaining).
+The outbound manager candidate retains immutable slices, captured lifecycle
+scope and error returns, adds security classification and endpoint dependency
+checks, rejects duplicate initial tags, and leaves the default tag unchanged
+when lookup fails. The tunnel server candidate releases its mutex before
+returning unknown-user errors and closes a connection discarded after a
+failed request write. The reviewed-protocol test overlay now includes the
+tunnel package and its queue regression under the race detector. The newer
+source audit and runtime tests are pending. Stable pins remain unchanged.
+
+### Router and network reset lifecycle
+
+Audits 45480994448 and 45481191194 passed the reviewed-source gate;
+43/44 Core and 136/166 sing-box resolutions are now source-confirmed.
+The next candidate resolves route/network.go and route/router.go together.
+The network manager uses the lifecycle scope context, unregisters interface
+callbacks and closes monitors, and forwards network resets to the router's
+DNS/HTTP/process caches without recursive resets. The router no longer
+initializes a second neighbor resolver, and registers process searcher
+cleanup. DNS flush retains the fork monitoring notification in addition
+to native inbound cache flushing. Interface dispatch skips canceled scopes.
+A separate CI step runs the upstream network reset/DNS group regression
+under the race detector, with a temporary overlay and locked dependencies.
+Expected count: 43/44 Core and 138/166 sing-box (181/210; 29 remaining).
+179 source resolutions confirmed, two pending. route/conn.go remains open:
+read/wake pacing changes require dedicated regressions, including the two
+previously failing pacing tests. Stable pins remain unchanged.
+
+### Connection tracking and pacing candidate
+
+Audit 45481728109 passed the reviewed-source gate (181/210 confirmed).
+The subsequent network-reset workflow edit malformed YAML because a replacement
+interpreted the end-anchor in the test regex; commit 35fda3c restores the valid
+workflow and the exact test command. The connection-manager candidate adopts
+upstream tracked TCP/UDP pacing, server-first handshake handling, TLS wrapper
+setup and packet-dial history invalidation while retaining the fork's socket
+ownership and IPv6 fallback. The audit verifies the exact upstream pacing
+helpers and tests. CI now runs the network reset, TCP/UDP pacing and path RTT
+regressions with the race detector, plus an isolated pacing-disabled run.
+Expected resolutions: 43/44 Core and 139/166 sing-box (182/210; 28 remaining).
+181 source-confirmed; conn.go awaits the new source gate. The previous two
+pacing failures are not considered fixed until the regression suite passes;
+no throughput or CPU improvement is claimed without measurement. Stable pins
+remain unchanged.
+
+### XDrive security regressions and Xray interoperability
+
+Audit 45482278797 passed the reviewed-source gate, confirming 182/210
+resolutions. Four additional sing-box paths are submitted: the box-level
+XDrive test, Xray interop test and both XDrive documentation translations.
+Retain encrypted VLESS and add an explicit plaintext rejection regression,
+plus a bounded write deadline and full-write assertion for the local round
+trip. Adopt upstream's additional XHTTP interoperability cases and TLS
+fingerprint regression. Keep the locked Xray release's existing documented
+limits rather than claiming the newer backend defaults. Include attribution.
+The scoped protocol gate now includes XDrive transport lifecycle tests under
+the race detector. Box-level and real Xray binary interoperability tests still
+need an integrated build; the newer Xray/Reality pair remains unpromoted.
+Psiphon remains open: the upstream controller restart loop and SOCKS bridge
+must be reconciled with the fork's close synchronization, Android DeviceBinder,
+Conduit pairing, detour validation and isolated data directories. Preserve
+these requirements before adopting the new scanner or changing bootstrap.
+Expected count: 43/44 Core and 143/166 sing-box (186/210; 24 remaining).
+182 source-confirmed, four await the latest source gate. Stable pins unchanged.
+
+### Psiphon restart and protected bootstrap candidate
+
+Audit 45483083719 confirmed 43/44 Core and 143/166 sing-box source
+resolutions (186/210). Its route test failed to compile because the scoped
+overlay omitted route/dns.go; dd23efb includes that coordinated file. The
+same audit failed TestH_ScanRatesBlocks; WARP regression remains open.
+Three Psiphon conflicts are submitted together: controller, outbound and
+configuration tests. The candidate separates permanent instance shutdown
+from restartable attempts, waits for controller termination before modifying
+configuration or closing the datastore, retains per-instance private data
+paths and Conduit pairing, validates detours, and skips a forced local proxy
+for direct protected Android connections. The authenticated SOCKS bridge
+is prepared before config commit when needed. The duplicate notice.go
+implementation is removed only in the candidate. The test overlay includes
+Psiphon and its scanner and bridge dependencies. No stable pins changed.
+Expected: 43/44 Core and 146/166 sing-box, 189/210 (21 remaining).
+186 are source-confirmed; the three new Psiphon paths await source and
+runtime verification. Android/Conduit real-network testing remains required.
+
+### Telemost session lifecycle and candidate regression coverage
+
+Audit 45484929203 passed the source gate for the three Psiphon paths:
+43/44 Core and 146/166 sing-box (189/210) source resolutions confirmed.
+Three more paths are submitted: transport/call/telemost/connect.go,
+creator.go and h_relay_test.go. The creator returns a session without
+waiting for a peer, installs handlers on every new peer bridge, and
+closes active connections on shutdown. A canceled creator is not published;
+a joiner's early exit now signals failure instead of waiting for the
+caller timeout. Existing upstream reconnect handler tests are retained.
+The CI overlay covers the call configuration, relay, retry and Telemost
+packages together with the other reviewed protocols. Live service testing
+and the known upstream TODO about swapping a joiner's replacement tunnel
+remain outstanding. Stable pins are unchanged.
+Expected: 43/44 Core and 149/166 sing-box (192/210; 18 remaining).
+189 source-confirmed; three await the new source gate and runtime tests.
+
+### Combined dependency integration gate
+
+Audit 45485409880 passed the reviewed-source gate for the Telemost paths:
+43/44 Core and 149/166 sing-box (192/210) confirmed. The next candidate
+resolves sing-box Makefile and schema/generator.go, retaining additional
+ACME/Tailscale/CCM/OCM build tags and the fork's prefixable CIDR schema.
+The generated JSON schema remains open until regenerated and checked.
+A dedicated non-release workflow (45486170730) materializes the two reviewed
+trees and the locked patched ray2sing tree into a disposable directory.
+It tests the explicit dependency manifest candidates and pins the four
+unresolved nested dependencies to the audited upstream revisions for this
+probe only. It verifies every local module replacement, records candidate
+provenance, and independently checks module graphs, Linux CLI build and
+Core/sing-box regression tests. No candidate binary is uploaded as a release.
+The dependency choices are provisional, not promoted; all seven manifest
+and gitlink conflicts remain open until the combined results are reviewed.
+Expected: 43/44 Core and 151/166 sing-box (194/210; 16 remaining).
+192 source-confirmed at the last Telemost audit; two await source verification.
+Stable release pins and ROADMAP task status remain unchanged.
+
+### Documentation reconciliation and generated schema gate
+
+The source gate in audit 45486050695 confirmed 43/44 Core and 151/166
+sing-box conflicts (194/210). Eight documentation paths are submitted:
+README, app integration notes, English/Persian bug histories, monitoring
+and WARP documentation. Preserve fork branding, licenses, additional
+protocols, historical bug reports, native dependency compatibility and
+explicit fallback_address. Upstream history is not a claim that the
+combined candidate has passed its build matrix. Monitoring and WARP
+pages describe the reviewed upstream candidate behavior.
+The combined candidate workflow now generates its JSON Schema from the
+actual compiled registry and checks local references and required fork
+configuration fields. The generated schema conflict remains open until
+that artifact passes validation and is reviewed. The earlier combined
+probe 45486170730 passed source audit and was running its build when
+checked; no successful integrated build is claimed.
+Expected: 43/44 Core and 159/166 sing-box (202/210; 8 remaining).
+194 source-confirmed; eight await the new source gate. Remaining: three
+module manifests, four nested gitlinks and generated JSON schema.
+Stable pins and ROADMAP completion remain unchanged.
+
+### First combined-build compatibility corrections
+
+Combined probe 45486170730 reached Go compilation, then was canceled by
+its successor. It exposed missing Lazy.IsReady, direct Status calls on
+legacy interfaces, and non-atomic reads of the monitor's started flag.
+Commit b27c2c6 supplies compatibility adjustments in four clean paths:
+Lazy and three monitoring files. The route overlay alone was insufficient:
+route/dns.go in the fork had no dnsHijackConcurrency constant. Commit
+abb086f restores the named bound in the candidate, retaining 256 slots.
+The scoped Psiphon test now uses the exact reviewed tunnel-core replacement
+and DeepSearcher interface, with restoration of the original manifests.
+The previous documentation audit failed because WARP has two distinct
+fallback_address tables. 3e2337b preserves the fork-only row while retaining
+the other upstream row. All eight documentation resolutions require a fresh
+source gate; 194/210 remain confirmed and 202/210 submitted. The eight
+remaining manifest, gitlink and generated schema conflicts remain open.
+The combined workflow now runs after resolver changes and does not cancel
+a running probe. Full build and runtime tests remain unconfirmed; stable
+pins are unchanged.
+
+### Aligned integration-test dependency manifest
+
+Audit 45487262434 and combined probe 45487277566 passed their reviewed
+source gates, confirming 202/210 conflicts (43/44 Core, 159/166 sing-box).
+The first combined compilation after the Lazy/monitoring/DNS corrections
+was still running when checked. The test/go.mod candidate now inherits
+all reviewed sing-box root requirements and replacement directives, with
+relative paths adjusted to the test module. Both historical test-only
+requirement sets are retained; the two test-only OpenTelemetry conflicts
+use the upstream 1.45.0 metric/trace pair. The manifest is checked by Go's
+module parser. The combined probe also validates the test module's local
+replacement paths, lists the module graph and compiles the integration tests
+without executing container or live-network operations. All three module
+manifests now have explicit candidates, but none is promoted until the
+combined build is verified. The four gitlinks and generated schema remain
+open. Count remains 202/210 source-confirmed, eight outstanding; stable
+pins unchanged. ROADMAP remains 9/16.
+
+### Carry nested dependency fixes into the combined tree
+
+The combined build 45487277566 remains in progress at the time of this
+checkpoint; no new compiler results are available yet. The manifest audit
+45487671031 passed its source gate, including test/go.mod candidate syntax.
+The combined probe previously checked out the raw MasterDNS target without
+the race-tested sessionReady fix. Apply that exact reviewed fix, retain the
+patch and resulting tree ID in the diagnostics, and rerun library/session
+race tests. Extract the six already reviewed Tailscale caller adaptations
+into a reusable helper; use the same helper in the scoped and combined
+probes. The combined helper rejects an unexpected merged caller instead of
+silently overwriting it. The combined probe also tests the exact sing and
+Soar targets with local race regressions. The selected dependency targets
+remain provisional; no gitlink or stable version is promoted.
+202/210 source resolutions confirmed; 8 still outstanding (3 manifests,
+4 nested gitlinks and generated schema). ROADMAP 9/16. Running and pending
+combined jobs may be superseded by newer commits; inspect the latest run.
+
+### Second integrated compilation corrections
+
+Combined run 45487277566 failed on a duplicate option import in the
+cleanly merged balancer/common.go; Core CLI, Core tests and schema
+compilation were blocked by it. Psiphon's direct Android bootstrap test
+panicked in its fake network manager's unimplemented ProtectFunc, not
+in the actual platform binding. Scoped audit 45487671031 additionally
+failed the same two historical pacing regressions: exchange pacing did
+not disengage by 200 ms and the simulated busy socket never paced.
+Commit 873c825 removes the duplicate import, implements the missing test
+fake and runs the two timing-sensitive in-memory tests under Go synctest
+virtual time. All prior assertions are retained; production pacing is
+unchanged. The workflow explicitly requires both tests to pass, not skip.
+The new source and test gates are pending; the latest combined dependency
+probe 45488228887 was still running when checked. Do not infer a runtime
+fix or measured CPU gain until the tests pass. 202/210 original conflicts
+remain source-confirmed; eight outstanding; ROADMAP 9/16. Stable pins
+unchanged.

@@ -263,9 +263,813 @@ candidate = new.replace(b"Content: oneProxyProfile", b"Content: chainTestProfile
 marker = b"\nconst ports ="
 assert candidate.count(marker) == 1
 assert candidate.replace(marker, regression + marker, 1) == own
-resolutions[path] = subprocess.check_output(["gofmt"], input=own)
+# Add focused regressions to the existing port test file. The real config
+# package test uses the merged options and the original locked dependencies.
+candidate = own.replace(b'import (\n', b'import (\n\t"encoding/json"\n\t"strings"\n', 1)
+candidate += b'''
+func TestVetrOFFMergedOptionsJSON(t *testing.T) {
+	opts := DefaultHiddifyOptions()
+	data := []byte("{\\\"lan-sharing-password\\\":\\\"secret\\\",\\\"local-proxy-auth\\\":true,\\\"wifi-vpn-sharing\\\":true,\\\"keep-top\\\":3,\\\"keep-top-batch\\\":7,\\\"keep-top-quick\\\":true,\\\"keep-top-countries\\\":[\\\"DE\\\"],\\\"keep-top-pinned\\\":[\\\"a\\\"],\\\"delegate-system-proxy\\\":true,\\\"log-level-until\\\":\\\"2026-11-25T00:00:00Z\\\",\\\"log-level-after\\\":\\\"warn\\\"}")
+	if err := json.Unmarshal(data, opts); err != nil {
+		t.Fatal(err)
+	}
+	if opts.LanSharingPassword != "secret" || !opts.LocalProxyAuth || !opts.WifiVPNSharing ||
+		opts.KeepTop != 3 || opts.KeepTopBatch != 7 || !opts.KeepTopQuick ||
+		len(opts.KeepTopCountries) != 1 || opts.KeepTopCountries[0] != "DE" ||
+		len(opts.KeepTopPinned) != 1 || opts.KeepTopPinned[0] != "a" ||
+		!opts.DelegateSystemProxy || opts.LogLevelUntil == "" || opts.LogLevelAfter != "warn" {
+		t.Fatal("merged options lost configured values")
+	}
+	encoded, err := json.Marshal(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(encoded), "\\\"lan-sharing-password\\\"") != 1 {
+		t.Fatal("LAN password JSON field was duplicated or lost")
+	}
+	var roundTrip HiddifyOptions
+	if err := json.Unmarshal(encoded, &roundTrip); err != nil || roundTrip.LanSharingPassword != "secret" {
+		t.Fatal("LAN password failed to round trip")
+	}
+}
 
-apply_reviewed(data, resolutions)
+func TestVetrOFFKeepTopNumericOverrides(t *testing.T) {
+	opts := GetOverridableHiddifyOptions(map[string][]string{
+		"keep-top": {"3"}, "keep-top-batch": {"-1"}, "keep-top-quick": {"true"},
+		"mux.max-streams": {"12"},
+	})
+	if opts.KeepTop != 3 || opts.KeepTopBatch != -1 || !opts.KeepTopQuick || opts.Mux.MaxStreams != 12 {
+		t.Fatal("numeric or boolean subscription overrides were lost")
+	}
+}
+'''
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# HiddifyOptions: use the fork's field names and retain every fork JSON
+# setting. Import the new upstream settings as exact reviewed blocks.
+path = "v2/config/hiddify_option.go"
+own = checked_blob(patched, path, "79ef4deb62e0c00f7632d0fd4acb035377945828")
+new = checked_blob(upstream, path, "6b47205d0d7751963caac6bf677bf9ca14a1596b")
+candidate = own
+def core_insert(anchor, payload):
+    global candidate
+    assert candidate.count(anchor) == 1, anchor
+    candidate = candidate.replace(anchor, payload + anchor, 1)
+
+def core_section(start, end):
+    i = new.index(start)
+    return new[i:new.index(end, i)]
+
+core_insert(b"\tLogFile ", core_section(b"\tLogLevelUntil ", b"\tLogFile "))
+start = b"\t// KeepTop, when above 0,"
+end = b"\t// KeepTags are the tags"
+old_keep = candidate[candidate.index(start):candidate.index(end)]
+assert b"\tKeepTop int " in old_keep
+candidate = candidate.replace(old_keep, core_section(start, end), 1)
+core_insert(b"\tMixedPort ", core_section(b"\t// DelegateSystemProxy ", b"\tMixedPort "))
+core_insert(b"}\n\ntype URLTestOptions", core_section(b"\t// RouterMode ", b"}\n\ntype URLTestOptions"))
+
+# Integer overrides were parsed to int64/uint64 and silently ignored for
+# Go int/uint16/duration fields. Assign directly only when representable.
+for kind, parse, overflow, setter in (
+    (b"int", b"parseInt", b"OverflowInt", b"SetInt"),
+    (b"uint", b"parseUint", b"OverflowUint", b"SetUint"),
+):
+    name = kind + b"Val"
+    before = b"\t\t\t\t\tif " + name + b", err := " + parse + b"(overrideValue); err == nil {\n\t\t\t\t\t\tparsedValue = reflect.ValueOf(" + name + b")\n\t\t\t\t\t}"
+    after = b"\t\t\t\t\tif " + name + b", err := " + parse + b"(overrideValue); err == nil && !field." + overflow + b"(" + name + b") {\n\t\t\t\t\t\tfield." + setter + b"(" + name + b")\n\t\t\t\t\t}"
+    assert candidate.count(before) == 1
+    candidate = candidate.replace(before, after, 1)
+
+# Verify per-struct field inventories, including the embedded inbound
+# settings, so a duplicate JSON key cannot silently shadow the password.
+import re
+def core_fields(blob):
+    result = {}
+    for name, body in re.findall(rb"type (\w+) struct \{\n(.*?)\n\}", blob, re.S):
+        fields = {}
+        for field, typ, tag in re.findall(rb"^\t(\w+)\s+([^" + bytes([96]) + rb"\n]+?)\s+" + bytes([96]) + rb'json:"([^"]+)"', body, re.M):
+            key = tag.split(b",")[0]
+            assert key not in fields, (name, key)
+            fields[key] = (field, typ.strip(), tag)
+        result[name] = fields
+    return result
+
+fork_fields, upstream_fields, merged_fields = map(core_fields, (own, new, candidate))
+assert set(merged_fields) == set(fork_fields) == set(upstream_fields)
+for name, fields in fork_fields.items():
+    official = dict(upstream_fields[name])
+    if name == b"InboundOptions":
+        del official[b"lan-sharing-password"] # fork stores it in HiddifyOptions
+    assert merged_fields[name] == {**official, **fields}, name
+assert candidate.count(b'json:"lan-sharing-password,omitempty"') == 1
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# KeepTop config helper and its tests: the new implementation is a strict
+# extension of the locked helper. Verify all old functions and test bodies.
+path = "v2/config/keep_top.go"
+own = checked_blob(patched, path, "72d0c4e09234dc02c5d9fe560be2914f66da4bbf")
+new = checked_blob(upstream, path, "9d755c09f6fcd05b1ca9d2020949c4295bff6e23")
+plain = new[:new.index(b"// lazyTypes")] + new[new.index(b"// ChosenProxies"):]
+plain = plain.replace(b'\t"time"\n', b"").replace(b'\t"github.com/sagernet/sing/common/json/badoption"\n', b"")
+plain = plain[:plain.index(b"// With keep-top")] + own[own.index(b"// With keep-top"):own.index(b"// UserProxyTags")] + plain[plain.index(b"// UserProxyTags"):]
+assert plain == own, path
+resolutions[path] = new
+
+path = "v2/config/keep_top_test.go"
+own = checked_blob(patched, path, "36e89e9475e7e07398722c2555f6b3158ba8b7fd")
+new = checked_blob(upstream, path, "67bb41702fee5ecb91f6797db340a400f9c48299")
+plain = new[:new.index(b"\nconst keepTopEndpointsProfile")]
+for imp in (b"fmt", b"time", b"github.com/sagernet/sing/common/json/badoption"):
+    plain = plain.replace(b'\t"' + imp + b'"\n', b"")
+assert plain == own, path
+resolutions[path] = new
+
+# Core KeepTop delegates selection to the new sing-box lazy monitoring
+# implementation. Preserve the fork's multi-format profile parser, which
+# fixed startup from raw share links. The old reload-driven selection
+# implementation and its private tests are replaced by the new runtime tests.
+path = "v2/hcore/keep_top.go"
+own = checked_blob(patched, path, "95dbdba8804230cb63cf187932f96e9b7cb7a170")
+new = checked_blob(upstream, path, "360e0ac70763c6dd917ecee603df111ff60eaddd")
+start = own.index(b"\t// Profiles may contain share URIs")
+end = own.index(b"\tif err != nil {", start)
+parser = own[start:end]
+assert parser.count(b"static.HiddifyOptions") == 1
+assert b"config.ParseConfig(" in parser
+before = b"\tinput, err := config.ReadSingOptions(ctx, &config.ReadOptions{Content: in.ConfigContent, Path: in.ConfigPath})\n"
+assert new.count(before) == 1
+candidate = new.replace(before, parser.replace(b"static.HiddifyOptions", b"hopt"), 1)
+assert b"takeDelegatedSystemProxy(options)" in candidate
+assert b"config.ApplyKeepTop(options, hopt, candidates)" in candidate
+assert b"monitor.KeepTopSearching()" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "v2/hcore/keep_top_test.go"
+own = checked_blob(patched, path, "a740db84183773b590e799ca29b67aa88ea1be36")
+new = checked_blob(upstream, path, "408f99d0ee39c8b185f9d292dee04485a01d508e")
+# The old tests exercise private selection functions that no longer
+# exist. Preserve the fork's independently useful parser regression.
+regression = own[own.index(b"func TestBuildRunningConfigParsesImportedProfileFormats("):]
+assert regression.count(b"built, err := buildRunningConfig(") == 1
+regression = regression.replace(b"built, err := buildRunningConfig(", b"built, _, err := buildRunningConfig(", 1)
+assert b"naive share URL" in regression and b"trojan share URL" in regression and b"sing-box JSON" in regression
+marker = b'\t"github.com/sagernet/sing-box/common/monitoring"\n'
+assert new.count(marker) == 1
+candidate = new.replace(marker, marker + b'\t"github.com/sagernet/sing-box/experimental/libbox"\n', 1)
+candidate += b"\n" + regression
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Hot reload: keep the fork's protected BaseContext read and the upstream
+# delegated system-proxy bookkeeping. Capture the service pointer once,
+# instead of looking it up again during validation and application.
+path = "v2/hcore/hotreload.go"
+own = checked_blob(patched, path, "1a674d4334baef6056b3bf6228f2dcf1709e109f")
+new = checked_blob(upstream, path, "b57ba117624e3e4b7f852c0ce382da69039037e1")
+guard = b"\tstatic.stateLock.RLock()\n\tbaseCtx := static.BaseContext\n\tstatic.stateLock.RUnlock()\n\treturn HotReload(baseCtx, in)"
+assert guard in own
+before = b"\treturn HotReload(static.BaseContext, in)"
+assert new.count(before) == 1
+candidate = new.replace(before, guard, 1)
+before = b"\ttunChanged, err := static.startedService.Load().IsTunChanged(ctx, options)"
+after = b"\tss := static.startedService.Load()\n\tif ss == nil {\n\t\treturn MessageType_HOT_RELOAD_FAILED, errors.New(\"no running service to hot reload\")\n\t}\n\ttunChanged, err := ss.IsTunChanged(ctx, options)"
+assert candidate.count(before) == 1
+candidate = candidate.replace(before, after, 1)
+before = b"static.startedService.Load().HotReload(serviceContext(ctx), options)"
+assert candidate.count(before) == 1
+candidate = candidate.replace(before, b"ss.HotReload(serviceContext(ctx), options)", 1)
+for marker in (b"libbox.CheckConfigOptions(options)", b"engineApplying(options)",
+               b"engineApplied(err == nil)", b"recordDelegatedSystemProxy(delegatedProxy)",
+               b"rememberProxyDetails(options)", b"errTunChanged"):
+    assert marker in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Connectivity's clean textual merge may retain the old watcher call,
+# which would invoke the removed reload-driven KeepTop implementation.
+# The two upstream/fork versions have the same updateConnectivity return
+# contract. Remove only that exact obsolete call block, if present.
+path = "v2/hcore/connectivity.go"
+own = checked_blob(patched, path, "de989529def18c500af84a1f48d1327f18bf87f2")
+new = checked_blob(upstream, path, "07a01b8967eef986d6dbb4916076e49dcba9fd37")
+old_call = b"\t\tif state, ok := h.updateConnectivity(ctx); ok {\n\t\t\th.followKeepTop(state)\n\t\t}\n"
+new_call = b"\t\th.updateConnectivity(ctx)\n"
+assert own.count(old_call) == 1 and new.count(new_call) == 1
+clean = git("show", data["tentative_tree"] + ":" + path)
+assert clean in (new, new.replace(new_call, old_call, 1)), path
+core_clean = {path: new} if clean != new else {}
+# Service lifecycle: retain the fork's settings and context locks, atomic
+# debug flag and cancellation helpers, but publish the service atomically
+# as upstream does. All direct StartedService callers must be migrated.
+path = "v2/hcore/static_data.go"
+own = checked_blob(patched, path, "b4e9d99d1fb67f20cc7387e5552eb6489bf1ddb7")
+new = checked_blob(upstream, path, "e5256b3b1ef64095de599fe3bb5e3d3e255c38bc")
+candidate = own
+start = new.index(b"\t// startedService is the running service.")
+end = new.index(b"\tHiddifyOptions", start)
+assert candidate.count(b"\tStartedService *daemon.StartedService\n") == 1
+candidate = candidate.replace(b"\tStartedService *daemon.StartedService\n", new[start:end], 1)
+before = b"\tstatic.stateLock.Lock()\n\tstatic.StartedService = ss\n\tstatic.stateLock.Unlock()"
+assert candidate.count(before) == 1
+candidate = candidate.replace(before, b"\tstatic.startedService.Store(ss)", 1)
+before = b"\tdebug                     atomic.Bool\n"
+assert candidate.count(before) == 1
+candidate = candidate.replace(before, before + b"\tsetupDebug bool // initial platform debug setting; guarded by the lifecycle lock\n\tprivateConfig bool // running profile must not be persisted; guarded by the lifecycle lock\n", 1)
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Keep the fork's separate startup/lifetime contexts and shutdown semantics;
+# add the upstream coherent running snapshot and optional stop channel API.
+path = "v2/hcore/service.go"
+own = checked_blob(patched, path, "e48b2cb9755826c6b395917f75b92023283723c1")
+new = checked_blob(upstream, path, "9f2ebe8c243f00d7eeb5608e4355672fdf52c740")
+before = b"func NewService(ctx context.Context, options option.Options) (*daemon.StartedService, error) {\n\treturn NewServiceWithStartupContext(ctx, ctx, options)\n}\nfunc NewServiceWithStartupContext(ctx, startupCtx context.Context, options option.Options) (*daemon.StartedService, error) {"
+after = b"""// NewService retains two-argument callers and accepts the upstream optional stop channel.
+func NewService(ctx context.Context, options option.Options, stop ...<-chan struct{}) (*daemon.StartedService, error) {
+	if len(stop) > 1 {
+		return nil, errors.New("multiple startup stop channels")
+	}
+	if len(stop) == 1 {
+		return newService(ctx, ctx, options, stop[0])
+	}
+	return NewServiceWithStartupContext(ctx, ctx, options)
+}
+
+func NewServiceWithStartupContext(ctx, startupCtx context.Context, options option.Options) (*daemon.StartedService, error) {
+	return newService(ctx, startupCtx, options, stopSignal(startupCtx))
+}
+
+func newService(ctx, startupCtx context.Context, options option.Options, stop <-chan struct{}) (*daemon.StartedService, error) {"""
+assert own.count(before) == 1
+candidate = own.replace(before, after, 1)
+before = b"\tif stop := stopSignal(startupCtx); stop != nil {"
+assert candidate.count(before) == 1
+candidate = candidate.replace(before, b"\tif stop != nil {", 1)
+before = b"\th.stateLock.RLock()\n\tss := h.StartedService\n\th.stateLock.RUnlock()"
+assert candidate.count(before) == 1
+candidate = candidate.replace(before, b"\tss := h.startedService.Load()", 1)
+start = new.index(b"// running is the box and context")
+end = new.index(b"func (h *HiddifyInstance) Instance()", start)
+before = b"func (h *HiddifyInstance) Instance()"
+assert candidate.count(before) == 1
+candidate = candidate.replace(before, new[start:end] + before, 1)
+assert b"StartOrReloadService(startupCtx," in candidate
+assert b"errors.Is(err, os.ErrClosed)" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Start: use the actual patched tree, including the later path portability
+# patch. Keep its path traversal safeguards and the native no-persistence API.
+path = "v2/hcore/start.go"
+own = checked_blob(patched, path, "a4a0d026d716c4c56197c5630da8ac05e9d687ee")
+new = checked_blob(upstream, path, "f31f60ecaa3d414a6c5baf58649543e7ca4ab061")
+candidate = new
+def lifecycle_edit(before, after, count=1):
+    global candidate
+    assert candidate.count(before) == count, (path, before)
+    candidate = candidate.replace(before, after)
+
+def lifecycle_section(blob, start, end):
+    i = blob.index(start)
+    return blob[i:blob.index(end, i)]
+
+start, end = b"// workingRelative", b"func loadLastStartRequestIfNeeded("
+lifecycle_edit(lifecycle_section(new, start, end), lifecycle_section(own, start, end))
+assert b"filepath.IsLocal(relative)" in candidate
+assert b"lastStartRequestDisableMemoryLimit" in candidate
+start, end = b"// noConfigPersistenceKey", b"// startServiceLocked"
+lifecycle_edit(end, lifecycle_section(own, start, end) + end)
+lifecycle_edit(b"\tqueueStartLocked(static.BaseContext, in)", b"\tstatic.stateLock.RLock()\n\tbaseCtx := static.BaseContext\n\tstatic.stateLock.RUnlock()\n\tqueueStartLocked(baseCtx, in)")
+lifecycle_edit(b"\tsaveLastStartRequest(in)\n", b"\tprivateConfig := ctx.Value(noConfigPersistenceKey{}) != nil\n\tif !privateConfig {\n\t\tsaveLastStartRequest(in)\n\t}\n")
+# The retry path must obey the same policy as the first attempt.
+for indent in (b"\t", b"\t\t\t\t"):
+    lifecycle_edit(b"\n" + indent + b"config.SaveCurrentConfig(ctx, currentBuildConfigPath, *options)\n",
+                   b"\n" + indent + b"if !privateConfig {\n" + indent + b"\tconfig.SaveCurrentConfig(ctx, currentBuildConfigPath, *options)\n" + indent + b"}\n")
+lifecycle_edit(b"\tif static.debug {", b"\tif static.debug.Load() && !privateConfig {", 2)
+lifecycle_edit(b"NewService(serviceContext(ctx), *options, stopSignal(ctx))",
+               b"NewServiceWithStartupContext(serviceContext(ctx), ctx, *options)", 2)
+lifecycle_edit(b"\tstatic.startedService.Store(instance)\n", b"\tstatic.privateConfig = privateConfig\n\tstatic.startedService.Store(instance)\n")
+# Private profiles may still report their names in memory, but not store
+# their raw config or print its credentials into the debug log.
+lifecycle_edit(b"\tengineApplied(true)\n", b"\tif privateConfig {\n\t\tcurrentProfileName.Store(in.ConfigName)\n\t}\n\tengineApplied(true)\n")
+assert b"config.DropAutoRedirect(options)" in candidate
+assert b"config.RouterModeError(err)" in candidate
+assert b"restoreRouterHost()" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Stop merged textually; check both exact source versions and preserve
+# upstream's atomic unpublication and router cleanup, clearing the
+# private-profile flag only after the watcher is stopped.
+path = "v2/hcore/stop.go"
+own = checked_blob(patched, path, "7dcead91c7c1d157b6cbd0b755010494565b2140")
+new = checked_blob(upstream, path, "960f4ba3151c97978ad9a0564dbfdab03633f2ea")
+assert b"cacheSpeedTests()" in own and b"cacheSpeedTests()" in new
+assert git("show", data["tentative_tree"] + ":" + path) == new, path
+before = b"\tss := static.startedService.Swap(nil)\n"
+assert new.count(before) == 1
+core_clean[path] = new.replace(before, before + b"\tstatic.privateConfig = false\n", 1)
+
+# Hot reload must not write a native private profile to disk, even when
+# the reload caller does not carry the original startup context.
+path = "v2/hcore/hotreload.go"
+candidate = resolutions[path]
+before = b'\tsaveLastStartRequest(in)\n\tconfig.SaveCurrentConfig(ctx, filepath.Join(sWorkingPath, "data/current-config.json"), *options)'
+assert candidate.count(before) == 1
+candidate = candidate.replace(before, b'''\tif static.privateConfig || ctx.Value(noConfigPersistenceKey{}) != nil {
+		static.privateConfig = true
+		currentProfileName.Store(in.ConfigName)
+	} else {
+		saveLastStartRequest(in)
+		config.SaveCurrentConfig(ctx, filepath.Join(sWorkingPath, "data/current-config.json"), *options)
+	}''', 1)
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# New clean log-level files need the retained atomic debug field.
+for path, sha, edits in (
+    ("v2/hcore/log_level_until.go", "d6acf4941219c4e0e7d83427fed31789b2494454", (
+        (b"static.debug = static.setupDebug || level <= LogLevel_DEBUG", b"static.debug.Store(static.setupDebug || level <= LogLevel_DEBUG)"),
+    )),
+    ("v2/hcore/log_level_until_test.go", "8b50e82a959c1bfc73ef99d5c0ba5f07b82775da", (
+        (b"require.True(t, static.debug)", b"require.True(t, static.debug.Load())"),
+        (b"require.Equal(t, static.setupDebug, static.debug)", b"require.Equal(t, static.setupDebug, static.debug.Load())"),
+    )),
+):
+    new = checked_blob(upstream, path, sha)
+    assert git("show", data["tentative_tree"] + ":" + path) == new, path
+    candidate = new
+    for before, after in edits:
+        lifecycle_edit(before, after)
+    core_clean[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Setup RPC: the upstream simplification preserves the fork's fix for
+# successful calls returning a nil error rather than dereferencing it.
+path = "v2/hcore/setup.go"
+own = checked_blob(patched, path, "17730fe2995bbf5697554bff738028dff51370eb")
+new = checked_blob(upstream, path, "a32ab723b79933127c47f1c6ddbbe671767c88a7")
+assert b"if err := Setup(req, nil); err != nil {" in new
+assert b"Message: err.Error()" in new
+assert b"ResponseCode_OK" in new
+resolutions[path] = new
+
+# gRPC: retain the fork's serialization, IPv6-safe listener validation,
+# local API secret and dynamic trust snapshots. Adopt upstream's cached
+# server identity, proper certificate PEM parsing and platform memory hints.
+path = "v2/hcore/grpc_server.go"
+own = checked_blob(patched, path, "ac8841dc3a0b22109624daaeb89168b94f549a68")
+new = checked_blob(upstream, path, "729a50159c039b5ae78fec0f49a2e018d02f7689")
+candidate = own
+lifecycle_edit(b'\t"encoding/pem"\n', b'\t"encoding/pem"\n\t"errors"\n')
+lifecycle_edit(b'\t"os"\n', b'\t"os"\n\t"path/filepath"\n')
+start, end = b"// goroutineSnapshotsOnce", b"// Setup sets the core up"
+marker = b"func Setup(params *SetupRequest"
+lifecycle_edit(marker, lifecycle_section(new, start, end) + marker)
+lifecycle_edit(b"\tstatic.debug.Store(params.Debug)", b"\tstatic.setupDebug = params.Debug\n\tstatic.debug.Store(params.Debug)")
+lifecycle_edit(b"\tbudget := int64(0)\n\tif C.IsAndroid {", b"\tbudget := deviceMemoryLimit\n\tif budget == 0 && C.IsAndroid {")
+# Keep the actual libbox error check and the Chdir error check.
+assert b"if err := libbox.Setup(" in candidate
+assert b"if err := os.Chdir(sWorkingPath); err != nil {" in candidate
+lifecycle_edit(b"\tsWorkingPath = params.WorkingDir\n", b"\tsWorkingPath = params.WorkingDir\n\tsSetupMode = params.Mode\n\tcleanupLeftovers()\n\tgoroutineSnapshotsOnce.Do(func() {\n\t\tkeepPreviousGoroutineSnapshot(sWorkingPath, sSetupMode)\n\t\tgo writeGoroutineSnapshots(static.BaseContext, sWorkingPath, sSetupMode)\n\t})\n")
+# Preserve init-before-publish. Load a stored client certificate before
+# the listener can begin accepting connections, while mu is held.
+marker = b"\t\t_, err := startGrpcServerByModeLocked(params.Listen, params.Mode, params.Secret)"
+lifecycle_edit(marker, b'\t\tif isMutualTLS(params.Mode) {\n\t\t\tif err := trustStoredClientCertificate(params.BasePath); err != nil {\n\t\t\t\tLog(LogLevel_WARNING, LogType_CORE, "no stored client certificate to trust: ", err.Error())\n\t\t\t}\n\t\t}\n' + marker)
+start, end = b"\t\ttable := db.GetTable[hcommon.AppSettings]()\n\t\tLog(LogLevel_DEBUG, LogType_CORE, table)", b"\t\t// Load server certificate and private key"
+lifecycle_edit(lifecycle_section(own, start, end), b"\t\tif err := loadServerCertificate(); err != nil {\n\t\t\treturn nil, err\n\t\t}\n")
+lifecycle_edit(b"\t\t\tClientCAs:    caCertPool.Clone(),", b"\t\t\tMinVersion:   tls.VersionTLS12,\n\t\t\tClientCAs:    caCertPool.Clone(),")
+# Validate the stored certificate/key pair before reuse. Do not rotate a
+# pinned certificate merely because a database read failed.
+loader = lifecycle_section(new, b"// loadServerCertificate", b"// GetGrpcServerPublicKey")
+before = b"\t\t\tcertpair = &hutils.CertificatePair{Certificate: pub, PrivateKey: priv}\n\t\t\treturn nil"
+assert loader.count(before) == 1
+loader = loader.replace(before, b"\t\t\tif _, pairErr := tls.X509KeyPair(pub, priv); pairErr == nil {\n\t\t\t\tcertpair = &hutils.CertificatePair{Certificate: pub, PrivateKey: priv}\n\t\t\t\treturn nil\n\t\t\t}", 1)
+marker = b"// GetGrpcServerPublicKey returns the gRPC server's public key."
+lifecycle_edit(marker, loader + marker)
+lifecycle_edit(lifecycle_section(own, b"// AddGrpcClientPublicKey", b"func CloseGrpcServer("),
+               lifecycle_section(new, b"// AddGrpcClientPublicKey", b"func CloseGrpcServer("))
+# No raw PUBLIC KEY is sufficient for TLS certificate authentication.
+# Keep the fork's per-handshake clone and defensive certificate copy.
+for marker in (b"localControlServerOptions(secret)", b'localControlServerOptions("")',
+               b"net.SplitHostPort(listenAddressG)", b"tlsConfig.GetConfigForClient",
+               b"return append([]byte(nil), certpair.Certificate...)",
+               b"startGrpcServerByModeLocked", b"tls.RequireAndVerifyClientCert"):
+    assert marker in candidate, marker
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Commands: use one atomic service reference per status sample and retain
+# the fork's traffic availability field. Keep upstream's targeted tests
+# of parked outbounds; do not fall back to a stale name from the database.
+path = "v2/hcore/commands.go"
+own = checked_blob(patched, path, "55dc14d8312c093ab3d1e8236e91fac4253e319e")
+new = checked_blob(upstream, path, "341fbd79b1d1a87b24607e5a50079297b20cb561")
+candidate = new
+lifecycle_edit(b'\t"github.com/hiddify/hiddify-core/v2/db"\n', b"")
+before = b"\t\tmessage.DownlinkTotal = status.DownlinkTotal"
+assert b"\t\tmessage.TrafficAvailable = status.TrafficAvailable" in own
+lifecycle_edit(before, b"\t\tmessage.TrafficAvailable = status.TrafficAvailable\n" + before)
+lifecycle_edit(b"\t\tif box := h.Box(); box != nil {", b"\t\tif ins := ss.Instance(); ins != nil && ins.Box() != nil {\n\t\t\tbox := ins.Box()")
+start = b"\t\tif message.CurrentProfile == \"\" {"
+end = b"\n\t}\n\n\treturn &message"
+lifecycle_edit(lifecycle_section(candidate, start, end), b"")
+assert b"monitoring.Get(ctx).TestOutbounds(in.Tags" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Error shutdown: publish STOPPED once, after closing the service.
+# Also clear the private profile flag and restore router forwarding.
+path = "v2/hcore/custom.go"
+own = checked_blob(patched, path, "53507901f43f3abbaf1fe9ef86a72145c91f9f40")
+new = checked_blob(upstream, path, "0a7adff2687c205ba3a2ab9005737405c615c522")
+candidate = new
+marker = b"\tresponse := SetCoreStatus(CoreStates_STOPPED, msgType, message)"
+lifecycle_edit(marker, b"\trestoreRouterHost()\n\tstatic.privateConfig = false\n" + marker)
+assert b"static.startedService.Swap(nil)" in candidate
+assert b"return StopAndAlert(state, err.Error()), err" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Replay only the previously generated protobuf files from the verified
+# historical checkpoint, never its unrelated implementation changes.
+# Confirm both live source schemas are covered, including wire numbers,
+# before accepting the generated source as a migration candidate.
+import gzip
+checkpoint = Path(__file__).resolve().parent.parent / "migration/core-4e5a9a3"
+proto_paths = (
+    ("v2/hcore/hcore.proto", "73d4d3690fc4eb33206ebbec688c204821914f08", "66aa500a330401ec67310a08f6b3ec4a193a279e", "6a4b20fb8720a92fc3ff8885a6a42a8e87e23a19"),
+    ("v2/hcore/hcore_service.proto", "78d90f8255609b6899fc29666e0c508f08621617", "354056882ba9511437d02c52a9385f241981e76b", "54dddbbd07ddfeaef6efd6abe20002280f10f5fc"),
+    ("v2/hcore/hcore.pb.go", "4327eb3c86601a4328136d107eb4653fac99f07b", "8b593ba3bcbaffea145fd61652cbb9191d4c0f4d", "a477ebb8d163ce29dad4249e712ff71f45fb1b14"),
+    ("v2/hcore/hcore_service.pb.go", "a4399b6a160b771159b2359d720b870dd4b65135", "72ed2601b19d549490f319c7064cbd289b50f5c7", "a6d8338febb10c04c894318d9c73487f720b4b28"),
+    ("v2/hcore/hcore_service_grpc.pb.go", "f3fa1fe7e074d4d644d99e554abc04f30b952a0e", "d9e611f652c3b0b6b7fd3d7c11b99c099e7a39de", "e04b363e7a04ca87da6eb0a8ead22e42c16471e9"),
+)
+with tempfile.TemporaryDirectory() as tmp:
+    env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "proto-index"))
+    git("read-tree", upstream, env=env)
+    git("apply", "--cached", *(f"--include={row[0]}" for row in proto_paths),
+        payload=gzip.decompress((checkpoint / "core-resolutions.patch.gz").read_bytes()), env=env)
+    proto_tree = git("write-tree", env=env).decode().strip()
+
+def proto_inventory(blob):
+    # These schemas have flat message, enum and service declarations;
+    # reject unsupported nested blocks instead of silently overlooking them.
+    clean = re.sub(rb"//[^\n]*", b"", blob)
+    groups = {}
+    for kind, name, body in re.findall(rb"\b(message|enum|service)\s+(\w+)\s*\{([^{}]*)\}", clean, re.S):
+        key = (kind, name)
+        assert key not in groups, key
+        members = {}
+        for stmt in body.split(b";"):
+            stmt = b" ".join(stmt.split())
+            if not stmt:
+                continue
+            if kind == b"service":
+                match = re.fullmatch(rb"rpc\s+(\w+)\s*\(([^)]*)\)\s*returns\s*\(([^)]*)\)", stmt)
+                assert match, stmt
+                member, request, response = match.groups()
+                value = (request.strip(), response.strip())
+            else:
+                match = re.fullmatch(rb'(.+?)\s*=\s*(\d+)(?:\s*\[\s*json_name\s*=\s*"([^"]+)"\s*\])?', stmt)
+                assert match, stmt
+                declaration, member, json_name = match.groups()
+                # Preserve explicit JSON names as well as wire types and numbers.
+                value = (re.sub(rb"\s*([<>,])\s*", rb"\1", declaration), json_name)
+            assert member not in members, (key, member)
+            members[member] = value
+        groups[key] = members
+    assert len(groups) == len(re.findall(rb"\b(?:message|enum|service)\s+\w+\s*\{", clean))
+    return groups
+
+for path, own_sha, new_sha, checkpoint_sha in proto_paths:
+    own = checked_blob(patched, path, own_sha)
+    new = checked_blob(upstream, path, new_sha)
+    candidate = checked_blob(proto_tree, path, checkpoint_sha)
+    if path.endswith(".proto"):
+        fork_fields, upstream_fields, merged_fields = map(proto_inventory, (own, new, candidate))
+        expected = {key: dict(fields) for key, fields in upstream_fields.items()}
+        for key, fields in fork_fields.items():
+            union = expected.setdefault(key, {})
+            assert all(number not in union or union[number] == value for number, value in fields.items()), key
+            union.update(fields)
+        assert merged_fields == expected, (path, "checkpoint schema differs from current union")
+    else:
+        assert candidate.startswith(b"// Code generated by protoc-gen-go")
+    if path in data["conflicts"]:
+        resolutions[path] = candidate
+    elif candidate != git("show", data["tentative_tree"] + ":" + path):
+        core_clean[path] = candidate
+
+# The fork's later admin-service patch introduced the same atomic liveness
+# flag that upstream now uses. Keep the upstream reload/restart handling
+# and delegated proxy status, verify the actual patched fork transitions.
+path = "v2/hcore/adminbgservice/admin_bg_service.go"
+own = checked_blob(patched, path, "87ea7c35563c14ba1e4838cef839804383e6f649")
+new = checked_blob(upstream, path, "e9ef2f2c644cd63df68ea38a48c3d8ff8e5b80a8")
+assert own.count(b"s.running.Store(true)") == 2
+assert own.count(b"s.running.Store(false)") == 2
+assert new.count(b"s.setRunning()") == 4
+assert b"s.running.Load()" in own and b"s.running.Load()" in new
+assert b"hcore.DelegatedSystemProxy()" in new
+assert b"func (s *hiddifyAdminBG) Reload(" in new
+assert b"func (s *hiddifyAdminBG) Restart(" in new
+candidate = new
+# Retain the old running engine if stopping it failed; do not immediately
+# create another TUN on top of an unsuccessful teardown.
+lifecycle_edit(b"\ts.closeRunning()\n\tif in.ServerPort", b"\tif err := s.closeRunning(); err != nil {\n\t\treturn &AdminBgResponse{Message: err.Error()}, err\n\t}\n\tif in.ServerPort")
+lifecycle_edit(b"\ts.closeRunning()\n\toptions, err := fullCoreOptions(in)", b"\tif err := s.closeRunning(); err != nil {\n\t\treturn err\n\t}\n\toptions, err := fullCoreOptions(in)")
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "v2/hcore/adminbgservice/status_test.go"
+own = checked_blob(patched, path, "95485351395e9a3df701f8ac8949e99b29d73b90")
+new = checked_blob(upstream, path, "2e19101c834ddadef5e13e2856a7f9c8adfa0362")
+# Both regressions matter: a real state transition and a direct atomic
+# status read while the long-running operation lock is held.
+assert b"initial status" in own and b"s.running.Store(true)" in own
+assert b"s.setRunning()" in new
+assert own[:own.index(b"func TestStatus")] == new[:new.index(b"// Status answers")]
+candidate = new + b"\n" + own[own.index(b"func TestStatusAnswersDuringOperation("):]
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "v2/hcore/adminbg/adminbg.go"
+own = checked_blob(patched, path, "58919b183ef5a6a494e9995112b9a1c929011f2c")
+new = checked_blob(upstream, path, "2d8499a67f40f30f30ce40cbf74f08bb457a5aed")
+# The newer implementation keeps the authenticated method allowlist
+# and extends the privileged diagnostics argument guard.
+assert lifecycle_section(own, b"func AllowCoreMethod(", b"// AllowCoreRequest") == lifecycle_section(new, b"func AllowCoreMethod(", b"// AllowCoreRequest")
+assert b"len(diagnostics.GenericFiles) > 0" in new
+assert b"settings[\"allow-connection-from-lan\"] = false" in new
+assert b"func Reload(" in new
+assert b"func Authenticate(" in new
+resolutions[path] = new
+
+# Diagnostics: the two implementations serve distinct RPCs. Retain the
+# fork's bounded, cancellable probe and IP lookup alongside upstream's
+# report export. Keep service and context from one running snapshot.
+path = "v2/hcore/diagnostics.go"
+own = checked_blob(patched, path, "f40b90bebfc4f0429046b828f2c1791d2634b9b3")
+new = checked_blob(upstream, path, "000af39f5558c4ed3e618cdb9383353f32d80357")
+candidate = new
+lifecycle_edit(b'\t"io"\n', b'\t"io"\n\t"net"\n\t"net/http"\n\t"net/url"\n')
+lifecycle_edit(b'\t"github.com/sagernet/sing-box/experimental/libbox"\n', b'\t"github.com/sagernet/sing-box/adapter"\n\t"github.com/sagernet/sing-box/experimental/libbox"\n\t"github.com/sagernet/sing-box/hiddify/ipinfo"\n\tM "github.com/sagernet/sing/common/metadata"\n\t"google.golang.org/grpc/codes"\n\t"google.golang.org/grpc/status"\n')
+probe = own[own.index(b"func selectedOutbound("):]
+assert all(name not in new for name in (b"func selectedOutbound(", b"func validateProbeRequest(", b"func readProbeDownload(", b"func (s *CoreService) ProbeConnection(", b"func (s *CoreService) GetCurrentIpInfo("))
+candidate = candidate.rstrip() + b"\n\n" + probe
+lifecycle_edit(b"\tif instance == nil {\n\t\treturn nil, nil, nil, status.Error(codes.FailedPrecondition, \"VPN is stopped\")\n\t}", b"\tif instance == nil || instance.Box() == nil || instance.Context() == nil {\n\t\treturn nil, nil, nil, status.Error(codes.FailedPrecondition, \"VPN is stopped\")\n\t}")
+lifecycle_edit(b"slices.Contains(running, static.CoreState)", b"slices.Contains(running, currentCoreState())")
+lifecycle_edit(b"static.CoreState.String()", b"currentCoreState().String()")
+marker = b"\tpath, encrypted, err := exportDiagnostics(sWorkingPath, sTempPath, req)"
+lifecycle_edit(marker, b'\tif req == nil {\n\t\treturn nil, status.Error(codes.InvalidArgument, "missing diagnostics request")\n\t}\n' + marker)
+assert b"downloadProbeGate" in candidate and b"maxProbeDownload" in candidate
+assert b"encryptDirectory(" in candidate and b"writeSensitiveFiles(" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Proxy info: retain the readiness-only fork interface, while adopting
+# upstream's on-demand conversion, resting status and stream deduplication.
+# Keep the fork's explicit extra-security entry in the full selector list.
+path = "v2/hcore/proxy_info.go"
+own = checked_blob(patched, path, "c0bee6976d82436e46c2d6d9901b83eb4e6ac326")
+new = checked_blob(upstream, path, "40b419c46288ec610b681ebd038c1eaffe339dae")
+candidate = new
+lifecycle_edit(b"Status(detour.Status())", b"Status(adapter.OutboundStatus(detour))")
+lifecycle_edit(b'\t"github.com/sagernet/sing-box/common/monitoring"\n', b'\t"github.com/sagernet/sing-box/common/monitoring"\n\tC "github.com/sagernet/sing-box/constant"\n')
+lifecycle_edit(b"\t\tif it, loaded := box.Outbound().Outbound(tag); loaded { // an outbound, or an endpoint", b"\t\tit, loaded := box.Outbound().Outbound(tag)\n\t\tif !loaded {\n\t\t\tif endpoint, ok := box.Endpoint().Get(tag); ok {\n\t\t\t\tit, loaded = endpoint, true\n\t\t\t}\n\t\t}\n\t\tif loaded {")
+# The same cached info may be used in several groups. Per-group fields
+# must not mutate another group's selection or the cached chain display.
+lifecycle_edit(b"\t\t\tpinfo.IsSelected = itemTag == selectedTag", b"\t\t\tpinfo = proto.Clone(pinfo).(*OutboundInfo)\n\t\t\tpinfo.IsSelected = itemTag == selectedTag")
+marker = b"\t\tgroups.Items = append(groups.Items, &group)"
+lifecycle_edit(marker, b'''		if group.Tag == config.OutboundSelectTag && !onlyGroupitems {
+			entryInfos := make(map[string]*OutboundInfo)
+			addEntry := func(tag string) {
+				if config.IsChainExtraSecurityTag(tag) || tag == selectedTag {
+					if info := infoOf(tag); info != nil {
+						entryInfos[tag] = proto.Clone(info).(*OutboundInfo)
+					}
+				}
+			}
+			addEntry(selectedTag)
+			for _, out := range box.Outbound().Outbounds() {
+				addEntry(out.Tag())
+			}
+			for _, endpoint := range box.Endpoint().Endpoints() {
+				addEntry(endpoint.Tag())
+			}
+			showEntryHop(&group, entryInfos, func(tag string) string {
+				if out, ok := box.Outbound().Outbound(tag); ok {
+					return C.ProxyDisplayName(out.Type())
+				}
+				if ep, ok := box.Endpoint().Get(tag); ok {
+					return C.ProxyDisplayName(ep.Type())
+				}
+				return TrimTagName(tag)
+			})
+		}
+
+''' + marker)
+helper = lifecycle_section(own, b"// showEntryHop", b"func TrimTagName(")
+lifecycle_edit(b"func TrimTagName(", helper + b"func TrimTagName(")
+lifecycle_edit(b"if config.IsChainExtraSecurityTag(tag) && (entry == nil || tag < entry.Tag)", b"if candidate != nil && config.IsChainExtraSecurityTag(tag) && (entry == nil || tag < entry.Tag)")
+assert b"proto.Equal(sent, info)" in candidate
+assert b"monitor.KeepTopPicking()" in candidate
+assert b"ev.Priority" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "v2/hcore/proxy_info_test.go"
+own = checked_blob(patched, path, "65dbd61400ee1a3d717c8149acd96860e98973f9")
+new = checked_blob(upstream, path, "78a372760890d41911b3b083a1c36325ec0f93e9")
+# The fork's readiness method is the only source difference.
+readiness = [line for line in own.splitlines(keepends=True) if b"func (g *fakeGroup) IsReady()" in line]
+assert len(readiness) == 1 and own.replace(readiness[0], b"") == new
+resolutions[path] = own
+
+# Speed tests: avoid repeatedly measuring every member of auto-selected
+# groups, skip parked proxies for bulk tests, retain direct tagged tests.
+path = "v2/hcore/speedtest.go"
+own = checked_blob(patched, path, "90017d4d1fcbfe6ad4507970f08e2334ecc8731a")
+new = checked_blob(upstream, path, "3d5c8b7b499a8a61568c5c7ff848a6d1b25236a9")
+candidate = new
+assert b"box, ctx := h.running()" in candidate
+assert b"speedTestTargets(outbound, box.Outbound().Outbound, proxyRests" in candidate
+lifecycle_edit(b"if tag := member(group.Tag()); tag != group.Tag() {", b"if tag := member(group.Tag()); tag != group.Tag() && !rests(tag) {")
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "v2/hcore/speedtest_test.go"
+own = checked_blob(patched, path, "e4a69d6444cbee5a533b93f6f9abccf8a287be56")
+new = checked_blob(upstream, path, "64ce3047dbefeff62f3a57df20ebaadeba62545a")
+marker = b"type speedGroup struct {"
+assert marker in new and marker not in own
+before = new[:new.index(marker)].rstrip()
+# All old speed tests are retained; the only preceding edits are imports.
+extra_imports = b'\n\t"github.com/sagernet/sing-box/adapter"\n\t"github.com/sagernet/sing-box/adapter/outbound"\n\tC "github.com/sagernet/sing-box/constant"\n\t"github.com/stretchr/testify/require"'
+assert before.count(extra_imports) == 1
+assert [line for line in before.replace(extra_imports, b"").splitlines() if line.strip()] == [line for line in own.splitlines() if line.strip()]
+resolutions[path] = new
+
+# Configuration RPCs: validate and persist a complete settings snapshot
+# before publishing it. Retain the fork's import and GenerateConfig APIs.
+# Adopt the upstream temporary log-level scheduler under the settings lock.
+path = "v2/hcore/buildconfighelper.go"
+own = checked_blob(patched, path, "2186d34c8f521269c57e2387d8c315cba14005db")
+new = checked_blob(upstream, path, "a5fa106842f412a9c8257adba1564e58482ab316")
+candidate = own
+lifecycle_edit(b'\t\terr = recovered\n\t\tLog(LogLevel_ERROR, LogType_CONFIG, recovered.Error())\n\t})\n\n\tpath := in.TempPath', b'\t\tresponse = &ParseResponse{ResponseCode: hcommon.ResponseCode_FAILED, Message: recovered.Error()}\n\t\terr = recovered\n\t\tLog(LogLevel_ERROR, LogType_CONFIG, recovered.Error())\n\t})\n\n\tpath := in.TempPath')
+lifecycle_edit(b'\t\terr = recovered\n\t\tLog(LogLevel_ERROR, LogType_CONFIG, recovered.Error())\n\t})\n\tconfig, err := config.ParseBuildConfigBytes', b'\t\tresponse, err = nil, recovered\n\t\tLog(LogLevel_ERROR, LogType_CONFIG, recovered.Error())\n\t})\n\tconfig, err := config.ParseBuildConfigBytes')
+start, end = b"\tswitch next.LogLevel {", b"\n\treturn &CoreInfoResponse{}, nil"
+lifecycle_edit(lifecycle_section(own, start, end), b"\tapplyLogLevel(next.LogLevel)\n\tscheduleLogLevelEnd(next)\n")
+assert b"settingsSnapshot()" in candidate
+assert b"if err := db.GetTable[hcommon.AppSettings]().UpdateInsert" in candidate
+assert b"func (s *CoreService) GenerateConfig(" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Timer callbacks use the same lock ordering as ChangeHiddifySettings:
+# settingsLock, then logLevelEnd. A replaced timer cannot change a newer
+# profile. Snapshot reads never race the timer's option updates.
+path = "v2/hcore/log_level_until.go"
+candidate = core_clean[path]
+lifecycle_edit(b"\t\tlogLevelEnd.Lock()\n\t\tdefer logLevelEnd.Unlock()\n", b"\t\tstatic.settingsLock.Lock()\n\t\tdefer static.settingsLock.Unlock()\n\t\tlogLevelEnd.Lock()\n\t\tdefer logLevelEnd.Unlock()\n")
+lifecycle_edit(b"\tstatic.debug.Store(static.setupDebug || level <= LogLevel_DEBUG)", b"\tstatic.stateLock.RLock()\n\tsetupDebug := static.setupDebug\n\tstatic.stateLock.RUnlock()\n\tstatic.debug.Store(setupDebug || level <= LogLevel_DEBUG)")
+core_clean[path] = subprocess.check_output(["gofmt"], input=candidate)
+path = "v2/hcore/grpc_server.go"
+candidate = resolutions[path]
+lifecycle_edit(b"\tstatic.stateLock.Unlock()\n\tstatic.setupDebug = params.Debug", b"\tstatic.setupDebug = params.Debug\n\tstatic.stateLock.Unlock()")
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Mobile bindings: add device memory hints and a stopped callback but keep
+# the fork's error-returning Close and native privacy methods.
+path = "platform/mobile/mobile.go"
+own = checked_blob(patched, path, "f429ba1aaaddad7574b77b9c2b6105a8e6bd8f1d")
+new = checked_blob(upstream, path, "2d3c89fd3b502b713479f94e6516e4aca0a04cf4")
+candidate = own
+lifecycle_edit(b"\tMemoryLimit     int64\n", b"\t// MemoryLimit is the platform-provided memory budget in bytes.\n\tMemoryLimit int64\n\t// LowMemory requests the low-memory relay path.\n\tLowMemory bool\n")
+lifecycle_edit(b"\treturn hcore.Setup(&hcore.SetupRequest{", b"\thcore.SetDeviceMemory(opt.MemoryLimit, opt.LowMemory)\n\treturn hcore.Setup(&hcore.SetupRequest{")
+callback = lifecycle_section(new, b"// CoreStoppedListener", b"func Stop() error")
+lifecycle_edit(b"func Stop() error", callback + b"func Stop() error")
+assert b"func Close(mode int) error" in candidate
+assert b"func ApplyRegionalPrivacy(" in candidate and b"func ApplyDevicePrivacy(" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Preserve Android's resolved chain-stage snapshot and legacy chain
+# validation; adopt the new direct DNS resolver on detoured dialers.
+# Retain normalization of the existing Psiphon region and pairing fields.
+path = "v2/config/chain.go"
+own = checked_blob(patched, path, "14b5a08f5c34ea791c5025a5c0f6f816bdf0e766")
+new = checked_blob(upstream, path, "c3446c37ff45df63f6ef77dcd72c1966d6642e64")
+candidate = new
+marker = b"// setChainHop adds"
+lifecycle_edit(marker, lifecycle_section(own, b"// Android sends both", marker) + marker)
+lifecycle_edit(b"\tregion := psiphon.Region\n", b"\tregion := strings.ToUpper(strings.TrimSpace(psiphon.Region))\n")
+lifecycle_edit(b'options := &option.PsiphonOutboundOptions{Config: "hiddify", EgressRegion: region}', b'options := &option.PsiphonOutboundOptions{Config: "hiddify", EgressRegion: region, ConduitPairingID: strings.TrimSpace(psiphon.ConduitPairingID)}')
+assert b"dialer.DomainResolver = resolver" in candidate
+assert b"opt.ChainStage != nil" in candidate
+assert b"ChainSearchOptions" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# DNS tests: adopt upstream's remote/direct transport ordering checks and
+# keep the fork's dependency-order and no-duplicate member regressions.
+path = "v2/config/dns_group_test.go"
+own = checked_blob(patched, path, "5bae98e2465dc3c139849a70a47e610e16acd13a")
+new = checked_blob(upstream, path, "1ef41ee72d057f4b005f837eadf418dc26ae9472")
+candidate = new.rstrip() + b"\n\n" + own[own.index(b"// Remote DoH bootstrap"):].rstrip() + b"\n"
+marker = b"\t\tfor i, member := range g.Servers {\n"
+lifecycle_edit(marker, b"\t\tseen := make(map[string]bool)\n" + marker + b'\t\t\tif _, found := servers[member]; !found || seen[member] {\n\t\t\t\tt.Fatalf("%s: missing or duplicate member %q", tag, member)\n\t\t\t}\n\t\t\tseen[member] = true\n')
+assert b"func TestDNSBootstrapResolverIsDeclaredFirst" in candidate
+assert b"func TestBuildConfigRemoteDNSLocal" in candidate
+assert b"func TestTCPFirstOrder" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Config builder: preserve all fork privacy and adaptive-network policies,
+# serialized build snapshots and chain-stage handling. Integrate the
+# upstream router validation, IPv6-only host adaptation, cache persistence
+# and adaptive processor defaults without coupling monitoring to a public API.
+path = "v2/config/builder.go"
+own = checked_blob(patched, path, "58b252981b7d83a1c1f194be3b269990e3febb73")
+new = checked_blob(upstream, path, "6a72bfe009c4065ae605ec22a35f364e3c080404")
+candidate = own
+marker = b"\tinput, err := ReadSingOptions(ctx, inputOpt)"
+lifecycle_edit(marker, b'''	// Keep an explicit Android IPv4-only tunnel compatible with the platform
+	// interface; the host adaptation applies to native desktop/router modes.
+	ipv6Only := !C.IsAndroid && !C.IsIos && !hostHasIPv4()
+	hopts = forIPv6OnlyHost(hopts, ipv6Only)
+	hopts, err := forRouterMode(hopts)
+	if err != nil {
+		return nil, err
+	}
+
+''' + marker)
+lifecycle_edit(b"\tapplyRegionalPrivacy(&options, hopts)\n", b"\tif ipv6Only {\n\t\tuseIPv6Resolvers(&options)\n\t}\n\tapplyRegionalPrivacy(&options, hopts)\n")
+assert candidate.count(b"StoreFakeIP: hopt.EnableFakeDNS,") == 1
+marker = b"\nfunc setLog(options *option.Options, opt *HiddifyOptions)"
+procs = lifecycle_section(new, b"// setProcs lets", marker)
+start = candidate.index(b"func setExperimental(")
+end = candidate.index(marker, start)
+section = candidate[start:end]
+assert section.rstrip().endswith(b"}")
+section = section.rstrip()[:-1] + b"\tsetProcs(options)\n}\n\n" + procs.rstrip() + b"\n"
+candidate = candidate[:start] + section + candidate[end:]
+lifecycle_edit(b"AutoRedirect: hopt.AutoRedirect && AutoRedirectAvailable(),", b"AutoRedirect: tunAutoRedirect(hopt),")
+# Router mode must not silently turn off its required auto_redirect when
+# the fork's per-device routing table is used.
+lifecycle_edit(b"opts.AutoRedirect = hopt.WifiVPNSharing", b"opts.AutoRedirect = hopt.WifiVPNSharing || hopt.RouterMode")
+# Native auto-routing should capture IPv6 even when DNS is IPv4-only;
+# Android/iOS need the TUN addresses to match their platform VPN builder.
+lifecycle_edit(b"\t\tif ipv6Enable {\n\t\t\topts.Address = append(opts.Address,", b"\t\tif ipv6Enable || (!C.IsAndroid && !C.IsIos && shouldEnableIPv6()) {\n\t\t\topts.Address = append(opts.Address,")
+# The retained sing-box fork uses []string IPCIDR in its raw rule API.
+assert b"IPCIDR: []string{" in candidate
+for marker in (b"buildConfigMu.Lock()", b"normalizeAppChain(hopts)", b"applyChainStage(ctx,", b"applyHandbookRouting(ctx,", b"applyRegionalPrivacy(&options,", b"hopts.AdaptiveNetwork", b"opts.ExcludeUID", b"proxyListeners(hopt, ipv6Enable)"):
+    assert marker in candidate, marker
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Update the older regression to distinguish the explicit mobile
+# interface contract from native desktop IPv6 route capture. The actual
+# platform VPN builder is still covered by its own integration tests.
+path = "v2/config/builder_tun_ipv6_test.go"
+own = checked_blob(patched, path, "123f18989a3d3e04d5a860d725b4dda7132013cb")
+assert git("show", data["tentative_tree"] + ":" + path) == own
+candidate = own
+lifecycle_edit(b"func TestTunIPv4OnlyDoesNotConfigureIPv6WithoutRoot(t *testing.T)", b"func TestTunIPv4OnlyPlatformAddressPolicy(t *testing.T)")
+lifecycle_edit(b"\t\tif len(tun.Address) != 1 || !tun.Address[0].Addr().Is4() {\n\t\t\tt.Fatalf(\"IPv4-only mode must configure only an IPv4 TUN address, got %v\", tun.Address)\n\t\t}", b'''		want := 1
+		if !C.IsAndroid && !C.IsIos && shouldEnableIPv6() {
+			want = 2
+		}
+		if len(tun.Address) != want || !tun.Address[0].Addr().Is4() || (want == 2 && !tun.Address[1].Addr().Is6()) {
+			t.Fatalf("platform TUN policy expected %d addresses, got %v", want, tun.Address)
+		}''')
+core_clean[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Build recipes: newer Windows launchers, Apple static Cronet linkage and
+# Linux runpath fix; keep pinned generators, Android API/arch targets,
+# native tests, web RPC build and non-mutating module preparation.
+path = "Makefile"
+own = checked_blob(patched, path, "ba7f7c5e72aba26f3e3c3e359c8a9c6117e23d56")
+new = checked_blob(upstream, path, "be37336605dad69802464d86c7c1ed713e860a73")
+candidate = new
+marker = b"# Standalone CLI binary"
+lifecycle_edit(marker, lifecycle_section(own, b"# Test native APIs without", marker) + marker)
+lifecycle_edit(lifecycle_section(new, b"CRONET_DIR=./cronet", b"\nios-full:"),
+               lifecycle_section(own, b"CRONET_DIR=./cronet", b"\nios-full:"))
+lifecycle_edit(b"\tgo mod tidy\n", b"\tgo mod download\n")
+# Keep the earlier filename for clients that have not migrated yet.
+marker = b'\tif [ ! -f $(BINDIR)/$(LIBNAME).dll -o ! -f $(BINDIR)/$(WIN_CLINAME).exe'
+lifecycle_edit(marker, b'\tcp $(BINDIR)/$(WIN_CLINAME).exe $(BINDIR)/$(CLINAME).exe\n' + marker)
+candidate = candidate.rstrip() + b"\n\n" + own[own.index(b"# Tested generators:"):].rstrip() + b"\n"
+for marker in (b"ANDROID_API ?= 24", b"android-arm64:", b"PROTOC_GEN_GO_VERSION=v1.36.12", b"web-rpc:", b"IOS_ADD_TAGS=with_dhcp,with_low_memory\n", b"DIAGNOSTICS_PUBLIC_KEY", b"-L./lib -l:$(LIBNAME).so"):
+    assert marker in candidate, marker
+resolutions[path] = candidate
+
+# Generated RPC docs: upstream retains all existing VetrOFF RPC names and
+# adds new fields. Verify every prior table entry by its section and name
+# rather than requiring unchanged descriptions or table layout.
+path = "docs/hiddifyrpc.md"
+own = checked_blob(patched, path, "ac81a944e7c60bb187fdfaee50018513f45a540a")
+new = checked_blob(upstream, path, "76eecbda28879d20753edaa7d9fc7a5fcf818885")
+def rpc_doc_members(blob):
+    section = b""
+    rows = set()
+    for line in blob.splitlines():
+        if line.startswith(b'<a name="'):
+            section = line
+        if line.startswith(b"| ") and b" |" in line:
+            name = line.split(b"|")[1].strip()
+            if name and name not in (b"Field", b"Name", b"Method", b"-----", b"----"):
+                rows.add((section, name))
+    return rows
+assert rpc_doc_members(own) <= rpc_doc_members(new), sorted(rpc_doc_members(own) - rpc_doc_members(new))
+resolutions[path] = new
+
+# go.mod intentionally remains open: the existing guarded dependency
+# candidate is valid syntactically but its combined build is not verified.
+apply_reviewed(data, resolutions, core_clean)
 
 repo = repo / "hiddify-sing-box"
 data = json.loads((report / "hiddify-sing-box.json").read_text())
@@ -2378,6 +3182,615 @@ plain = replace_once(plain,
 plain = replace_once(plain, b"for range 16 {", b"for range 8 {")
 assert plain == own
 resolutions[path] = new
+
+# Outbound manager: keep the fork's immutable slices and captured scope,
+# error returns instead of panic, and add upstream dependency checking
+# for endpoints plus per-outbound security classification.
+path = "adapter/outbound/manager.go"
+own = checked_blob(data["patched_tree"], path, "a56075c31237362da68b492af744061c5f337c58")
+new = checked_blob(data["upstream"], path, "46d31bc9d9c62e5bfd598a2861300bc42fb977ed")
+candidate = own
+lifecycle_edit(b"\tstarted                 bool\n", b"\tstarted                 bool\n\tinsecure map[string]string\n")
+lifecycle_edit(b"\t\toutboundByTag: make(map[string]adapter.Outbound),", b"\t\toutboundByTag: make(map[string]adapter.Outbound),\n\t\tinsecure: make(map[string]string),")
+before = lifecycle_section(own, b"\t\tvar dependBy []string\n", b"\t\tif len(dependBy)")
+lifecycle_edit(before, b"\t\tdependBy := m.dependents(tag)\n")
+helper = lifecycle_section(new, b"// dependents lists", b"func (m *Manager) Create(")
+helper = helper.replace(b"if common.Contains(outbound.Dependencies(), tag) {", b"if outbound.Tag() != tag && slices.Contains(outbound.Dependencies(), tag) {")
+lifecycle_edit(b"func (m *Manager) Create(", helper + b"func (m *Manager) Create(")
+lifecycle_edit(b"\tdelete(m.outboundByTag, tag)\n", b"\tdelete(m.outboundByTag, tag)\n\tdelete(m.insecure, tag)\n")
+lifecycle_edit(b"\tm.outboundByTag[tag] = outbound\n", b"\tm.outboundByTag[tag] = outbound\n\tm.insecure[tag] = option.InsecureReason(options)\n")
+# Reject duplicate configuration entries before creating a second outbound
+# when not running. A valid running replacement continues to use hot reload.
+lifecycle_edit(b"\toption.MigrateTLSFragment(options) // H", b'''	m.access.RLock()
+	_, duplicate := m.outboundByTag[tag]
+	started := m.started
+	m.access.RUnlock()
+	if duplicate && !started {
+		return E.New("duplicate outbound tag: ", tag)
+	}
+	option.MigrateTLSFragment(options) // H''')
+# The existing short declaration is valid: scope is new in this function.
+# Do not publish a nonexistent default tag on lookup failure.
+lifecycle_edit(b"\tm.defaultTag = tag\n\tif tag == \"\" {", b"\tif tag == \"\" {\n\t\tm.defaultTag = tag")
+lifecycle_edit(b"\tdefer m.access.Unlock()\n\tif m.defaultOutbound != outbound", b"\tdefer m.access.Unlock()\n\tm.defaultTag = tag\n\tif m.defaultOutbound != outbound")
+assert b"append(slices.Clone(m.outbounds), outbound)" in candidate
+assert b"adapter.CloseLate(scope, outbound)" in candidate
+assert b"m.endpoint.Endpoints()" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Tunnel server: upstream fixes lock leaks on unknown users and preserves
+# nonblocking full-queue eviction. Close a discarded connection when the
+# initial request write fails, rather than silently leaking it.
+path = "protocol/tunnel/server.go"
+own = checked_blob(data["patched_tree"], path, "d05fda52a3569fe3f7545b3a633bfcdddc673e64")
+new = checked_blob(data["upstream"], path, "9ccb83c2c2a92df7984133c9dfe19c335b308e57")
+candidate = new
+lifecycle_edit(b"\t\t\t\ts.logger.ErrorContext(ctx, err)\n\t\t\t\tcontinue", b"\t\t\t\ts.logger.ErrorContext(ctx, err)\n\t\t\t\tconn.Close()\n\t\t\t\tcontinue")
+assert b"ch, ok = s.conns[tunnelDestination]\n\t\t\ts.mtx.Unlock()" in candidate
+assert b"return E.New(\"user \", request.DestinationUUID, \" not found\")" in candidate
+assert b"case oldConn := <-ch:" in candidate and b"oldConn.Close()" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Network manager and router are one coordinated lifecycle change:
+# upstream routes interface changes through the DNS/HTTP cache reset once,
+# registers scope-owned cleanup and avoids opening a second neighbor resolver.
+path = "route/network.go"
+own = checked_blob(data["patched_tree"], path, "1ae3cedb2f96f857e16eee20b16251505923d809")
+new = checked_blob(data["upstream"], path, "ce6a86e7802ee17f2cf4c22cef0e0dcad9424f26")
+candidate = new
+# Do not notify an already stopped network scope. Early notifications
+# still set networkResetPending so post-start can dispatch them.
+lifecycle_edit(b"\tif r.startedCtx != nil {\n\t\tr.dispatchInterfaceUpdateLocked()", b"\tif r.startedCtx != nil && r.startedCtx.Err() == nil {\n\t\tr.dispatchInterfaceUpdateLocked()")
+lifecycle_edit(b"started := r.startedCtx != nil\n", b"started := r.startedCtx != nil && r.startedCtx.Err() == nil\n")
+# Preserve the fork's monitoring notification when the platform explicitly
+# flushes DNS, in addition to upstream's native inbound cache flush.
+lifecycle_edit(b"\t\t\tflusher.FlushSystemDNSCache()\n\t\t}\n\t}\n}", b"\t\t\tflusher.FlushSystemDNSCache()\n\t\t}\n\t}\n\tr.networkChanged()\n}")
+lifecycle_edit(b"\tr.router.ResetNetwork()\n", b"\tif r.router != nil {\n\t\tr.router.ResetNetwork()\n\t}\n")
+assert b"r.startedCtx = scope.Context()" in candidate
+assert b"r.interfaceMonitor.UnregisterCallback(interfaceUpdateElement)" in candidate
+assert b"scope.Add(r.powerListener.Close)" in candidate
+assert b"monitor.InterfaceUpdated(ctx)" in candidate
+assert b"r.connectionManager.CloseAll()" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "route/router.go"
+own = checked_blob(data["patched_tree"], path, "0aa84c4b5e1779adf1951863f60181ad95dbe563")
+new = checked_blob(data["upstream"], path, "5c89a4ae3c13351db1361a182638903d1a4e2904")
+# Keep the initialization-stage neighbor resolver (including native
+# platform resolution), not the duplicate start-stage initialization.
+assert b"r.needFindNeighbor = needFindNeighbor" in own
+assert b"r.needFindNeighbor = needFindNeighbor" not in new
+assert b"newPlatformNeighborResolver" in new and b"scope.Add(resolver.Close)" in new
+assert b"scope.Add(r.processSearcher.Close)" in new
+assert b"hSetIPv6Fallback(router.connection, options.IPv6Fallback)" in new
+assert b"dnsHijackSlots:" in new
+assert b"r.network.ResetNetwork(r.ctx)" not in new
+assert b"r.httpClientManager.ResetNetwork()" in new and b"r.dns.ResetNetwork()" in new
+resolutions[path] = new
+
+# The connection manager's upstream version retains the fork's tracked
+# socket owner, IPv6 fallback, cached handshake counters and splice guard.
+# Adopt paced TCP/UDP wrappers, server-first handshake handling and failed
+# packet-dial history invalidation as a coordinated candidate. Do not
+# remove the runtime pacing opt-out or the regression tests.
+path = "route/conn.go"
+own = checked_blob(data["patched_tree"], path, "ac53c62b7bdc39c112df8b570ef3b584e28cd21c")
+new = checked_blob(data["upstream"], path, "89f23acb67f099fc60f16eb1259b0af5dc076294")
+for marker in (b"type socketOwner struct", b"func (o *socketOwner) Attach(", b"func (o *socketOwner) detach(", b"func (m *ConnectionManager) CloseAll(", b"hNewIPv6Connection(", b"metadata.TLSSpoof == \"\"", b"cachedBuffer.Release()", b"readCounters", b"writeCounters", b"m.deleteURLTestHistory(metadata.OutboundChain)"):
+    assert marker in own and marker in new, marker
+for marker in (b"tracked.hPace.init(conn)", b"tracked.wake.path.init(conn)", b"serverFirst := sniff.Skip(&metadata)", b"tlsspoof.NewConn(", b"c.hSyscallConn(syscallConn)", b"hPacedSyscallConn(syscallConn, &c.wake)", b"return c.stream || pacingDisabled"):
+    assert marker in new, marker
+assert new.count(b"m.deleteURLTestHistory(metadata.OutboundChain)") > own.count(b"m.deleteURLTestHistory(metadata.OutboundChain)")
+for helper_path, sha in (
+    ("route/h_read_pace.go", "85acf4679e1dc326cbd468fddf8d42787eaa8b06"),
+    ("route/h_wake_pace.go", "710be5ca8e6a800244c2d93d20026feeff864275"),
+    ("route/h_read_pace_test.go", "8288929bf1cdcf35650be98e681b1bb682188269"),
+    ("route/h_wake_pace_test.go", "51eec59d0726169970a8388d442045ee0b4176bb"),
+    ("route/h_wake_pace_unix_test.go", "f8a86faf2cbb06589e3f2b6d4b1767486f97b1d8"),
+):
+    helper = checked_blob(data["upstream"], helper_path, sha)
+    assert git("show", data["tentative_tree"] + ":" + helper_path) == helper, helper_path
+    if helper_path == "route/h_read_pace.go":
+        assert b"HIDDIFY_NO_READ_PACE" in helper
+resolutions[path] = new
+
+# XDrive's box-level tests must keep VLESS encryption: the fork still
+# rejects plaintext XDrive. The upstream changes remove that requirement,
+# not the transport tests themselves. Compare the exact baseline blobs.
+path = "h_box_xdrive_test.go"
+own = checked_blob(data["patched_tree"], path, "178d0a297bffec82f9e1f30a02754460ff3793fa")
+new = checked_blob(data["upstream"], path, "4586c6635173b1bdb06502b81d5fac6044295a63")
+plain = own.replace(b'\tdecryption, encryption := hVLESSEncryptionPair(t, "native")\n', b"")
+plain = plain.replace(b'\n "decryption": "' + b'\x60 + decryption + \x60' + b'",', b"")
+plain = plain.replace(b'\n "encryption": "' + b'\x60 + encryption + \x60' + b'",', b"")
+plain = plain.replace(b'\t_, encryption := hVLESSEncryptionPair(t, "native")\n', b"")
+plain = plain.replace(b', "encryption": "' + b'\x60 + encryption + \x60' + b'"', b"")
+assert plain == new, path
+candidate = own
+lifecycle_edit(b"\t\t_, err = conn.Write(payload)\n\t\trequire.NoError(t, err)", b"\t\trequire.NoError(t, conn.SetWriteDeadline(time.Now().Add(20*time.Second)))\n\t\twritten, err := conn.Write(payload)\n\t\trequire.NoError(t, err)\n\t\trequire.Equal(t, len(payload), written)")
+# A separate regression asserts the security contract before any I/O.
+candidate += b'''
+func TestH_XDriveRequiresVLESSEncryption(t *testing.T) {
+	ctx := include.Context(context.Background())
+	config := ''' + bytes([96]) + b'''{"log":{"disabled":true},"outbounds":[{"type":"vless","tag":"x","server":"127.0.0.1","server_port":1,"uuid":"b831381d-6324-4d53-ad4f-8cda48b30811","transport":{"type":"xdrive","service":"local","remote_folder":"test"}}]}''' + bytes([96]) + b'''
+	options, err := json.UnmarshalExtendedContext[option.Options](ctx, []byte(config))
+	require.NoError(t, err)
+	instance, err := box.New(box.Options{Context: ctx, Options: options})
+	if instance != nil {
+		defer instance.Close()
+	}
+	require.ErrorContains(t, err, "XDrive requires VLESS encryption")
+}
+'''
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Keep the earlier Xray integration tests and add the newer XHTTP cases.
+# Compare all old test function names; other code differences were reviewed
+# as formatting, additional test cases, imports and a new TLS test.
+path = "h_xray_interop_test.go"
+own = checked_blob(data["patched_tree"], path, "9c2e193d489ecd62569baef3e83f6925dcecc898")
+new = checked_blob(data["upstream"], path, "bd9e3dd0f7760b203a9763a4eddb20176e984a63")
+test_names = lambda blob: set(re.findall(rb"(?m)^func (Test\w+)\(", blob))
+assert test_names(own) < test_names(new)
+assert test_names(new) - test_names(own) == {b"TestH_XrayXHTTPTLSFingerprint"}
+for marker in (b"stream-one tokenish obfs", b"stream-up tokenish obfs", b"packet-up tokenish obfs cookie", b"hVLESSEncryptionPair", b"tls.GenerateCertificate("):
+    assert marker in new, marker
+resolutions[path] = new
+
+# Keep the locked Xray version's documented limits; upstream's newer
+# backend defaults require the still-pending Xray/Reality dependency pair.
+# Adopt the source attribution, not an unverified performance claim.
+for path, own_sha, new_sha, marker, credits in (
+    ("docs/hiddify/features/transports/xdrive.en.md", "9fcfe9f3c9c8a738e586f4f6ffdd9a39d9b60963", "3c6421c771251e311e2efb46261433ed3b6753a3", b"## See also", b"## Sources and credits\n\n- [XTLS/Xray-core](https://github.com/XTLS/Xray-core): the XDRIVE transport code.\n\n"),
+    ("docs/hiddify/features/transports/xdrive.fa.md", "6e4550972686e491c1daedd17b9c3ffa67188a48", "415ac0ad93ed4968c6ddbda6a25eba456a77c765", "## همچنین ببینید".encode(), "## منبع‌ها و قدردانی\n\n- [XTLS/Xray-core](https://github.com/XTLS/Xray-core): کد ترنسپورت XDRIVE.\n\n".encode()),
+):
+    own = checked_blob(data["patched_tree"], path, own_sha)
+    new = checked_blob(data["upstream"], path, new_sha)
+    assert b"26.10.31" in own and b"26.11.9" in new
+    assert b"storage_dialer" in own and b"https://github.com/XTLS/Xray-core" in new
+    resolutions[path] = replace_once(own, marker, credits + marker)
+
+# Psiphon controller: upstream reconnect loop needs a restartable attempt
+# context, but the instance itself must be permanently closed and its
+# datastore must not be released until both startup and controller exit.
+path = "protocol/psiphon/psiphon.go"
+own = checked_blob(data["patched_tree"], path, "4e672bc2b1aada8fe557dda997748c772e124707")
+new = checked_blob(data["upstream"], path, "3119778e48125997b0eab0bc7973634bc27237e7")
+candidate = new
+lifecycle_edit(b"\taccess          sync.Mutex\n", b"\taccess          sync.Mutex\n\tlifeMu sync.Mutex\n\tcloseMu sync.Mutex\n\tclosed atomic.Bool\n\tinstanceCancel context.CancelFunc\n")
+lifecycle_edit(b"\tctl := p.controller.Load()\n\tif ctl == nil {\n\t\treturn nil, errors.New", b"\tif p.closed.Load() {\n\t\treturn nil, net.ErrClosed\n\t}\n\tctl := p.controller.Load()\n\tif ctl == nil {\n\t\treturn nil, errors.New")
+lifecycle_edit(b"func (p *Psiphon) PreStart() error {\n", b"""func (p *Psiphon) PreStart() error {
+	p.lifeMu.Lock()
+	defer p.lifeMu.Unlock()
+	if p.closed.Load() {
+		return net.ErrClosed
+	}
+	if p.dataStoreOpened {
+		return nil
+	}
+""")
+lifecycle_edit(b"os.MkdirAll(p.config.DataRootDirectory, 0o755)", b"os.MkdirAll(p.config.DataRootDirectory, 0o700)")
+lifecycle_edit(b"return p.controller.Load() != nil && p.connected.Load()", b"return !p.closed.Load() && p.controller.Load() != nil && p.connected.Load()")
+lifecycle_edit(function_blob(new, b"func (p *Psiphon) Close()"), b"""func (p *Psiphon) Close() error {
+	p.closeMu.Lock()
+	defer p.closeMu.Unlock()
+	p.closed.Store(true)
+	if p.instanceCancel != nil {
+		p.instanceCancel()
+	}
+	p.stop()
+	p.lifeMu.Lock()
+	defer p.lifeMu.Unlock()
+	p.waitStopped()
+	stopListeningNotices(p)
+	p.closeDataStore()
+	p.connected.Store(false)
+	return nil
+}
+""")
+lifecycle_edit(b"func NewPsiphon(ctx context.Context, l logger.ContextLogger, config *psiphon.Config, tag string) (*Psiphon, error) {\n\tp := Psiphon{", b"func NewPsiphon(ctx context.Context, l logger.ContextLogger, config *psiphon.Config, tag string) (*Psiphon, error) {\n\tctx, instanceCancel := context.WithCancel(ctx)\n\tp := Psiphon{\n\t\tinstanceCancel: instanceCancel,")
+lifecycle_edit(b"func (p *Psiphon) Start() error {\n\tctx, cancel := context.WithCancel(p.ctx)", b"""func (p *Psiphon) Start() (err error) {
+	p.lifeMu.Lock()
+	defer p.lifeMu.Unlock()
+	if p.closed.Load() {
+		return net.ErrClosed
+	}
+	p.access.Lock()
+	previous := p.runDone
+	p.access.Unlock()
+	if previous != nil {
+		select {
+		case <-previous:
+		default:
+			return errors.New("Psiphon controller still running")
+		}
+	}
+	ctx, cancel := context.WithCancel(p.ctx)
+	defer func() {
+		if err != nil {
+			cancel()
+			p.waitStopped()
+			stopListeningNotices(p)
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return err
+	}""")
+lifecycle_edit(b'if err := listenNotices(p, func(event NoticeEvent) { p.onNotice(event, signal) }); err != nil {', b'''if err := listenNotices(p, func(event NoticeEvent) {
+		if ctx.Err() == nil && !p.closed.Load() {
+			p.onNotice(event, signal)
+		}
+	}); err != nil {''')
+lifecycle_edit(b"\tp.controller.Store(controller)\n", b"\tif err := ctx.Err(); err != nil {\n\t\treturn err\n\t}\n\tp.controller.Store(controller)\n")
+lifecycle_edit(b"\tcase <-connectedSignal:\n\t\tp.logger.Debug", b"\tcase <-connectedSignal:\n\t\tif err := ctx.Err(); err != nil {\n\t\t\treturn err\n\t\t}\n\t\tp.logger.Debug")
+lifecycle_edit(b"// Wait blocks until the controller started last stops", b"""// waitStopped is used before changing config for a replacement attempt.
+func (p *Psiphon) waitStopped() {
+	p.access.Lock()
+	done := p.runDone
+	p.access.Unlock()
+	if done != nil {
+		<-done
+	}
+}
+
+// Wait blocks until the controller started last stops""")
+lifecycle_edit(b"func (p *Psiphon) setConnected(ok bool) {\n", b"func (p *Psiphon) setConnected(ok bool) {\n\tif p.closed.Load() {\n\t\treturn\n\t}\n")
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+# The fork extracted these functions to notice.go; upstream now defines
+# them in psiphon.go. Remove the redundant file only from the candidate.
+path = "protocol/psiphon/notice.go"
+notice = checked_blob(data["patched_tree"], path, "b104be00e5f6f5eaac3632b989890b84e869fbea")
+assert git("show", data["tentative_tree"] + ":" + path) == notice
+assert b"func installNoticeHub()" in notice and b"func installNoticeHub()" in candidate
+compat[path] = None
+
+# Preserve Android socket protection, explicit detour validation, Conduit
+# and separate data directories. The bridge is created before Commit.
+path = "protocol/psiphon/outbound.go"
+own = checked_blob(data["patched_tree"], path, "be12d51cf8a7cd56dae007c62247adf01302ae05")
+new = checked_blob(data["upstream"], path, "ca71acc89e5f4160f2dedd3bf696bc4e7502b158")
+candidate = new
+lifecycle_edit(b"\tmu          sync.RWMutex\n", b"\tmu          sync.RWMutex\n\tlifeMu sync.Mutex\n\tclosed bool\n")
+lifecycle_edit(b"\tctx, cancel := context.WithCancel(ctx)\n", b'''	if options.Detour != "" && config.UpstreamProxyURL != "" {
+		return nil, E.New("Psiphon detour conflicts with upstream_proxy_url")
+	}
+	if config.InproxyClientPersonalCompartmentID != "" {
+		if options.Detour != "" || config.UpstreamProxyURL != "" {
+			return nil, E.New("Conduit pairing requires a direct Psiphon transport")
+		}
+		if manager := service.FromContext[adapter.NetworkManager](ctx); manager != nil && manager.DefaultOptions().RoutingMark != 0 {
+			return nil, E.New("Conduit pairing does not support root routing marks")
+		}
+	}
+	if platform := service.FromContext[adapter.PlatformInterface](ctx); platform != nil && platform.UsePlatformAutoDetectInterfaceControl() {
+		config.DeviceBinder = psiphonDeviceBinder{platform}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+''')
+lifecycle_edit(b"if scannerEnabled(options) {", b'if scannerEnabled(options) && config.InproxyClientPersonalCompartmentID == "" && config.UpstreamProxyURL == "" {')
+lifecycle_edit(b"func (h *Outbound) PreStart() error {\n", b"""func (h *Outbound) PreStart() error {
+	h.lifeMu.Lock()
+	defer h.lifeMu.Unlock()
+	if h.closed {
+		return net.ErrClosed
+	}
+""")
+# Explicit direct-detour rebuild must preserve binder and avoid replacing
+# a configured Conduit mode; direct mode is already checked above.
+lifecycle_edit(b"\t\tif err := h.firstHopByDetour(); err != nil {", b"\t\tbinder := h.psiphon.config.DeviceBinder\n\t\tif err := h.firstHopByDetour(); err != nil {")
+lifecycle_edit(b"\t\t\treturn err\n\t\t}\n\t}\n\tif h.scanner != nil { //H:", b"\t\t\treturn err\n\t\t}\n\t\th.psiphon.config.DeviceBinder = binder\n\t}\n\tif h.scanner != nil { //H:")
+# Move authenticated SOCKS bridge creation into PreStart, before the
+# library commits its config. Never force it on protected direct Android
+# sockets or Conduit, preserving QUIC and inproxy in those modes.
+bridge = lifecycle_section(new, b"\t// The Psiphon library opens its own connections.", b"\trunDone := make(chan struct{})")
+bridge = replace_once(bridge, b'if h.psiphon.config.UpstreamProxyURL == "" {', b'if h.psiphon.config.UpstreamProxyURL == "" && h.psiphon.config.InproxyClientPersonalCompartmentID == "" && (h.options.Detour != "" || h.psiphon.config.DeviceBinder == nil) {')
+bridge = replace_once(bridge, b"if err = proxy.Start(); err != nil {\n\t\t\treturn err", b"if err = proxy.Start(); err != nil {\n\t\t\tproxy.Close()\n\t\t\treturn err")
+lifecycle_edit(b"\treturn h.psiphon.PreStart()\n}\nfunc (h *Outbound) Start() error {\n" + lifecycle_section(new, b"\t// The Psiphon library opens its own connections.", b"\trunDone := make(chan struct{})"), bridge + b"""	return h.psiphon.PreStart()
+}
+func (h *Outbound) Start() error {
+	h.lifeMu.Lock()
+	defer h.lifeMu.Unlock()
+	if h.closed {
+		return net.ErrClosed
+	}
+	if h.runDone != nil {
+		return E.New("Psiphon already started")
+	}
+""")
+lifecycle_edit(b"\th.cancel()\n\tif h.runDone != nil {", b"\th.lifeMu.Lock()\n\tdefer h.lifeMu.Unlock()\n\tif h.closed {\n\t\treturn nil\n\t}\n\th.closed = true\n\th.cancel()\n\tif h.runDone != nil {")
+lifecycle_edit(b'\tconfig.UpstreamProxyURL = pick(options.UpstreamProxyURL, config.UpstreamProxyURL, "")\n\n\tapplyTunnelProtocols(config, options)', b'''\tconfig.UpstreamProxyURL = pick(options.UpstreamProxyURL, config.UpstreamProxyURL, "")
+	config.InproxyClientPersonalCompartmentID = pick(options.ConduitPairingID, config.InproxyClientPersonalCompartmentID, "")
+	if config.InproxyClientPersonalCompartmentID == "" {
+		applyTunnelProtocols(config, options)
+	}'''.replace(b"\\t", b"\t"))
+# Retain fork's actual safe directory name: lossy sanitization can make
+# two tags share a datastore. Do not migrate the same shared files into
+# several concurrent instances.
+lifecycle_edit(b"\tconfig.DataRootDirectory = filepath.Join(dataDir, instanceDirectory(tag))\n\tconfig.MigrateDataStoreDirectory = dataDir", b'''	if tag == "" {
+		tag = "default"
+	}
+	if !filepath.IsLocal(tag) || filepath.Base(tag) != tag {
+		return nil, E.New("invalid Psiphon outbound tag for data directory: ", tag)
+	}
+	dataDir = filepath.Join(dataDir, tag)
+	config.DataRootDirectory = dataDir
+	config.MigrateDataStoreDirectory = dataDir''')
+lifecycle_edit(b"\t\th.psiphon.stop()\n\t\tif h.ctx.Err()", b"\t\th.psiphon.stop()\n\t\th.psiphon.waitStopped()\n\t\tif h.ctx.Err()")
+candidate += b"\n" + own[own.index(b"type psiphonDeviceBinder struct"):].rstrip() + b"\n"
+# Retain direct readiness method for existing callers.
+candidate += b"\nfunc (h *Outbound) IsReady() bool { return h.psiphon.IsConnected() }\n"
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Combine upstream configuration/instance tests with the fork's Android,
+# Conduit, detour and close regressions. Keep directory migration isolated.
+path = "protocol/psiphon/h_psiphon_test.go"
+own = checked_blob(data["patched_tree"], path, "56cd53e7a8ab95886521c31045ab45a040b3368c")
+new = checked_blob(data["upstream"], path, "9b140a294335c4338371aca6e594e1cc61f97630")
+candidate = new
+lifecycle_edit(b'\t"encoding/base64"\n', b'\t"encoding/base64"\n\t"net"\n')
+lifecycle_edit(b'\t\tEgressRegion:                            "DE",', b'\t\tEgressRegion:                            "DE",\n\t\tConduitPairingID:                        "pair",')
+lifecycle_edit(b'\trequire.Equal(t, "DE", config.EgressRegion)\n\trequire.Equal(t, "PC", config.PropagationChannelId)', b'\trequire.Equal(t, "DE", config.EgressRegion)\n\trequire.Equal(t, "pair", config.InproxyClientPersonalCompartmentID)\n\trequire.Equal(t, "PC", config.PropagationChannelId)')
+lifecycle_edit(b"require.Equal(t, defaultDataDirectory, config.MigrateDataStoreDirectory)", b'require.Equal(t, filepath.Join(defaultDataDirectory, "psiphon"), config.MigrateDataStoreDirectory)')
+lifecycle_edit(b"require.Equal(t, defaultDataDirectory, config.MigrateObfuscatedServerListDownloadDirectory)", b'require.Equal(t, filepath.Join(defaultDataDirectory, "psiphon"), config.MigrateObfuscatedServerListDownloadDirectory)')
+lifecycle_edit(b'filepath.Join(defaultDataDirectory, "server_list_compressed")', b'filepath.Join(defaultDataDirectory, "psiphon", "server_list_compressed")')
+lifecycle_edit(b'require.Equal(t, "/tmp/psi", config.MigrateDataStoreDirectory)', b'require.Equal(t, filepath.Join("/tmp/psi", "psiphon"), config.MigrateDataStoreDirectory)')
+lifecycle_edit(b'filepath.Join("/tmp/psi", "server_list_compressed")', b'filepath.Join("/tmp/psi", "psiphon", "server_list_compressed")')
+lifecycle_edit(b'require.Equal(t, defaultDataDirectory, us.MigrateDataStoreDirectory, "the shared directory of before is migrated")', b'require.Equal(t, us.DataRootDirectory, us.MigrateDataStoreDirectory, "migration stays within the instance")')
+extra = own[own.index(b"func TestH_PsiphonCloseIsIdempotentAndPreventsLateStart"):].rstrip()
+extra = extra.replace(b"NewOutbound(context.Background(), nil", b"NewOutbound(hTestContext(), nil").replace(b"(context.Background(), &hProtectedAndroidPlatform{})", b"(hTestContext(), &hProtectedAndroidPlatform{})").replace(b"h.bridge", b"h.proxy")
+# The fork's test literals used promoted fields and a manager whose
+# Outbound method was not implemented. Use the existing upstream fake.
+extra = extra.replace(b'{Detour: "main",', b'{DialerOptions: option.DialerOptions{Detour: "main"},')
+extra = extra.replace(b'DataDirectory: t.TempDir(), Detour: "proxy",', b'DataDirectory: t.TempDir(), DialerOptions: option.DialerOptions{Detour: "proxy"},')
+extra = extra.replace(b"type hPsiphonOutboundManager struct{ adapter.OutboundManager }\n\n", b"")
+extra = extra.replace(b"&hPsiphonOutboundManager{}", b'hOutbounds{outbounds: map[string]adapter.Outbound{"proxy": hDirect{typ: C.TypeVLESS}}}')
+candidate = candidate.rstrip() + b"\n\n" + extra + b"\n"
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Telemost: the newer call API separates the session's lifetime from
+# its peer connections. The creator no longer waits for a first peer,
+# and every newly connected peer gets the same inbound handlers.
+path = "transport/call/telemost/connect.go"
+own = checked_blob(data["patched_tree"], path, "5deac3777f1dc9fc9a09ccf3f885c3fc4c23fa6c")
+new = checked_blob(data["upstream"], path, "b805bebf4989aff18b0e302c287cb053005b5619")
+candidate = new
+# Cancel before creating a conference, and do not publish a session
+# if the caller canceled while fetching its configuration.
+lifecycle_edit(b"\tcfg, err := FetchConfig(dialer, logger)\n", b"\tif err := ctx.Err(); err != nil {\n\t\treturn nil, \"\", err\n\t}\n\tcfg, err := FetchConfig(dialer, logger)\n")
+lifecycle_edit(b"\tgo bridge.Run()\n\treturn bridge.Close,", b"\tif err := ctx.Err(); err != nil {\n\t\tbridge.Close()\n\t\treturn nil, \"\", err\n\t}\n\tgo bridge.Run()\n\treturn bridge.Close,")
+# An initial join failure used to leave ConnectJoiner waiting until its
+# timeout even though the joiner's goroutine had already returned.
+lifecycle_edit(b"\tgo joiner.RunWithParams(params)\n\tselect {", b"\tdone := make(chan struct{})\n\tgo func() {\n\t\tdefer close(done)\n\t\tjoiner.RunWithParams(params)\n\t}()\n\tselect {")
+lifecycle_edit(b"\tcase <-ctx.Done():\n\t\tjoiner.Close()\n\t\treturn nil, nil, ctx.Err()", b"\tcase <-done:\n\t\tjoiner.Close()\n\t\treturn nil, nil, fmt.Errorf(\"telemost: joiner stopped before connecting\")\n\tcase <-ctx.Done():\n\t\tjoiner.Close()\n\t\treturn nil, nil, ctx.Err()")
+assert b"return bridge.Close, connInfo.ConferenceURI, nil" in candidate
+assert b"tunnel.NewJoinerBridge(tun, logger)" in candidate
+assert b"bridge.getActiveBridge()" not in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "transport/call/telemost/creator.go"
+own = checked_blob(data["patched_tree"], path, "236587fb240b174fd51fc2b32d35c194fe8341d9")
+new = checked_blob(data["upstream"], path, "ade912d229dd40098a9a94a3da72204d9d9654c7")
+assert b"next.InheritHandlers(previous)" in own
+assert b"tunnel.NewCreatorBridge(tun, b.accept, b.logger)" in new
+assert b"if b.ctx.Err() != nil { // closed while the peer connected" in new
+assert b"active.Close()" in new
+assert b"next.Close()" in new
+resolutions[path] = new
+
+path = "transport/call/telemost/h_relay_test.go"
+own = checked_blob(data["patched_tree"], path, "1fad329a003b30ddcb58a4997f00a15a5c42cc89")
+new = checked_blob(data["upstream"], path, "3d729664cb1870a45155d6591d6cd9a697b765ae")
+assert normalize_imports(own) == normalize_imports(new)
+resolutions[path] = new
+
+# Verify the API's cleanly merged callers and its new reconnect test.
+for path, sha, markers in (
+    ("transport/call/telemost/h_creator_test.go", "3d62a1a65529d486033f9b89093bb428d632b473", (b"TestH_EveryPeerBridgeHasTheSessionsHandlers", b"active.IsClosed()")),
+    ("protocol/call/inbound.go", "87d556d36c288541e6a1a718cd4691dea010c86a", (b"Accept: tunnel.AcceptHandlers",)),
+    ("protocol/call/outbound.go", "bd9a1731a844ce5d093a98785d5b61d3afe98fcc", (b"o.bridge.Load().DialContext",)),
+):
+    upstream_call = checked_blob(data["upstream"], path, sha)
+    for marker in markers:
+        assert marker in upstream_call, (path, marker)
+        assert marker in git("show", data["tentative_tree"] + ":" + path), (path, marker)
+
+# Build tags: the upstream Makefile differs only in its default tag list.
+# Keep the additional fork features in normal builds; explicit TAGS
+# overrides continue to work.
+path = "Makefile"
+own = checked_blob(data["patched_tree"], path, "fcf551653e6c8f691ae427dd235cd97ba8821b80")
+new = checked_blob(data["upstream"], path, "e49b5423d1358e854172aba54b1b023b09ba61ad")
+assert replace_once(own, b",with_acme,with_tailscale,with_ccm,with_ocm\n", b"\n") == new
+resolutions[path] = own
+
+# Schema generator: retain the fork's string CIDR representation and its
+# prefixable schema annotation; the remaining changes are comments/import
+# ordering and older equivalents of the modern reflection/string APIs.
+path = "schema/generator.go"
+own = checked_blob(data["patched_tree"], path, "2199b1cc0c4f6a33054096c0a0d6af22b74e8cb2")
+new = checked_blob(data["upstream"], path, "ab85a7a62a08d951be72134377d5668fc8bce174")
+assert b'hPrefixableField(fieldType)' in own and b'hPrefixableField(fieldType)' not in new
+for marker in (b'SmartPoolOptions', b'AnyOf(BooleanNode(), node)', b'reflect.TypeFor[xbadoption.Range]()', b'case rawMessageType:', b'fieldType'):
+    assert marker in own and marker in new, marker
+assert b'for field := range structType.Fields()' in own
+resolutions[path] = own
+
+# Documentation: distinguish the upstream history from this migration's
+# verification status, preserve fork-specific protocol and configuration
+# contracts, and avoid dropping historical bug reports.
+path = "README.md"
+own = checked_blob(data["patched_tree"], path, "8123c0ba9bea55cad428b31226739512d6cc8603")
+new = checked_blob(data["upstream"], path, "27dddfd406965083d5e7b7b0967eb25bbc32c378")
+extra = own[own.index(b"## Additional protocols in this fork"):].strip()
+assert all(name in extra for name in (b"VetrOFFProxy", b"OpenFlux", b"OLCRTC", b"FPTN", b"PingTunnel", b"Snell", b"smart_dns_pool"))
+# Keep the fork title and complete license, not upstream branding.
+assert own.count(b"## License") == 1 and new.count(b"## License") == 1
+candidate = own.split(b"\n", 1)[0] + b"\n\n" + b"Integration candidate: upstream feature descriptions below are historical reference, not a statement that every feature has passed the VetrOFF build matrix.\n\n" + new[new.index(b"**Documentation:**"):new.index(b"## License")].rstrip() + b"\n\n" + own[own.index(b"## License"):own.index(b"## Additional protocols in this fork")].rstrip() + b"\n\n" + extra + b"\n"
+# Retain the existing example section as part of the fork contract.
+if b"## Examples\n" in own:
+    examples = own[own.index(b"## Examples\n"):].split(b"\n## ", 1)[0].rstrip()
+    candidate += b"\n" + examples + b"\n"
+resolutions[path] = candidate
+
+path = "docs/hiddify/app_considerations.md"
+own = checked_blob(data["patched_tree"], path, "0a0bc2be40e94d88e139fb0ae1d294ab607099fd")
+new = checked_blob(data["upstream"], path, "7898ce7550cec90c906e3b98ccafccedbedd6020")
+# Preserve the existing integration instructions, including the Xray/uTLS
+# versions and cached-buffer fix. Link to the exact upstream document
+# rather than reproducing conflicting instructions as current requirements.
+assert b"e1f78e792da34ce99fe2279729dea3b0a09efa9d" in own
+assert b"Chrome 133" in own and b"Chrome 155" in new
+assert b"XDrive remains registered" in own and b"storage_dialer" in own
+resolutions[path] = own.rstrip() + b"""
+
+## Next upstream integration (candidate only)
+
+- [Original integration notes at a26e58b](https://github.com/hiddify/hiddify-sing-box/blob/a26e58b376987a3305b201ec87fbc8918f620ad3/docs/hiddify/app_considerations.md) describe the upstream target, not the current stable fork.
+- Keep the native uTLS and vendored Xray/Reality pair until the combined build verifies replacements; do not assume newer browser fingerprints or Xray defaults are active.
+- The reviewed candidates include keep-top monitoring, independent outbound readiness and security classification, scoped network resets and Psiphon controller restart. Their full GUI and platform integration still needs testing.
+- Preserve Android socket protection, Conduit pairing, encrypted XDrive, legacy final_mask, standalone smart_dns_pool and explicit WARP fallback addresses.
+- The consuming Go modules must carry the correct local replacements themselves. Do not publish candidate binaries before the combined regression and release build gates pass.
+"""
+
+# Keep the original project's historical changelog, then retain every
+# fork-only section verbatim. A common heading is already in the original
+# history; retain the fork version too if the actual text differs.
+for path, own_sha, new_sha, label in (
+    ("docs/hiddify/bugfix/v5.en.md", "a3b7e8c03009c7d741217576713926de65ba9164", "121c3fc9e0ba2867ae63d3032bab1a3597b1e8eb", b"# VetrOFF fork history (separate from upstream)"),
+    ("docs/hiddify/bugfix/v5.fa.md", "4084b7e4e581d3f9787cf457d7a1e177c7cebde8", "c1a4c39534df9afaf2052791b63e9a107d37de34", "# تاریخچهٔ فورک VetrOFF (جدا از بالادست)".encode()),
+):
+    own = checked_blob(data["patched_tree"], path, own_sha)
+    new = checked_blob(data["upstream"], path, new_sha)
+    def sections(blob):
+        return [part.strip() for part in re.split(rb"(?m)(?=^## )", blob)[1:]]
+    a = sections(own.replace(b"</div>", b""))
+    b = sections(new.replace(b"</div>", b""))
+    assert len(a) == 151 and len(b) == 190, path
+    missing = [part for part in a if part not in set(b)]
+    assert len(missing) >= 13, path
+    body = new.rstrip()
+    rtl = path.endswith(".fa.md")
+    if rtl:
+        assert body.endswith(b"</div>")
+        body = body[:-len(b"</div>")].rstrip()
+    candidate = body + b"\n\n---\n\n" + label + b"\n\n" + b"\n\n".join(missing) + b"\n"
+    if rtl:
+        candidate += b"\n</div>\n"
+    assert all(part in candidate for part in a)
+    resolutions[path] = candidate
+
+# Monitoring behavior was reviewed together with its staged tests, lazy
+# outbounds and DNS-tunnel timeout factors. Adopt the newer documentation.
+for path, own_sha, new_sha in (
+    ("docs/hiddify/features/groups/monitoring.en.md", "1a5afd744936761055036c93fb744d50fced991f", "73028a3a410551ec078a5711d622206212f803c2"),
+    ("docs/hiddify/features/groups/monitoring.fa.md", "b4a57a1202b993e7a1d72bc60e56a6fd8b2841b5", "44c54838768375d9dd3af1ed616b2242fc0820dd"),
+):
+    own = checked_blob(data["patched_tree"], path, own_sha)
+    new = checked_blob(data["upstream"], path, new_sha)
+    keys = lambda blob: set(re.findall(rb"(?m)^\| \x60([a-z_]+)\x60 \|", blob))
+    assert keys(own) <= keys(new)
+    assert b"keep_top" in new and b"masterdns" in new and b"on_demand_timeouts" in new
+    resolutions[path] = new
+
+# Preserve explicit WARP fallback configuration while adopting the newer
+# scanner descriptions. Do not delete the fork's compatibility option.
+for path, own_sha, new_sha in (
+    ("docs/hiddify/features/protocols/warp.en.md", "2a011097b7dd15261b0cbee755ebb204b4415842", "fe0c8bfb952f9bea40f8fb35a7d5c467eb3733a5"),
+    ("docs/hiddify/features/protocols/warp.fa.md", "371dfc7c4c3238a853b9fe9c2ce471cf4bbfbe49", "b91566379398334c62f188ed3805db8326c7d33b"),
+):
+    own = checked_blob(data["patched_tree"], path, own_sha)
+    new = checked_blob(data["upstream"], path, new_sha)
+    old_rows = re.findall(rb"(?m)^\| \x60fallback_address\x60.*$", own)
+    new_rows = re.findall(rb"(?m)^\| \x60fallback_address\x60.*$", new)
+    row = [line for line in old_rows if line not in new_rows]
+    marker = re.findall(rb"(?m)^\| \x60private_key\x60[^\n]*\x60interface\x60[^\n]*\x60peers\x60.*$", new)
+    assert len(old_rows) == 2 and len(new_rows) == 1 and new_rows[0] in old_rows
+    assert len(row) == len(marker) == 1
+    candidate = replace_once(new, marker[0], row[0] + b"\n" + marker[0])
+    assert b"search_timeout" in candidate and b"deep_concurrency" in candidate
+    assert b"block_bits_ipv4" in candidate and b"fallback_address" in candidate
+    resolutions[path] = candidate
+
+# Combined build 45486170730 found cleanly merged lazy-outbound callers
+# still expecting the upstream Status interface and boolean monitor flag.
+# Retain the fork's IsReady interface and atomic lifecycle flag consistently.
+for path, sha, edits in (
+    ("adapter/outbound/h_lazy.go", "5d2a5a8a7ec2d27f78755abde04ba70da557f4e0", (
+        (b"return inner.Status()", b"return adapter.OutboundStatus(inner)", 1),
+        (b"adapter.IsWarming(l.inner.Status())", b"adapter.IsWarming(adapter.OutboundStatus(l.inner))", 1),
+        (b"func (l *Lazy) Status() adapter.Status {", b"func (l *Lazy) IsReady() bool { return l.Status() == adapter.StatusReady }\n\nfunc (l *Lazy) Status() adapter.Status {", 1),
+    )),
+    ("common/monitoring/h_keep_top.go", "6a35e046f1a2e1385f5cad5c230a9c00784b5217", (
+        (b"if m.started {", b"if m.started.Load() {", 2),
+        (b"if m.started &&", b"if m.started.Load() &&", 1),
+    )),
+    ("common/monitoring/h_keep_top_search.go", "439c8290fc012cf473fb393e5be06cb661497028", (
+        (b"status := lazy.Status()", b"status := adapter.OutboundStatus(lazy)", 1),
+    )),
+    ("common/monitoring/h_parked.go", "60be7fb385ecd6cf02025e586c62ce7724e7cab8", (
+        (b"if !m.started", b"if !m.started.Load()", 2),
+    )),
+):
+    candidate = checked_blob(data["upstream"], path, sha)
+    assert git("show", data["tentative_tree"] + ":" + path) == candidate, path
+    for before, after, count in edits:
+        lifecycle_edit(before, after, count)
+    compat[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# The fork had inlined this queue bound in its router constructor.
+# The merged constructor uses the upstream named constant; retain it
+# even when dns.go has no textual merge conflict.
+path = "route/dns.go"
+own = checked_blob(data["patched_tree"], path, "be34ce1c5b5379c3ea9b90679bcf491527f9d158")
+new = checked_blob(data["upstream"], path, "3ff0f74e22728daf0c12f5375c12d4b8e503e345")
+candidate = git("show", data["tentative_tree"] + ":" + path)
+assert candidate in (own, new)
+assert b"case r.dnsHijackSlots <- struct{}{}:" in candidate
+if b"const dnsHijackConcurrency" not in candidate:
+    lifecycle_edit(b"func (r *Router) HijackDNSPacket(", b"const dnsHijackConcurrency = 256 // H\n\nfunc (r *Router) HijackDNSPacket(")
+    compat[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# The combined build exposed a duplicate import in the clean merge of
+# balancer/common.go. Preserve every other merged statement.
+path = "protocol/group/balancer/common.go"
+own = checked_blob(data["patched_tree"], path, "1edadda0236b60717fa600794db13e15fe11ce18")
+new = checked_blob(data["upstream"], path, "f521d935699867fb06c6f2853f040eb4f9314647")
+candidate = git("show", data["tentative_tree"] + ":" + path)
+imp = b'\t"github.com/sagernet/sing-box/option"\n'
+assert own.count(imp) == new.count(imp) == 1
+assert candidate.count(imp) == 2
+candidate = candidate.replace(imp, b"", 1)
+compat[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# The Android bootstrap test's fake network manager embedded a nil
+# interface for ProtectFunc, causing a panic before the assertion.
+# Implement only the missing test double; real protection is unchanged.
+path = "protocol/psiphon/h_psiphon_test.go"
+candidate = resolutions[path]
+assert b"type hNetworkManager struct{ adapter.NetworkManager }" in candidate
+lifecycle_edit(b"func (hNetworkManager) AutoDetectInterface() bool", b"func (hNetworkManager) ProtectFunc() control.Func { return nil }\n\nfunc (hNetworkManager) AutoDetectInterface() bool")
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# The two pacing tests assume timers at 50/100 microseconds are exact.
+# On Linux CI they consistently fail even though the synthetic-window
+# tests pass. synctest virtualizes time for these in-memory connections
+# and channels, preserving all existing assertions and production code.
+for path, sha, signature in (
+    ("route/h_read_pace_test.go", "8288929bf1cdcf35650be98e681b1bb682188269", b"func TestH_ReadPaceLeavesAnExchangeAlone(t *testing.T)"),
+    ("route/h_wake_pace_test.go", "51eec59d0726169970a8388d442045ee0b4176bb", b"func TestH_PacedRawConnWaitsAfterAWakeUp(t *testing.T)"),
+):
+    candidate = checked_blob(data["upstream"], path, sha)
+    assert git("show", data["tentative_tree"] + ":" + path) == candidate
+    original = function_blob(candidate, signature)
+    start = signature + b" {\n"
+    assert original.startswith(start) and original.endswith(b"\n}\n")
+    body = original[len(start):-len(b"\n}\n")]
+    wrapped = start + b"\tsynctest.Test(t, func(t *testing.T) {\n" + body + b"\n\t})\n}\n"
+    lifecycle_edit(original, wrapped)
+    lifecycle_edit(b'\t"testing"\n', b'\t"testing"\n\t"testing/synctest"\n')
+    # The original test body is retained verbatim before gofmt.
+    assert body in candidate
+    compat[path] = subprocess.check_output(["gofmt"], input=candidate)
 
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.

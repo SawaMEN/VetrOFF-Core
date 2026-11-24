@@ -25,7 +25,7 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,6 +42,35 @@ jobs:
         with:
           go-version-file: .build/hiddify-core/hiddify-sing-box/go.mod
           cache-dependency-path: .build/hiddify-core/hiddify-sing-box/go.sum
+      - name: Test merged Core options against locked dependencies
+        id: core_options
+        continue-on-error: true
+        timeout-minutes: 8
+        run: |
+          source scripts/_common.sh
+          report="$ROOT/.build/upstream-merge-audit"
+          tmp=$(mktemp -d)
+          cp "$WORK/go.mod" "$tmp/go.mod"
+          cp "$WORK/go.sum" "$tmp/go.sum"
+          trap 'cp "$tmp/go.mod" "$WORK/go.mod"; cp "$tmp/go.sum" "$WORK/go.sum"; rm -rf "$tmp"' EXIT
+          python3 - "$WORK" "$report" "$tmp/overlay.json" <<'PY'
+          import json, sys
+          from pathlib import Path
+          work, report, overlay = map(Path, sys.argv[1:])
+          meta = json.loads((report / "hiddify-core-reviewed.json").read_text())
+          paths = ("v2/config/hiddify_option.go", "v2/config/inbound_ports.go", "v2/config/inbound_ports_test.go")
+          assert set(paths) <= set(meta["reviewed_resolutions"])
+          files = {str(work / p): str(report / "hiddify-core-resolved" / p) for p in paths}
+          assert all(Path(p).is_file() for p in files.values())
+          overlay.write_text(json.dumps({"Replace": files}))
+          PY
+          cd "$WORK"
+          tags=$(cli_tags)
+          CGO_ENABLED=0 go test -mod=mod -overlay "$tmp/overlay.json" -count=1 -timeout=5m -tags "$tags" -ldflags '-checklinkname=0' \
+            -run '^Test(VetrOFFMergedOptionsJSON|VetrOFFKeepTopNumericOverrides|LANSharingPasswordJSONDoesNotShadowConfiguredSecret|VPNMode|Sharing|ProxyMode|SystemProxy|PortSwitches|TransparentPorts)' \
+            -v ./v2/config 2>&1 | tee "$report/core-options-candidate-test.log"
+          grep -Fq -- '--- PASS: TestVetrOFFMergedOptionsJSON' "$report/core-options-candidate-test.log"
+          grep -Fq -- '--- PASS: TestVetrOFFKeepTopNumericOverrides' "$report/core-options-candidate-test.log"
       - name: Test reviewed tunnel helpers with the race detector
         run: bash scripts/test-reviewed-tunnel-helpers.sh
       - name: Test reviewed WireGuard and AWG transport packages
@@ -68,9 +97,49 @@ jobs:
       - name: Probe combined WARP MASQUE and edgescan candidate
         if: ${{ !cancelled() && steps.warp_tests.outcome == 'success' }}
         run: bash scripts/test-warp-combined-candidate.sh
+      - name: Test reviewed network reset and TCP UDP pacing
+        id: network_reset
+        if: ${{ !cancelled() && steps.merge_audit.outcome == 'success' && steps.setup_go.outcome == 'success' }}
+        timeout-minutes: 12
+        run: |
+          source scripts/_common.sh
+          report="$ROOT/.build/upstream-merge-audit"
+          sing="$WORK/hiddify-sing-box"
+          tmp=$(mktemp -d)
+          cp "$sing/go.mod" "$tmp/go.mod"
+          cp "$sing/go.sum" "$tmp/go.sum"
+          trap 'cp "$tmp/go.mod" "$sing/go.mod"; cp "$tmp/go.sum" "$sing/go.sum"; rm -rf "$tmp"' EXIT
+          python3 - "$sing" "$report" "$tmp" <<'PY'
+          import json, subprocess, sys
+          from pathlib import Path
+          sing, report, tmp = map(Path, sys.argv[1:])
+          meta = json.loads((report / "hiddify-sing-box-reviewed.json").read_text())
+          paths = ("route/network.go", "route/router.go", "route/conn.go", "route/dns.go", "route/h_network_reset_test.go", "route/h_read_pace.go", "route/h_read_pace_test.go", "route/h_wake_pace.go", "route/h_wake_pace_test.go", "route/h_wake_pace_unix.go", "route/h_wake_pace_unix_test.go", "route/h_wake_pace_other.go", "route/h_path_rtt.go")
+          assert set(paths[:3]) <= set(meta["reviewed_resolutions"])
+          assert not set(paths) & set(meta["remaining_conflicts"])
+          files = {}
+          for path in paths:
+              target = tmp / path
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(subprocess.check_output(["git", "-C", str(sing), "show", meta["reviewed_tree"] + ":" + path]))
+              files[str(sing / path)] = str(target)
+          (tmp / "overlay.json").write_text(json.dumps({"Replace": files}))
+          PY
+          cd "$sing"
+          CGO_ENABLED=1 go test -race -mod=mod -overlay "$tmp/overlay.json" -count=1 -timeout=3m -ldflags '-checklinkname=0' \
+            -run '^TestH_(NetworkResetReachesTheDNSServers|ReadPace|WakePace|PacedRawConn|TrackedDatagramSocket|TrackedSockets|PathRoundTrip|BusyDatagramSocket)' -v ./route 2>&1 | tee "$report/network-reset-candidate-test.log"
+          for test in TestH_NetworkResetReachesTheDNSServers TestH_TrackedDatagramSocketKeepsItsReader TestH_WakePaceNeedsALongPath TestH_ReadPaceLeavesAnExchangeAlone TestH_PacedRawConnWaitsAfterAWakeUp; do
+            grep -Fq -- "--- PASS: $test" "$report/network-reset-candidate-test.log"
+          done
+          HIDDIFY_NO_READ_PACE=1 CGO_ENABLED=1 go test -race -mod=mod -overlay "$tmp/overlay.json" -count=1 -timeout=3m -ldflags '-checklinkname=0' \
+            -run '^TestH_ReadPaceLeavesASlowConnectionAlone$' -v ./route 2>&1 | tee "$report/pacing-disabled-candidate-test.log"
+          grep -Fq -- '--- PASS: TestH_ReadPaceLeavesASlowConnectionAlone' "$report/pacing-disabled-candidate-test.log"
       - name: Probe Tailscale candidate against locked dependencies
         if: ${{ !cancelled() && steps.merge_audit.outcome == 'success' && steps.setup_go.outcome == 'success' }}
         run: bash scripts/test-tailscale-candidate.sh
+      - name: Enforce Core options regression gate
+        if: ${{ !cancelled() && steps.core_options.outcome == 'failure' }}
+        run: exit 1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
