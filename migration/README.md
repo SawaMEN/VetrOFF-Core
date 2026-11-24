@@ -575,3 +575,21 @@ remaining manifest, gitlink and generated schema conflicts remain open.
 The combined workflow now runs after resolver changes and does not cancel
 a running probe. Full build and runtime tests remain unconfirmed; stable
 pins are unchanged.
+
+### Aligned integration-test dependency manifest
+
+Audit 45487262434 and combined probe 45487277566 passed their reviewed
+source gates, confirming 202/210 conflicts (43/44 Core, 159/166 sing-box).
+The first combined compilation after the Lazy/monitoring/DNS corrections
+was still running when checked. The test/go.mod candidate now inherits
+all reviewed sing-box root requirements and replacement directives, with
+relative paths adjusted to the test module. Both historical test-only
+requirement sets are retained; the two test-only OpenTelemetry conflicts
+use the upstream 1.45.0 metric/trace pair. The manifest is checked by Go's
+module parser. The combined probe also validates the test module's local
+replacement paths, lists the module graph and compiles the integration tests
+without executing container or live-network operations. All three module
+manifests now have explicit candidates, but none is promoted until the
+combined build is verified. The four gitlinks and generated schema remain
+open. Count remains 202/210 source-confirmed, eight outstanding; stable
+pins unchanged. ROADMAP remains 9/16.
