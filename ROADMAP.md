@@ -33,7 +33,8 @@ Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Cli
 - [x] Add a bounded client Siberian-style diagnostic candidate with explicit path scope.
 - [x] Implement layered DNS/IPv4/IPv6/TCP/TLS/HTTPS connectivity diagnostics candidate.
 - [x] Add explicit pinned tunnel-leaf DNS-over-TLS and TCP diagnostic adapter in overlay.
-- [ ] Connect physical path, CLI/GUI report export, verify real tunnel DNS and socket behavior, and review uTLS profiles.
+- [x] Add explicit Linux hardware-interface physical diagnostic binding candidate with no fallback.
+- [ ] Verify physical socket binding on real hardware, connect additional platforms and CLI/GUI report export, verify real tunnel DNS and socket behavior, and review uTLS profiles.
 - [ ] Review and integrate additional DPI-CH-specific diagnostic tests.
 - [x] Add opt-in Adaptive MUX policy for validated preconfigured TCP profiles.
 - [x] Add opt-in CLI typed profile comparison and live MUX state validation to the selector owner for plain VLESS/Trojan TCP pairs.

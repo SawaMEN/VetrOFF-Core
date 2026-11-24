@@ -1,0 +1,40 @@
+package group
+
+import (
+	"context"
+	"errors"
+	"net"
+	"net/netip"
+	"testing"
+
+	"github.com/sagernet/sing-box/adapter"
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+)
+
+func TestAntiDPIPhysicalPathConsentAndNoFallback(t *testing.T) {
+	s:=adaptiveLifecycleFixture(t,func(context.Context,adapter.Outbound)error{return nil})
+	resolver:=AdaptiveDNSResolver{IP:netip.MustParseAddr("1.1.1.1"),ServerName:"one.one.one.one"}
+	if _,_,_,err:=s.beginPhysicalDiagnostic(context.Background(),resolver,"lo",false);err==nil {t.Fatal("physical consent omitted")}
+	// Fixture has no verified network manager. Failure must release the
+	// diagnostic gate and never fall back to a tunnel or system dialer.
+	if _,_,_,err:=s.beginPhysicalDiagnostic(context.Background(),resolver,"lo",true);err==nil {t.Fatal("unverified physical path accepted")}
+	ctx,p,finish,err:=s.beginTunnelDiagnostic(context.Background(),resolver,true)
+	if err!=nil {t.Fatal(err)}
+	defer finish()
+	valid:=true
+	calls:=0
+	sentinel:=errors.New("physical dial sentinel")
+	p.physical=&adaptivePhysicalBinding{
+		valid:func()bool{return valid},
+		dial:func(_ context.Context,ip netip.Addr,port string)(net.Conn,error){
+			calls++
+			if ip.String()!="1.1.1.1"||port!="443" {t.Fatal("wrong destination")}
+			return nil,sentinel
+		},
+	}
+	if p.Scope()!=ac.ScopePhysical {t.Fatal("wrong scope")}
+	if _,err=p.DialContext(ctx,"tcp","1.1.1.1:443");!errors.Is(err,sentinel)||calls!=1 {t.Fatal(err,calls)}
+	valid=false
+	if p.Generation()!=0 {t.Fatal("invalid path still current")}
+	if _,err=p.DialContext(ctx,"tcp","1.1.1.1:443");err==nil||calls!=1 {t.Fatal("fallback or stale dial",err,calls)}
+}

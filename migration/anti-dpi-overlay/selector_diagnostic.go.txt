@@ -42,12 +42,17 @@ type adaptiveTunnelPath struct {
 	outbound adapter.Outbound
 	revision uint64
 	resolver AdaptiveDNSResolver
+	physical *adaptivePhysicalBinding
 }
 
-func (p *adaptiveTunnelPath) Scope() ac.DiagnosticScope {return ac.ScopeTunnel}
+func (p *adaptiveTunnelPath) Scope() ac.DiagnosticScope {
+	if p.physical!=nil {return ac.ScopePhysical}
+	return ac.ScopeTunnel
+}
 
 func (p *adaptiveTunnelPath) Generation() uint64 {
 	if p.epoch.ctx.Err()!=nil||p.owner.epoch.Load()!=p.epoch {return 0}
+	if p.physical!=nil&&!p.physical.valid() {return 0}
 	s:=p.owner.binding.selector
 	s.adaptiveSelectionMu.Lock()
 	defer s.adaptiveSelectionMu.Unlock()
@@ -59,7 +64,13 @@ func (p *adaptiveTunnelPath) dial(ctx context.Context,ip netip.Addr,port string)
 	if p.Generation()==0 {return nil,errors.New("diagnostic path changed")}
 	if !ac.PublicDiagnosticIP(ip) {return nil,errors.New("non-public diagnostic address")}
 	if err:=ctx.Err();err!=nil {return nil,err}
-	conn,err:=p.outbound.DialContext(ctx,"tcp",M.ParseSocksaddrHostPortStr(ip.String(),port))
+	var conn net.Conn
+	var err error
+	if p.physical!=nil {
+		conn,err=p.physical.dial(ctx,ip,port)
+	} else {
+		conn,err=p.outbound.DialContext(ctx,"tcp",M.ParseSocksaddrHostPortStr(ip.String(),port))
+	}
 	if err!=nil||conn==nil {
 		if conn!=nil {_=conn.Close()}
 		if err==nil {err=errors.New("outbound returned no connection")}
