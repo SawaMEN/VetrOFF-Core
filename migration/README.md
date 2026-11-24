@@ -405,3 +405,21 @@ Expected resolution count: 43/44 Core, 134/166 sing-box (177/210 total).
 174 are confirmed at source level; three await audit 45480444831.
 Core go.mod remains deliberately unresolved until the combined dependency
 candidate builds and passes regression tests. No stable pins changed.
+
+### Outbound manager and tunnel server reconciliation
+
+Audit 45480444831 rejected the builder blob ID: the later FakeDNS cache
+patch was already applied. Commit 5c547c5 uses the exact patched blob and
+asserts the existing StoreFakeIP setting rather than inserting it twice.
+The previous audit 45480059452 passed the reviewed-source and Core options
+gates (174/210 source conflicts confirmed). The corrected three Core
+resolutions and two additional sing-box resolutions are submitted, giving
+43/44 Core and 136/166 sing-box expected (179/210, 31 remaining).
+The outbound manager candidate retains immutable slices, captured lifecycle
+scope and error returns, adds security classification and endpoint dependency
+checks, rejects duplicate initial tags, and leaves the default tag unchanged
+when lookup fails. The tunnel server candidate releases its mutex before
+returning unknown-user errors and closes a connection discarded after a
+failed request write. The reviewed-protocol test overlay now includes the
+tunnel package and its queue regression under the race detector. The newer
+source audit and runtime tests are pending. Stable pins remain unchanged.
