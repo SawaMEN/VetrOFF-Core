@@ -55,10 +55,16 @@ git(mdns, "add", "--", *files)
 (report / "masterdns-library-candidate.patch").write_bytes(
     git(mdns, "diff", "--cached", "--binary", "--full-index", old))
 PY
+python3 "$ROOT/scripts/fix-masterdns-session-readiness.py" "$mdns" "$old" "$target"
+git -C "$mdns" diff --cached --binary --full-index "$old" > "$report/masterdns-library-candidate.patch"
 (
   cd "$mdns"
-  CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=4m ./lib
+  CGO_ENABLED=1 go test -race -mod=mod -count=3 -timeout=6m ./lib
 ) 2>&1 | tee "$report/masterdns-library-test.log"
+(
+  cd "$mdns"
+  CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=4m -run 'Session|Runtime' ./internal/client
+) 2>&1 | tee "$report/masterdns-session-test.log"
 (
   cd "$sing"
   CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=5m -ldflags '-checklinkname=0' ./protocol/hiddify/masterdns

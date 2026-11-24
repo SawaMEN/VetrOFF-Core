@@ -156,3 +156,17 @@ from its own locked source checkout and runs independently of failures in
 preceding package probes once audit and Go setup have succeeded. Two smart
 DNS pool documentation conflicts restore attribution, preserving all other
 bytes. Stable pins remain unchanged; combined WARP tests are still pending.
+
+### MasterDNS session readiness race
+
+Audit 45461276725 verified 124/166 sing-box conflicts and the independent
+Tailscale probe passed. The repeated MasterDnsVPN TCP library test exposed
+the same sessionReady race previously seen in SOCKS5. The candidate patch
+replaces the readiness flag with atomic.Bool across all six affected files
+(including tests), and publishes true after session initialization rather
+than before compression policy application. Both source revisions and the
+complete reference inventory are checked before writing. CI repeats the
+library tests three times and exercises internal session/runtime tests.
+The WARP/MASQUE checks now run after successful DNS checks even when the
+independent MasterDNS test fails. This is a candidate-only patch, not a
+claim that every concurrent session field is safe; stable pins unchanged.
