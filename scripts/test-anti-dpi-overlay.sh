@@ -31,6 +31,8 @@ cp "$ROOT/migration/anti-dpi-overlay/cli_mux.go.txt" "$tmp/core/cmd/adaptive_mux
 cp "$ROOT/migration/anti-dpi-overlay/cli_mux_test.go.txt" "$tmp/core/cmd/adaptive_mux_test.go"
 cp "$ROOT/migration/anti-dpi-overlay/selector_mux.go.txt" "$sing/protocol/group/adaptive_mux.go"
 cp "$ROOT/migration/anti-dpi-overlay/selector_mux_test.go.txt" "$sing/protocol/group/adaptive_mux_test.go"
+cp "$ROOT/migration/anti-dpi-overlay/selector_history.go.txt" "$sing/protocol/group/adaptive_history.go"
+cp "$ROOT/migration/anti-dpi-overlay/selector_history_test.go.txt" "$sing/protocol/group/adaptive_history_test.go"
 python3 - "$sing/protocol/group/selector.go" "$sing/protocol/group/urltest.go" "$tmp/core/cmd/cmd_sing_run.go" <<'PY'
 import pathlib
 import sys
@@ -99,7 +101,7 @@ replace_once('return instance, cancel, nil', '''if err := startAdaptiveCLI(ctx, 
 p.write_text(s)
 PY
 cd "$sing"
-gofmt -w protocol/group/selector.go protocol/group/urltest.go protocol/group/adaptive_selector*.go protocol/group/adaptive_urltest*.go protocol/group/adaptive_lifecycle*.go protocol/group/adaptive_pool*.go protocol/group/adaptive_mux*.go common/adaptiveconnect/*.go
+gofmt -w protocol/group/selector.go protocol/group/urltest.go protocol/group/adaptive_selector*.go protocol/group/adaptive_urltest*.go protocol/group/adaptive_lifecycle*.go protocol/group/adaptive_pool*.go protocol/group/adaptive_mux*.go protocol/group/adaptive_history*.go common/adaptiveconnect/*.go
 export CGO_ENABLED=0
 go test -mod=mod -count=1 -ldflags '-checklinkname=0' ./common/adaptiveconnect ./protocol/group -run 'TestAntiDPI|TestController'
 

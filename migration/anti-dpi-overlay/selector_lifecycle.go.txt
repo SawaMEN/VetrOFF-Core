@@ -29,6 +29,7 @@ type AdaptiveSelectorOwner struct {
 	members []adapter.Outbound
 	history *urltest.HistoryStorage
 	poolEnabled bool
+	historyEnabled bool
 	dialCtx context.Context
 	cancelDial context.CancelFunc
 	running bool
@@ -63,6 +64,10 @@ func (s *Selector) attachAdaptivePoolLocked(ctx context.Context,policy ac.Config
 }
 
 func (s *Selector) attachAdaptiveMuxLocked(ctx context.Context,policy ac.Config,b *AdaptiveSelectorBinding,profiles []ac.Outbound,pool ac.PoolPolicy,poolConsent bool,pair *[2]ac.MuxProfile,prefer bool) error {
+	return s.attachAdaptiveFeaturesLocked(ctx,policy,b,profiles,pool,poolConsent,pair,prefer,ac.DefaultHistoryPolicy(),false)
+}
+
+func (s *Selector) attachAdaptiveFeaturesLocked(ctx context.Context,policy ac.Config,b *AdaptiveSelectorBinding,profiles []ac.Outbound,pool ac.PoolPolicy,poolConsent bool,pair *[2]ac.MuxProfile,prefer bool,hp ac.HistoryPolicy,historyConsent bool) error {
 	if ctx.Err()!=nil {return ctx.Err()}
 	if s.adaptiveOwner!=nil||b==nil||b.selector!=s||b.endpoint=="" {return errors.New("invalid adaptive attachment")}
 	cfg:=ac.DefaultControllerConfig()
@@ -71,10 +76,18 @@ func (s *Selector) attachAdaptiveMuxLocked(ctx context.Context,policy ac.Config,
 	if err:=validateLiveMuxPair(b,profiles,pair);err!=nil {return err}
 	cfg.MuxEnabled=pair!=nil
 	cfg.PreferMultiplex=prefer
-	c,err:=ac.NewController(cfg,ac.ControllerConsent{Connect:true,Pool:poolConsent,Mux:pair!=nil},[]ac.RouteBinding{{Network:"tcp",Outbounds:profiles,Switcher:b,MuxPair:pair}})
+	cfg.History=hp
+	historyOn:=hp.Enabled&&historyConsent
+	var keys map[string]ac.HistoryKey
+	if historyOn {
+		var err error
+		keys,err=adaptiveProfileKeys(profiles)
+		if err!=nil {return err}
+	}
+	c,err:=ac.NewController(cfg,ac.ControllerConsent{Connect:true,Pool:poolConsent,Mux:pair!=nil,History:historyConsent},[]ac.RouteBinding{{Network:"tcp",Outbounds:profiles,Switcher:b,MuxPair:pair,ProfileKeys:keys}})
 	if err!=nil {return err}
 	if c==nil {return errors.New("adaptive policy disabled")}
-	o:=&AdaptiveSelectorOwner{binding:b,controller:c,parent:ctx,history:urltest.NewHistoryStorage(),poolEnabled:pool.Enabled&&poolConsent}
+	o:=&AdaptiveSelectorOwner{binding:b,controller:c,parent:ctx,history:urltest.NewHistoryStorage(),poolEnabled:pool.Enabled&&poolConsent,historyEnabled:historyOn}
 	for _,p:=range profiles {o.members=append(o.members,b.members[p.Tag])}
 	if err=o.resetLocked(time.Now());err!=nil {o.close();return err}
 	s.adaptiveOwner=o
@@ -91,9 +104,16 @@ func (o *AdaptiveSelectorOwner) resetLocked(now time.Time) error {
 	if err:=o.parent.Err();err!=nil {return err}
 	active:=o.binding.selector.selected.Load()
 	if active==nil {return errors.New("no selected outbound")}
-	// Unknown path identity is intentional until the platform supplies a
-	// process-local key. Fresh health is always reset, even on same interface.
-	if _,err:=o.controller.ResetNetwork(now,ac.HistoryKey{},map[string]string{"tcp":active.Tag()});err!=nil {return err}
+	// A fresh opaque key per reset avoids relying on the platform's delayed
+	// network-environment hash. Never merge observations across uncertain
+	// paths; returning to a previous Wi-Fi does not reuse its history yet.
+	var key ac.HistoryKey
+	if o.historyEnabled {
+		var err error
+		key,err=adaptiveHistoryKey()
+		if err!=nil {return err}
+	}
+	if _,err:=o.controller.ResetNetwork(now,key,map[string]string{"tcp":active.Tag()});err!=nil {return err}
 	ctx,cancel:=context.WithCancel(o.parent)
 	o.epoch.Store(&adaptiveEpoch{ctx:ctx,cancel:cancel})
 	if o.cancelDial!=nil {o.cancelDial()}
@@ -148,6 +168,15 @@ func (o *AdaptiveSelectorOwner) run(caller context.Context)(ac.NetworkDecision,e
 		stop();cancel();o.mu.Unlock()
 		return ac.NetworkDecision{},err
 	}
+	members:=o.members
+	if o.historyEnabled {
+		tags:=make([]string,0,len(o.members))
+		for _,m:=range o.members {tags=append(tags,m.Tag())}
+		order,orderErr:=o.controller.ProbeOrder(time.Now(),"tcp",tags)
+		if orderErr!=nil {stop();cancel();o.mu.Unlock();return ac.NetworkDecision{},orderErr}
+		members=make([]adapter.Outbound,0,len(order))
+		for _,tag:=range order {members=append(members,o.binding.members[tag])}
+	}
 	o.running=true
 	o.mu.Unlock()
 	defer func(){
@@ -155,7 +184,7 @@ func (o *AdaptiveSelectorOwner) run(caller context.Context)(ac.NetworkDecision,e
 		o.mu.Lock();o.running=false;o.mu.Unlock()
 	}()
 	s:=o.binding.selector
-	URLTestOutbounds(batchCtx,s.outbound,o.history,s.logger,o.members,o.binding.endpoint,0,true)
+	URLTestOutbounds(batchCtx,s.outbound,o.history,s.logger,members,o.binding.endpoint,0,true)
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.closed||e!=o.epoch.Load()||ctx.Err()!=nil||caller.Err()!=nil {return ac.NetworkDecision{},ac.ErrControllerInactive}

@@ -240,3 +240,53 @@ func (c *Controller) Close() {
 	defer c.mu.Unlock()
 	c.closeLocked()
 }
+
+
+// HistorySnapshot exposes counts for the current network generation only.
+// Opaque identities are never returned. Unknown network/profile identities
+// produce empty observations rather than a cross-network aggregate.
+func (c *Controller) HistorySnapshot(now time.Time,network string) map[string]HistorySummary {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	route:=c.routes[network]
+	if !c.ready||c.closed||c.history==nil||route==nil {return nil}
+	result:=make(map[string]HistorySummary,len(route.tags))
+	for tag:=range route.tags {
+		result[tag]=c.history.Summary(now,c.network,route.keys[tag],network)
+	}
+	return result
+}
+
+// ProbeOrder returns a permutation of the supplied known tags. History
+// affects ordering only; the existing worker must still test every member.
+// Unknown/duplicate tags are rejected, not silently omitted.
+func (c *Controller) ProbeOrder(now time.Time,network string,tags []string)([]string,error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	route:=c.routes[network]
+	if !c.ready||c.closed||route==nil {return nil,ErrControllerInactive}
+	if len(tags)!=len(route.tags) {return nil,errors.New("expected all route profiles")}
+	seen:=map[string]bool{}
+	for _,tag:=range tags {
+		if !route.tags[tag]||seen[tag] {return nil,errors.New("invalid probe profile order")}
+		seen[tag]=true
+	}
+	result:=append([]string(nil),tags...)
+	if c.history==nil||c.network==(HistoryKey{}) {return result,nil}
+	// Reuse history's existing stable ranking. Unknown identities keep a
+	// neutral score; nonunique nonzero identities cannot be safely mapped.
+	keys:=make([]HistoryKey,0,len(tags))
+	byKey:=map[HistoryKey][]string{}
+	for _,tag:=range tags {
+		k:=route.keys[tag]
+		if k!=(HistoryKey{})&&len(byKey[k])!=0 {return result,nil}
+		keys=append(keys,k)
+		byKey[k]=append(byKey[k],tag)
+	}
+	ordered:=c.history.ProbeOrder(now,c.network,network,keys)
+	for i,k:=range ordered {
+		result[i]=byKey[k][0]
+		byKey[k]=byKey[k][1:]
+	}
+	return result,nil
+}

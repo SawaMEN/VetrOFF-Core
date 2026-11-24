@@ -1,0 +1,58 @@
+package group
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"time"
+
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+)
+
+// Random identities are scoped to an attachment or a network generation.
+// No SSID, gateway, IP, credentials, or stable device identifier is read.
+// The live outbound configuration is immutable within this attachment.
+func adaptiveHistoryKey()(ac.HistoryKey,error) {
+	var key ac.HistoryKey
+	if _,err:=rand.Read(key[:]);err!=nil {return key,err}
+	if key==(ac.HistoryKey{}) {return key,errors.New("invalid random history identity")}
+	return key,nil
+}
+
+func adaptiveProfileKeys(profiles []ac.Outbound)(map[string]ac.HistoryKey,error) {
+	keys:=make(map[string]ac.HistoryKey,len(profiles))
+	for _,p:=range profiles {
+		if _,ok:=keys[p.Tag];ok {return nil,errors.New("duplicate history profile")}
+		key,err:=adaptiveHistoryKey()
+		if err!=nil {return nil,err}
+		keys[p.Tag]=key
+	}
+	return keys,nil
+}
+
+// EnableAdaptiveFeatures is the explicit local attachment entry point for
+// the existing optional features. The caller must validate any MUX pair
+// against the options used to build the current instance, as before.
+func (s *Selector) EnableAdaptiveFeatures(ctx context.Context,policy ac.Config,consent bool,endpoint string,pool ac.PoolPolicy,poolConsent bool,pair *[2]ac.MuxProfile,prefer bool,hp ac.HistoryPolicy,historyConsent bool) error {
+	if err:=policy.Validate();err!=nil {return err}
+	if !policy.Enabled||!consent {s.DisableAdaptive();return nil}
+	s.adaptiveLifecycleMu.Lock()
+	defer s.adaptiveLifecycleMu.Unlock()
+	if s.adaptiveOwner!=nil {return errors.New("adaptive selector already enabled")}
+	b,profiles,err:=NewAdaptiveSelectorBinding(s,endpoint)
+	if err!=nil {return err}
+	return s.attachAdaptiveFeaturesLocked(ctx,policy,b,profiles,pool,poolConsent,pair,prefer,hp,historyConsent)
+}
+
+func (s *Selector) AdaptiveHistoryState() map[string]ac.HistorySummary {
+	s.adaptiveLifecycleMu.Lock()
+	defer s.adaptiveLifecycleMu.Unlock()
+	if s.adaptiveOwner==nil {return nil}
+	return s.adaptiveOwner.controller.HistorySnapshot(time.Now(),"tcp")
+}
+
+func (s *Selector) ClearAdaptiveHistory() {
+	s.adaptiveLifecycleMu.Lock()
+	defer s.adaptiveLifecycleMu.Unlock()
+	if s.adaptiveOwner!=nil {s.adaptiveOwner.controller.ClearHistory()}
+}

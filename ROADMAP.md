@@ -41,7 +41,8 @@ Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Cli
 - [x] Wire optional logical TCP budget into Selector dial/close and interrupt lifecycle in overlay.
 - [ ] Verify integrated budget tests, real transport resource usage and broader routing coverage.
 - [x] Add bounded opt-in in-memory availability history and probe ordering candidate.
-- [ ] Bind process-local network/profile identities and existing probe lifecycle to history.
+- [x] Bind random attachment/profile and network-epoch identities to actual URLTest worker history and probe ordering in overlay.
+- [ ] Verify history integration CI, stable platform identity recognition if available, and GUI display/clear controls.
 - [x] Compose Adaptive Connect, MUX, pool and history into one lifecycle controller candidate.
 - [x] Add a disposable prepared-tree bridge for the actual plain TCP-only Selector, guarded manual selection and integration CI.
 - [x] Add explicit context-bound fresh URLTest leaf worker bridge in the prepared-tree overlay.

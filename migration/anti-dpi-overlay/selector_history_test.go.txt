@@ -1,0 +1,49 @@
+package group
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/sagernet/sing-box/adapter"
+	ac "github.com/sagernet/sing-box/common/adaptiveconnect"
+	"github.com/sagernet/sing-box/log"
+)
+
+func TestAntiDPIHistoryActualWorker(t *testing.T) {
+	s:=antiDPITestSelector()
+	s.logger=log.NewNOPFactory().Logger()
+	b,profiles,err:=newAdaptiveSelectorBinding(s,func(_ context.Context,o adapter.Outbound)error{
+		if o.Tag()=="a" {return errors.New("unavailable")}
+		return nil
+	})
+	if err!=nil {t.Fatal(err)}
+	b.endpoint="https://example.com/204"
+	p:=ac.DefaultConfig()
+	p.Enabled=true
+	p.FailureThreshold=10
+	h:=ac.DefaultHistoryPolicy()
+	h.Enabled=true
+	if err=s.attachAdaptiveFeaturesLocked(context.Background(),p,b,profiles,ac.DefaultPoolPolicy(),false,nil,false,h,true);err!=nil {t.Fatal(err)}
+	t.Cleanup(s.DisableAdaptive)
+	for i:=0;i<3;i++ {
+		if _,err=s.RunAdaptiveCycle(context.Background());err!=nil {t.Fatal(err)}
+	}
+	stats:=s.AdaptiveHistoryState()
+	if stats["a"].Failed!=3||stats["b"].Passed!=3 {t.Fatal(stats)}
+	s.InterfaceUpdated(context.Background())
+	stats=s.AdaptiveHistoryState()
+	if stats["a"].Samples!=0||stats["b"].Samples!=0 {t.Fatal("network history mixed",stats)}
+	if _,err=s.RunAdaptiveCycle(context.Background());err!=nil {t.Fatal(err)}
+	if s.AdaptiveHistoryState()["b"].Samples!=1 {t.Fatal("new generation missing")}
+	s.ClearAdaptiveHistory()
+	if s.AdaptiveHistoryState()["b"].Samples!=0 {t.Fatal("history not cleared")}
+	s.DisableAdaptive()
+	if s.AdaptiveHistoryState()!=nil {t.Fatal("history remained attached")}
+}
+
+func TestAntiDPIHistoryDisabled(t *testing.T) {
+	s:=adaptiveLifecycleFixture(t,func(context.Context,adapter.Outbound)error{return nil})
+	if _,err:=s.RunAdaptiveCycle(context.Background());err!=nil {t.Fatal(err)}
+	if s.AdaptiveHistoryState()!=nil {t.Fatal("history enabled without consent")}
+}

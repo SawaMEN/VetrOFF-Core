@@ -19,6 +19,7 @@ var adaptiveSelectorTag string
 var adaptiveProbeURL string
 var adaptiveInterval time.Duration
 var adaptivePool=ac.DefaultPoolPolicy()
+var adaptiveHistory=ac.DefaultHistoryPolicy()
 
 func init() {
 	commandRun.Flags().StringVar(&adaptivePolicyPath,"anti-dpi-policy","","local Adaptive Connect v1 JSON policy (explicit opt-in)")
@@ -29,6 +30,7 @@ func init() {
 	commandRun.Flags().IntVar(&adaptivePool.MaxTotal,"anti-dpi-pool-total",64,"maximum logical connections")
 	commandRun.Flags().IntVar(&adaptivePool.MaxPerProfile,"anti-dpi-pool-profile",32,"maximum logical connections per profile")
 	commandRun.Flags().IntVar(&adaptivePool.MaxPending,"anti-dpi-pool-pending",8,"maximum pending dials")
+	commandRun.Flags().BoolVar(&adaptiveHistory.Enabled,"anti-dpi-history",false,"collect local in-memory availability history")
 }
 
 // Local CLI flags are the consent boundary. They are deliberately not read
@@ -60,18 +62,14 @@ func readAdaptiveCLI(path,tag,endpoint string,interval time.Duration)(ac.Config,
 
 func startAdaptiveCLI(ctx context.Context,instance *box.Box,p ac.Config,enabled bool,pair *[2]ac.MuxProfile) error {
 	if !enabled {
-		if adaptivePool.Enabled||adaptiveMux||adaptiveMuxPrefer {return errors.New("Anti-DPI optional modes require enabled local Adaptive Connect policy")}
+		if adaptivePool.Enabled||adaptiveMux||adaptiveMuxPrefer||adaptiveHistory.Enabled {return errors.New("Anti-DPI optional modes require enabled local Adaptive Connect policy")}
 		return nil
 	}
 	o,ok:=instance.Outbound().Outbound(adaptiveSelectorTag)
 	if !ok {return errors.New("Anti-DPI selector not found")}
 	s,ok:=o.(*group.Selector)
 	if !ok {return errors.New("Anti-DPI requires a plain selector")}
-	if pair!=nil {
-		if err:=s.EnableAdaptiveWithMux(ctx,p,true,adaptiveProbeURL,adaptivePool,adaptivePool.Enabled,*pair,adaptiveMuxPrefer);err!=nil {return err}
-	} else {
-		if err:=s.EnableAdaptiveWithPool(ctx,p,true,adaptiveProbeURL,adaptivePool,adaptivePool.Enabled);err!=nil {return err}
-	}
+	if err:=s.EnableAdaptiveFeatures(ctx,p,true,adaptiveProbeURL,adaptivePool,adaptivePool.Enabled,pair,adaptiveMuxPrefer,adaptiveHistory,adaptiveHistory.Enabled);err!=nil {return err}
 	// A plain Selector has no own periodic URLTest scheduler. This is the
 	// sole owner for the selected plain group; it calls the existing worker
 	// rather than creating another health-test implementation. The first
