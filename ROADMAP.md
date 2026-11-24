@@ -38,7 +38,8 @@ Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Cli
 - [x] Add explicitly selected diagnostic-only uTLS browser presets to the existing Siberian-style report contract.
 - [ ] Verify physical socket binding on real hardware, additional platforms, GUI report export, real tunnel DNS/socket behavior and live uTLS profile handshakes.
 - [x] Add explicit single-address TCP/TLS/HTTPS diagnosis without DNS resolution, with separate report kind.
-- [ ] Review additional DPI-CH-specific tests, add address report import and validate real network behavior.
+- [x] Add single-address report import in 3x-ui Anti-DPI.
+- [ ] Review additional DPI-CH-specific tests and validate real network behavior.
 - [x] Add opt-in Adaptive MUX policy for validated preconfigured TCP profiles.
 - [x] Add opt-in CLI typed profile comparison and live MUX state validation to the selector owner for plain VLESS/Trojan TCP pairs.
 - [ ] Confirm integrated MUX tests and real compatible server behavior; review additional transports.
@@ -55,3 +56,6 @@ Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Cli
 - [x] Add explicit local srun policy file and selector/probe flags; invoke the existing worker at bounded CLI cadence in the overlay.
 - [ ] Verify CLI compilation and real tunnel switching; bind Hiddify GUI lifecycle, platform notifications and actual transport cleanup.
 - [ ] Validate candidate builds and real network behavior before promotion.
+
+- [x] Add deterministic Go runtime report serialization and reverse panel policy contract tests.
+- [ ] Confirm cross-repository CI against the pinned core commit.
