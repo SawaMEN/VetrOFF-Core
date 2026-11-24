@@ -311,3 +311,20 @@ remaining). Stop and log-level adaptations are clean-tree adjustments.
 Other direct service readers, setup/grpc and admin service callers still
 need review; full runtime and private-profile tests are not yet complete.
 No stable pin changes.
+
+### Authenticated gRPC, setup and status reporting
+
+Run 45476214954 passed the lifecycle reviewed-source gate. Four more
+Core conflicts are submitted: grpc_server.go, setup.go, commands.go and
+custom.go (24/44, expected 20 remaining). The candidate keeps locked
+listener publication, IPv6-safe address validation, local API secrets,
+dynamic mTLS trust snapshots, defensive certificate copies, explicit
+libbox setup error handling and the fork's memory-limit override. Adopt
+upstream certificate reuse, client certificate PEM handling and device
+memory hints. A bare PUBLIC KEY is no longer accepted for TLS client
+authentication; callers must provide a CERTIFICATE PEM. Use the atomic
+service reference for status reads and report the actual shutdown error
+once, after closing the service. The updated candidate must still pass
+source verification and integrated builds; the generated RPC schemas,
+admin service and mobile wrappers are not yet reconciled. Stable pins
+remain unchanged.
