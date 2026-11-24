@@ -598,6 +598,90 @@ for path, sha, edits in (
         lifecycle_edit(before, after)
     core_clean[path] = subprocess.check_output(["gofmt"], input=candidate)
 
+# Setup RPC: the upstream simplification preserves the fork's fix for
+# successful calls returning a nil error rather than dereferencing it.
+path = "v2/hcore/setup.go"
+own = checked_blob(patched, path, "17730fe2995bbf5697554bff738028dff51370eb")
+new = checked_blob(upstream, path, "a32ab723b79933127c47f1c6ddbbe671767c88a7")
+assert b"if err := Setup(req, nil); err != nil {" in new
+assert b"Message: err.Error()" in new
+assert b"ResponseCode_OK" in new
+resolutions[path] = new
+
+# gRPC: retain the fork's serialization, IPv6-safe listener validation,
+# local API secret and dynamic trust snapshots. Adopt upstream's cached
+# server identity, proper certificate PEM parsing and platform memory hints.
+path = "v2/hcore/grpc_server.go"
+own = checked_blob(patched, path, "ac8841dc3a0b22109624daaeb89168b94f549a68")
+new = checked_blob(upstream, path, "729a50159c039b5ae78fec0f49a2e018d02f7689")
+candidate = own
+lifecycle_edit(b'\t"encoding/pem"\n', b'\t"encoding/pem"\n\t"errors"\n')
+lifecycle_edit(b'\t"os"\n', b'\t"os"\n\t"path/filepath"\n')
+start, end = b"// goroutineSnapshotsOnce", b"// Setup sets the core up"
+marker = b"func Setup(params *SetupRequest"
+lifecycle_edit(marker, lifecycle_section(new, start, end) + marker)
+lifecycle_edit(b"\tstatic.debug.Store(params.Debug)", b"\tstatic.setupDebug = params.Debug\n\tstatic.debug.Store(params.Debug)")
+lifecycle_edit(b"\tbudget := int64(0)\n\tif C.IsAndroid {", b"\tbudget := deviceMemoryLimit\n\tif budget == 0 && C.IsAndroid {")
+# Keep the actual libbox error check and the Chdir error check.
+assert b"if err := libbox.Setup(" in candidate
+assert b"if err := os.Chdir(sWorkingPath); err != nil {" in candidate
+lifecycle_edit(b"\tsWorkingPath = params.WorkingDir\n", b"\tsWorkingPath = params.WorkingDir\n\tsSetupMode = params.Mode\n\tcleanupLeftovers()\n\tgoroutineSnapshotsOnce.Do(func() {\n\t\tkeepPreviousGoroutineSnapshot(sWorkingPath, sSetupMode)\n\t\tgo writeGoroutineSnapshots(static.BaseContext, sWorkingPath, sSetupMode)\n\t})\n")
+# Preserve init-before-publish. Load a stored client certificate before
+# the listener can begin accepting connections, while mu is held.
+marker = b"\t\t_, err := startGrpcServerByModeLocked(params.Listen, params.Mode, params.Secret)"
+lifecycle_edit(marker, b'\t\tif isMutualTLS(params.Mode) {\n\t\t\tif err := trustStoredClientCertificate(params.BasePath); err != nil {\n\t\t\t\tLog(LogLevel_WARNING, LogType_CORE, "no stored client certificate to trust: ", err.Error())\n\t\t\t}\n\t\t}\n' + marker)
+start, end = b"\t\ttable := db.GetTable[hcommon.AppSettings]()\n\t\tLog(LogLevel_DEBUG, LogType_CORE, table)", b"\t\t// Load server certificate and private key"
+lifecycle_edit(lifecycle_section(own, start, end), b"\t\tif err := loadServerCertificate(); err != nil {\n\t\t\treturn nil, err\n\t\t}\n")
+lifecycle_edit(b"\t\t\tClientCAs:    caCertPool.Clone(),", b"\t\t\tMinVersion:   tls.VersionTLS12,\n\t\t\tClientCAs:    caCertPool.Clone(),")
+# Validate the stored certificate/key pair before reuse. Do not rotate a
+# pinned certificate merely because a database read failed.
+loader = lifecycle_section(new, b"// loadServerCertificate", b"// GetGrpcServerPublicKey")
+before = b"\t\t\tcertpair = &hutils.CertificatePair{Certificate: pub, PrivateKey: priv}\n\t\t\treturn nil"
+assert loader.count(before) == 1
+loader = loader.replace(before, b"\t\t\tif _, pairErr := tls.X509KeyPair(pub, priv); pairErr == nil {\n\t\t\t\tcertpair = &hutils.CertificatePair{Certificate: pub, PrivateKey: priv}\n\t\t\t\treturn nil\n\t\t\t}", 1)
+marker = b"// GetGrpcServerPublicKey returns the gRPC server's public key."
+lifecycle_edit(marker, loader + marker)
+lifecycle_edit(lifecycle_section(own, b"// AddGrpcClientPublicKey", b"func CloseGrpcServer("),
+               lifecycle_section(new, b"// AddGrpcClientPublicKey", b"func CloseGrpcServer("))
+# No raw PUBLIC KEY is sufficient for TLS certificate authentication.
+# Keep the fork's per-handshake clone and defensive certificate copy.
+for marker in (b"localControlServerOptions(secret)", b'localControlServerOptions("")',
+               b"net.SplitHostPort(listenAddressG)", b"tlsConfig.GetConfigForClient",
+               b"return append([]byte(nil), certpair.Certificate...)",
+               b"startGrpcServerByModeLocked", b"tls.RequireAndVerifyClientCert"):
+    assert marker in candidate, marker
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Commands: use one atomic service reference per status sample and retain
+# the fork's traffic availability field. Keep upstream's targeted tests
+# of parked outbounds; do not fall back to a stale name from the database.
+path = "v2/hcore/commands.go"
+own = checked_blob(patched, path, "55dc14d8312c093ab3d1e8236e91fac4253e319e")
+new = checked_blob(upstream, path, "341fbd79b1d1a87b24607e5a50079297b20cb561")
+candidate = new
+lifecycle_edit(b'\t"github.com/hiddify/hiddify-core/v2/db"\n', b"")
+before = b"\t\tmessage.DownlinkTotal = status.DownlinkTotal"
+assert b"\t\tmessage.TrafficAvailable = status.TrafficAvailable" in own
+lifecycle_edit(before, b"\t\tmessage.TrafficAvailable = status.TrafficAvailable\n" + before)
+lifecycle_edit(b"\t\tif box := h.Box(); box != nil {", b"\t\tif ins := ss.Instance(); ins != nil && ins.Box() != nil {\n\t\t\tbox := ins.Box()")
+start = b"\t\tif message.CurrentProfile == \"\" {"
+end = b"\n\t}\n\n\treturn &message"
+lifecycle_edit(lifecycle_section(candidate, start, end), b"")
+assert b"monitoring.Get(ctx).TestOutbounds(in.Tags" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Error shutdown: publish STOPPED once, after closing the service.
+# Also clear the private profile flag and restore router forwarding.
+path = "v2/hcore/custom.go"
+own = checked_blob(patched, path, "53507901f43f3abbaf1fe9ef86a72145c91f9f40")
+new = checked_blob(upstream, path, "0a7adff2687c205ba3a2ab9005737405c615c522")
+candidate = new
+marker = b"\tresponse := SetCoreStatus(CoreStates_STOPPED, msgType, message)"
+lifecycle_edit(marker, b"\trestoreRouterHost()\n\tstatic.privateConfig = false\n" + marker)
+assert b"static.startedService.Swap(nil)" in candidate
+assert b"return StopAndAlert(state, err.Error()), err" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
 apply_reviewed(data, resolutions, core_clean)
 
 repo = repo / "hiddify-sing-box"
