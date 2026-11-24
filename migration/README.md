@@ -47,3 +47,13 @@ manager once, avoids logging private IPC keys on error, and adjusts the
 cleanly merged AWG test to use the live path. Clean compatibility adjustments
 are reported separately from conflict counts. Full transport CI must pass
 before this migration stage is marked complete.
+
+### Tailscale compatibility probe
+
+The transport audit at run 45443273791 passed including WireGuard and AWG
+race tests. The Tailscale candidate uses original revision `4138b20` instead
+of locked `1f5488c`. The probe restores upstream caller APIs for Taildrop,
+Tailcat and the TUN filter, records the exact caller patch and dependency
+history, and tests with other dependencies locked. This is a compatibility
+probe only: remaining fork-only behavior and dependency combinations must
+be reviewed before the Tailscale gitlink is resolved or stable pins change.
