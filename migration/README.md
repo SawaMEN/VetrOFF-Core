@@ -246,3 +246,18 @@ modern iteration; adopt the upstream IPv4-only test socket helper and
 larger UDP hop test pool. Run the full FinalMask package with the race
 detector using the existing locked Xray dependency. No stable pins are
 changed; the new candidate still requires CI verification.
+
+### Core packaging and LAN proxy authorization
+
+Audit 45473321070 passed the reviewed-source gate after the FinalMask
+import-grouping assertion was corrected. The next Core candidate resolves
+five additional conflicts: Docker and OpenWrt package version metadata,
+the Docker entrypoint, and both inbound port files. The original package
+versions advance to 5.9.15 in the candidate only. The entrypoint keeps
+exec-based process handling and the upstream opt-in router argument.
+The port configuration keeps the fork's LanSharingPassword Go field
+and the regression covering its existing lan-sharing-password JSON key;
+all upstream port policy tests remain. The HiddifyOptions struct and
+other callers still require reconciliation, so no integrated Core build
+is claimed. The expected current-baseline Core conflict count is 33
+(previously 38), subject to CI confirmation. Stable pins are unchanged.
