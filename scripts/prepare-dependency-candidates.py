@@ -188,6 +188,14 @@ def merge_test_module():
         indirect = all(entry[1] for entry in (a, b) if entry is not None)
         requirements[key] = (version, indirect)
     assert requirements["github.com/sagernet/sing-box"] == ("v0.0.0", False)
+    # Combined run 45488228887 selected go-connections v0.7.0 through
+    # the dependency graph. Docker v27.3.1 calls its removed sockets.DialPipe.
+    # Docker v28.5.2 uses its own context-aware dialPipeContext instead.
+    # Keep this change confined to the integration-test main module.
+    assert requirements["github.com/docker/docker"] == ("v27.3.1+incompatible", False)
+    requirements["github.com/docker/docker"] = ("v28.5.2+incompatible", False)
+    assert requirements["github.com/docker/go-connections"] == ("v0.5.0", False)
+    requirements["github.com/docker/go-connections"] = ("v0.7.0", False)
     replacements = {"github.com/sagernet/sing-box": "../"}
     for key, value in shared["replace"].items():
         replacements[key] = "." + value if value.startswith("./") else value
