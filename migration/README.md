@@ -261,3 +261,19 @@ all upstream port policy tests remain. The HiddifyOptions struct and
 other callers still require reconciliation, so no integrated Core build
 is claimed. The expected current-baseline Core conflict count is 33
 (previously 38), subject to CI confirmation. Stable pins are unchanged.
+
+### Core option schema and KeepTop configuration
+
+Run 45473904930 passed the five-conflict Core source gate. The next
+candidate retains the fork's complete option schema (including the single
+LAN password JSON field) and imports eight upstream settings for logging,
+KeepTop, delegated system proxy, and router mode. Integer subscription
+overrides now use checked reflect.SetInt/SetUint instead of silently
+ignoring values whose concrete type is narrower than int64/uint64.
+KeepTop's config helpers and tests are a verified extension of the fork's
+existing code. The audit runs a separate Core option and inbound test
+using Go's overlay facility with locked dependencies; it deliberately
+excludes the lazy KeepTop implementation until the paired sing-box and
+hcore lifecycle are reconciled. Three additional Core conflict resolutions
+are submitted (14/44, expected 30 remaining), pending the new CI gate.
+Stable pins and published packages are unchanged.
