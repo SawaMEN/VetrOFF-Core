@@ -514,3 +514,23 @@ and the known upstream TODO about swapping a joiner's replacement tunnel
 remain outstanding. Stable pins are unchanged.
 Expected: 43/44 Core and 149/166 sing-box (192/210; 18 remaining).
 189 source-confirmed; three await the new source gate and runtime tests.
+
+### Combined dependency integration gate
+
+Audit 45485409880 passed the reviewed-source gate for the Telemost paths:
+43/44 Core and 149/166 sing-box (192/210) confirmed. The next candidate
+resolves sing-box Makefile and schema/generator.go, retaining additional
+ACME/Tailscale/CCM/OCM build tags and the fork's prefixable CIDR schema.
+The generated JSON schema remains open until regenerated and checked.
+A dedicated non-release workflow (45486170730) materializes the two reviewed
+trees and the locked patched ray2sing tree into a disposable directory.
+It tests the explicit dependency manifest candidates and pins the four
+unresolved nested dependencies to the audited upstream revisions for this
+probe only. It verifies every local module replacement, records candidate
+provenance, and independently checks module graphs, Linux CLI build and
+Core/sing-box regression tests. No candidate binary is uploaded as a release.
+The dependency choices are provisional, not promoted; all seven manifest
+and gitlink conflicts remain open until the combined results are reviewed.
+Expected: 43/44 Core and 151/166 sing-box (194/210; 16 remaining).
+192 source-confirmed at the last Telemost audit; two await source verification.
+Stable release pins and ROADMAP task status remain unchanged.
