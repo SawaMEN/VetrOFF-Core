@@ -6,12 +6,13 @@ on:
     paths:
       - 'scripts/test-combined-candidate.sh'
       - 'scripts/prepare-dependency-candidates.py'
+      - 'scripts/resolve-upstream-metadata.py'
       - '.github/workflows/combined-candidate.yml'
 permissions:
   contents: read
 concurrency:
   group: combined-candidate-main
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   integration:
     runs-on: ubuntu-24.04
