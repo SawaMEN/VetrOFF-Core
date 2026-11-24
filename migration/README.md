@@ -293,3 +293,21 @@ Three additional Core paths are submitted (17/44, expected 27 remaining).
 The start/stop paths, atomic service publication and full lazy monitoring
 integration are still pending; this is not an integrated runtime build.
 Stable pins are unchanged.
+
+### Start/Stop lifecycle and private profiles
+
+Run 45475637081 passed the reviewed-source gate for KeepTop and HotReload.
+The next candidate reconciles Start, service construction and static
+state, retaining the separate startup/lifetime contexts, atomic debug
+flag and fork settings locks. The running service is published through
+an atomic pointer; Stop removes it before closing. The later portability
+patch's filepath.IsLocal guards are retained, alongside upstream's
+memory-limit restoration and router cleanup. Preserve the native
+no-config-persistence entrypoint across initial start, auto-redirect
+retry and subsequent hot reload; avoid the full config debug dump in
+private mode. Clean log-level callers use the atomic debug API.
+Three further Core resolutions are submitted (20/44, expected 24
+remaining). Stop and log-level adaptations are clean-tree adjustments.
+Other direct service readers, setup/grpc and admin service callers still
+need review; full runtime and private-profile tests are not yet complete.
+No stable pin changes.
