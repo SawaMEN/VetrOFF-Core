@@ -29,5 +29,7 @@ Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Cli
 - [x] Add a typed URLTest/Selector adapter candidate and independent race-test workflow.
 - [ ] Wire the adapter into the actual URLTest/Selector and platform network lifecycle.
 - [x] Define versioned opt-in policy v1 and strict decoder.
-- [ ] Wire policy import into the app/core lifecycle and define diagnostics interface.
+- [ ] Wire policy import into the app/core lifecycle.
+- [x] Add a bounded client Siberian-style diagnostic candidate with explicit path scope.
+- [ ] Connect diagnostics to platform-bound DNS and sockets, uTLS profiles and report import.
 - [ ] Validate candidate builds and real network behavior before promotion.
