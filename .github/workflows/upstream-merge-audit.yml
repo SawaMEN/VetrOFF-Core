@@ -1,0 +1,29 @@
+name: Audit upstream three-way merge
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/audit-upstream-merge.sh'
+      - 'scripts/resolve-upstream-metadata.py'
+      - 'scripts/prepare-dependency-candidates.py'
+      - '.github/workflows/upstream-merge-audit.yml'
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify reviewed resolutions against the locked baseline
+        run: bash scripts/audit-upstream-merge.sh 4e5a9a357003d0a995360586702fd24c53042e3f
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: upstream-merge-audit
+          path: .build/upstream-merge-audit/
+          if-no-files-found: warn
+          retention-days: 21

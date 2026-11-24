@@ -50,4 +50,22 @@ The initial split was verified against the original byte streams and all three e
 
 Patch files use Git binary diff format with full blob IDs for three-way application. After resolving a candidate conflict against the newer original sources, regenerate the affected patch and update the submodule pointers and corresponding `expected-tree` files.
 
+## Migration checkpoints
+
+Migration development now takes place in `main` under [migration/](migration/README.md).
+These are **integration candidates**, not stable release inputs. They are tied
+to historical audited snapshots; the latest locked fork changes must be
+reconciled before promoting the new Core and sing-box pins.
+
+Run the independent checkpoint replay:
+
+```sh
+python3 scripts/verify-migration-checkpoints.py --report .build/migration-checkpoint-report.json
+```
+
+The separate upstream merge audit compares the current locked source trees
+against the fixed migration target. Its reviewed resolutions and dependency
+candidates are diagnostic artifacts, not a successful integrated build.
+Both verification workflows can be dispatched manually.
+
 Original project licenses and notices apply to the patched sources and resulting binaries.

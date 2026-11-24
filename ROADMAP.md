@@ -3,9 +3,19 @@
 - [x] Fetch three original Hiddify source repositories and build a single CLI.
 - [x] Keep the fork changes as patch series in this repository.
 - [x] Build upstream candidates automatically and keep stable source pins reproducible.
-- [x] Configure desktop builds, regression tests and release publishing for version 0.0.2.
+- [x] Configure desktop builds, regression tests and release publishing (current stable version: 0.0.3).
 - [x] Gate upstream candidate builds behind a single patch-application preflight with conflict reports.
 - [x] Detect personal fork updates not yet included in the audited patch snapshots.
 - [ ] Rebase Core and sing-box patch stacks onto current original upstream revisions without losing features.
 - [x] Split the large Core and sing-box baseline patches into ordered subsystem groups and verify unchanged source trees.
 - [ ] Add native Cronet, Android and Apple shared-library packages for GUI clients.
+
+## Migration follow-up
+
+- [x] Preserve historical migration checkpoints and automate their replay in main.
+- [x] Integrate the independent current-baseline three-way merge audit.
+- [ ] Reconcile historical checkpoints with the latest audited fork snapshots.
+- [ ] Resolve remaining WireGuard/AWG and Tailscale conflicts.
+- [ ] Resolve the other conflicts and review dependencies.
+- [ ] Fix failing routing tests and pass the integrated regression suite.
+- [ ] Pass the full build matrix and promote verified source pins together.
