@@ -31,5 +31,7 @@ Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Cli
 - [x] Define versioned opt-in policy v1 and strict decoder.
 - [ ] Wire policy import into the app/core lifecycle.
 - [x] Add a bounded client Siberian-style diagnostic candidate with explicit path scope.
-- [ ] Connect diagnostics to platform-bound DNS and sockets, uTLS profiles and report import.
+- [x] Implement layered DNS/IPv4/IPv6/TCP/TLS/HTTPS connectivity diagnostics candidate.
+- [ ] Connect diagnostics to platform-bound DNS and sockets, uTLS profiles and connectivity report import.
+- [ ] Review and integrate additional DPI-CH-specific diagnostic tests.
 - [ ] Validate candidate builds and real network behavior before promotion.

@@ -174,15 +174,8 @@ func (t *SiberianTester) Check(ctx context.Context,path DiagnosticPath,req Siber
 		return SiberianReport{},errors.New("unverified diagnostic path")
 	}
 	if err:=ctx.Err();err!=nil { return SiberianReport{},err }
-	t.mu.Lock()
-	if t.running || (!t.last.IsZero() && time.Since(t.last)<time.Minute) {
-		t.mu.Unlock()
-		return SiberianReport{},errors.New("diagnostic busy or in cooldown")
-	}
-	t.running=true
-	t.last=time.Now()
-	t.mu.Unlock()
-	defer func(){t.mu.Lock();t.running=false;t.mu.Unlock()}()
+	if err:=t.begin();err!=nil { return SiberianReport{},err }
+	defer t.finish()
 	ctx,cancel:=context.WithTimeout(ctx,28*time.Second)
 	defer cancel()
 	checkPath:=func() error {
@@ -228,4 +221,21 @@ func (t *SiberianTester) Check(ctx context.Context,path DiagnosticPath,req Siber
 	if err=checkPath();err!=nil { return r,err }
 	r.Evidence=classifyDiagnostic(r)
 	return r,nil
+}
+
+func (t *SiberianTester) begin() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.running || (!t.last.IsZero() && time.Since(t.last)<time.Minute) {
+		return errors.New("diagnostic busy or in cooldown")
+	}
+	t.running=true
+	t.last=time.Now()
+	return nil
+}
+
+func (t *SiberianTester) finish() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.running=false
 }
