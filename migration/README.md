@@ -441,3 +441,20 @@ Expected count: 43/44 Core and 138/166 sing-box (181/210; 29 remaining).
 179 source resolutions confirmed, two pending. route/conn.go remains open:
 read/wake pacing changes require dedicated regressions, including the two
 previously failing pacing tests. Stable pins remain unchanged.
+
+### Connection tracking and pacing candidate
+
+Audit 45481728109 passed the reviewed-source gate (181/210 confirmed).
+The subsequent network-reset workflow edit malformed YAML because a replacement
+interpreted the end-anchor in the test regex; commit 35fda3c restores the valid
+workflow and the exact test command. The connection-manager candidate adopts
+upstream tracked TCP/UDP pacing, server-first handshake handling, TLS wrapper
+setup and packet-dial history invalidation while retaining the fork's socket
+ownership and IPv6 fallback. The audit verifies the exact upstream pacing
+helpers and tests. CI now runs the network reset, TCP/UDP pacing and path RTT
+regressions with the race detector, plus an isolated pacing-disabled run.
+Expected resolutions: 43/44 Core and 139/166 sing-box (182/210; 28 remaining).
+181 source-confirmed; conn.go awaits the new source gate. The previous two
+pacing failures are not considered fixed until the regression suite passes;
+no throughput or CPU improvement is claimed without measurement. Stable pins
+remain unchanged.
