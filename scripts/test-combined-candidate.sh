@@ -93,6 +93,17 @@ summary = {"core_tree": core["reviewed_tree"], "sing_box_tree": sing["reviewed_t
 (report / "combined-candidate-provenance.json").write_text(json.dumps(summary, indent=2) + "\n")
 PY
 
+# Carry the previously race-tested MasterDNS fix into the actual combined
+# tree. A raw upstream checkout still contains the same sessionReady race.
+mdns="$candidate/hiddify-sing-box/replace/MasterDnsVPN"
+mdns_old=62e94f1515d4a5d3133789c90d8b224975b77ff9
+mdns_new=a6b693698ee8246ca415a994bb6da40d66dddba7
+assert_sha "$mdns" "$mdns_new"
+git -C "$mdns" fetch --quiet --no-tags --depth=1 origin "$mdns_old"
+python3 "$ROOT/scripts/fix-masterdns-session-readiness.py" "$mdns" "$mdns_old" "$mdns_new"
+git -C "$mdns" diff --cached --binary --full-index "$mdns_new" > "$report/combined-masterdns-readiness.patch"
+git -C "$mdns" write-tree > "$report/combined-masterdns-tree.txt"
+
 export CGO_ENABLED=0
 cd "$candidate"
 tags=$(cli_tags)
@@ -108,6 +119,15 @@ probe() {
     echo "Combined candidate failed: $name" >&2
   fi
 }
+# Verify the exact patched dependency independently of Core compilation.
+(
+  cd "$mdns"
+  CGO_ENABLED=1 go test -race -mod=mod -count=3 -timeout=6m ./lib
+) 2>&1 | tee "$report/combined-masterdns-library.log" || failed=1
+(
+  cd "$mdns"
+  CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=4m -run 'Session|Runtime' ./internal/client
+) 2>&1 | tee "$report/combined-masterdns-session.log" || failed=1
 probe core-modules go list -mod=mod -m all
 probe core-cli go build -mod=mod -trimpath -buildvcs=false -tags "$tags" -ldflags '-checklinkname=0' -o "$candidate/vetroff-core-probe" ./cmd/main
 probe core-tests go test -mod=mod -count=1 -timeout=6m -tags "$tags" -ldflags '-checklinkname=0' ./v2/config ./v2/hcore ./v2/hcore/adminbgservice
