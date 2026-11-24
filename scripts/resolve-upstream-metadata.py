@@ -1810,6 +1810,85 @@ for path, old_sha, own_sha, new_sha in (
         assert b"https://github.com/PoriyaVali/mirage" in section
         resolutions[path] = candidate
 
+
+# Sequential DNS: retain the fork's explicit error_ttl compatibility
+# contract, with upstream's bounded rating for configurations without it.
+# The fork uses sequentialState and the IsReady/OutboundStatus contract.
+path = "dns/transport/h_group_sequential.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("c4fce524eccff02a8686ebd3ac78c38ab481d9e7",
+     "e0efc7438418e6478a7f6fd5b9cf00dc6d8329d7",
+     "089562c88c1e0cbe81ed9be8235ae8a2e1134c61")))
+group = checked_blob(data["tentative_tree"], "dns/transport/group.go",
+                     "cdf49093836226c1af0903b58725ccf56bdb2b47")
+assert b"sequentialState *groupSequential" in group
+candidate = replace_once(own, b'\t"github.com/sagernet/sing-box/option"\n',
+    b'\t"github.com/sagernet/sing-box/hiddify/rating"\n\t"github.com/sagernet/sing-box/option"\n')
+candidate = replace_once(candidate, b'\tE "github.com/sagernet/sing/common/exceptions"\n',
+    b'\tE "github.com/sagernet/sing/common/exceptions"\n\tN "github.com/sagernet/sing/common/network"\n\t"github.com/sagernet/sing/service"\n')
+candidate = replace_once(candidate, b"\terrorTTL      time.Duration\n",
+    b"\terrorTTL      time.Duration\n\tlegacyTTL     bool\n\tscores        rating.Table[string]\n")
+candidate = replace_once(candidate, b"\t\terrorTTL:      time.Duration(options.ErrorTTL),",
+    b"\t\terrorTTL:      time.Duration(options.ErrorTTL),\n\t\tlegacyTTL:     options.ErrorTTL > 0,")
+candidate = replace_once(candidate, b"func (s *groupSequential) reset() {\n",
+    b"func (s *groupSequential) reset() {\n\ts.scores.Reset()\n")
+candidate = replace_once(candidate, b"func (s *groupSequential) order(tags []string) []string {\n",
+    b"func (s *groupSequential) order(tags []string) []string {\n\tif !s.legacyTTL {\n\t\treturn s.scores.Sort(tags)\n\t}\n")
+candidate = replace_once(candidate, b"func (s *groupSequential) record(tag string, outcome groupOutcome) {\n",
+    b"func (s *groupSequential) record(tag string, outcome groupOutcome) {\n\tif !s.legacyTTL {\n\t\treturn\n\t}\n")
+i = new.index(b"// detourReady reports")
+j = new.index(b"// score is a server", i)
+detour = new[i:j]
+detour = replace_once(detour, b"\tstatus, _ := adapter.PathStatus(adapter.GroupPath(outbound, network))\n\treturn status == adapter.StatusReady",
+    b"\tfor depth := 0; depth <= 16; depth++ {\n\t\tif adapter.OutboundStatus(outbound) != adapter.StatusReady {\n\t\t\treturn false\n\t\t}\n\t\tgroup, ok := outbound.(adapter.OutboundGroup)\n\t\tif !ok {\n\t\t\treturn true\n\t\t}\n\t\toutbound = group.Selected(network)\n\t\tif outbound == nil {\n\t\t\treturn true\n\t\t}\n\t}\n\treturn false // a cycle or excessively deep group cannot be considered ready")
+settle = b'''// settle applies the current upstream rating only when some server answered.
+func (s *groupSequential) settle(answered string, failed []string) {
+	if !s.legacyTTL && answered != "" {
+		s.scores.Settle(answered, failed)
+	}
+}
+
+func (s *groupSequential) score(tag string) int {
+	return int(s.scores.Score(tag))
+}
+
+'''
+marker = b"// budget is how long"
+candidate = replace_once(candidate, marker, settle + detour + marker)
+start = new.index(b"func (t *GroupTransport) exchangeSequential(")
+exchange = new[start:].replace(b"t.sequential.", b"t.sequentialState.")
+exchange = replace_once(exchange, b"\t\t\tt.sequentialState.record(tag, failed)",
+    b"\t\t\tt.sequentialState.record(tag, groupAccepted)\n\t\t\tt.sequentialState.settle(tag, failed)")
+exchange = replace_once(exchange, b"\t\t\t\tfailed = append(failed, tag)",
+    b"\t\t\t\tt.sequentialState.record(tag, groupFailed)\n\t\t\t\tfailed = append(failed, tag)")
+# Return cancellation before consulting detour status.
+exchange = replace_once(exchange, b"\tcollector := groupCollector{transport: t}\n",
+    b"\tcollector := groupCollector{transport: t}\n\tif ctx.Err() != nil {\n\t\tt.finishCanceled(ctx, &collector, callback)\n\t\treturn\n\t}\n")
+candidate = candidate[:candidate.index(b"func (t *GroupTransport) exchangeSequential(")] + exchange
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Keep every existing fork test and append the upstream rating/detour
+# tests, adapting only the private sequentialState field and method names.
+path = "dns/transport/h_group_test.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("ca7d588a2655c4e32e367f2332e44289c10d3125",
+     "1a8fe434d1b595a7ec35c40ec093115ad0003e2c",
+     "ef300efa9fef48a66115455d38b7bbf79d665ad2")))
+i = new.index(b"// References is the member's detour")
+j = new.index(b"func (m *hGroupMember) Tag()", i)
+helpers = new[i:j]
+candidate = replace_once(own, b"\texchange func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error)\n}",
+    b"\texchange func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error)\n\tdetour string\n}")
+marker = b"func (m *hGroupMember) Tag()"
+candidate = replace_once(candidate, marker, helpers + marker)
+i = new.index(b"// A server that failed loses a point")
+tests = new[i:].replace(b"group.sequential.", b"group.sequentialState.").replace(b"sequential.record(", b"sequential.settle(").replace(b"hErrMember", b"errHMember")
+assert b"func TestH_GroupSequentialSharesTheDeadline(" in tests
+assert b"func TestH_GroupSequentialScoresOrderTheServers(" not in own
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate.rstrip() + b"\n\n" + tests)
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"

@@ -83,3 +83,14 @@ compatibility text. Soar is byte-identical to upstream after insertion of
 credits. FinalMask retains its original wording and formatting; duplicate
 related sections can be cleaned once the associated transport behavior is
 fully verified. This is documentation-only and does not change protocols.
+
+### Sequential DNS reconciliation
+
+The migration candidate combines the new upstream rating table and detour
+readiness check with the fork's `sequentialState` and readiness contract.
+An explicitly positive `error_ttl` retains time-based ordering; omitting it
+selects the upstream rating policy (no penalty when every server fails).
+This is a deliberate compatibility decision, not a stable behavior change.
+Existing tests are retained and eight upstream rating, detour, and deadline
+tests are added. A scoped race test checks the DNS transport and rating
+packages before the disposable checkout is rebuilt for Tailscale.
