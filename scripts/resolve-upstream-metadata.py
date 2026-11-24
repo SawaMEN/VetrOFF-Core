@@ -3538,6 +3538,12 @@ lifecycle_edit(b'filepath.Join("/tmp/psi", "server_list_compressed")', b'filepat
 lifecycle_edit(b'require.Equal(t, defaultDataDirectory, us.MigrateDataStoreDirectory, "the shared directory of before is migrated")', b'require.Equal(t, us.DataRootDirectory, us.MigrateDataStoreDirectory, "migration stays within the instance")')
 extra = own[own.index(b"func TestH_PsiphonCloseIsIdempotentAndPreventsLateStart"):].rstrip()
 extra = extra.replace(b"NewOutbound(context.Background(), nil", b"NewOutbound(hTestContext(), nil").replace(b"(context.Background(), &hProtectedAndroidPlatform{})", b"(hTestContext(), &hProtectedAndroidPlatform{})").replace(b"h.bridge", b"h.proxy")
+# The fork's test literals used promoted fields and a manager whose
+# Outbound method was not implemented. Use the existing upstream fake.
+extra = extra.replace(b'{Detour: "main",', b'{DialerOptions: option.DialerOptions{Detour: "main"},')
+extra = extra.replace(b'DataDirectory: t.TempDir(), Detour: "proxy",', b'DataDirectory: t.TempDir(), DialerOptions: option.DialerOptions{Detour: "proxy"},')
+extra = extra.replace(b"type hPsiphonOutboundManager struct{ adapter.OutboundManager }\n\n", b"")
+extra = extra.replace(b"&hPsiphonOutboundManager{}", b'hOutbounds{outbounds: map[string]adapter.Outbound{"proxy": hDirect{typ: C.TypeVLESS}}}')
 candidate = candidate.rstrip() + b"\n\n" + extra + b"\n"
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 
