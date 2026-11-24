@@ -178,7 +178,12 @@ probe() {
 ) 2>&1 | tee "$report/combined-soar-library.log" || failed=1
 probe core-modules go list -mod=mod -m all
 probe core-cli go build -mod=mod -trimpath -buildvcs=false -tags "$tags" -ldflags '-checklinkname=0' -o "$candidate/vetroff-core-probe" ./cmd/main
+test_path="$candidate/v2/config/vetroff_warp_mtu_policy_test.go"
+[[ ! -e "$test_path" ]]
+cp "$ROOT/migration/tests/warp_mtu_policy_test.go" "$test_path"
 probe core-tests go test -mod=mod -count=1 -timeout=6m -tags "$tags" -ldflags '-checklinkname=0' ./v2/config ./v2/hcore ./v2/hcore/adminbgservice
+probe core-warp-mtu-policy go test -mod=mod -count=1 -timeout=2m -tags "$tags" -ldflags '-checklinkname=0' -run '^TestVetrOFFWarpMTUDiscoveryPolicy$' -v ./v2/config
+grep -Fq -- '--- PASS: TestVetrOFFWarpMTUDiscoveryPolicy ' "$report/combined-core-warp-mtu-policy.log" || failed=1
 cd "$candidate/hiddify-sing-box"
 probe sing-modules go list -mod=mod -m all
 probe route-regressions bash "$ROOT/scripts/test-reviewed-route.sh" --combined "$candidate/hiddify-sing-box"
@@ -229,7 +234,7 @@ def walk(value):
             walk(child)
 walk(schema)
 required = {"conduit_pairing_id", "fallback_address", "final_mask",
-            "storage_dialer", "smart_pool", "keep_top"}
+            "storage_dialer", "smart_pool", "keep_top", "mtu_discovery"}
 assert required <= names, ("missing compatibility fields", sorted(required - names))
 for ref in refs:
     if not ref.startswith("#/"):

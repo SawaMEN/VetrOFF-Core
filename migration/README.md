@@ -719,3 +719,20 @@ The expected candidate count is 205/210 (43/44 Core, 162/166 sing-box),
 five outstanding, pending CI. No stable pin or Adaptive Connect overlay
 is changed. Final promotion requires a reproducible nested MasterDNS
 patch and complete dependency/API review and integrated build tests.
+
+### Restore WireGuard/WARP MTU discovery configuration
+
+Integrated run 45490098451 passed the sing-box protocol regression group
+and generated a valid schema (961 property names, 134 references). Core
+compilation failed because the clean merge retained the fork's option
+structs without MTUDiscovery. Restore the upstream tri-state fields for
+WireGuard and WARP, propagate the flag to the already existing WireGuard
+transport and convert it explicitly for the fork's boolean AWG option.
+WARP's omitted flag follows the upstream enabled default; standalone AWG
+behavior remains unchanged. The scoped WARP gate includes the adjusted
+option file. Add a Core conversion/JSON regression for unset, true and false
+and require its PASS marker. The generated schema must expose mtu_discovery.
+Docker test compilation in that older run still used v27.3.1; the current
+manifest already proposes v28.5.2. The source gate of run 45493415836
+passed for the prior 205/210 candidate; five conflicts remain open.
+No stable pins change until the integrated tests pass.

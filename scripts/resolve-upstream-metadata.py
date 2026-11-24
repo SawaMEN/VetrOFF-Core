@@ -3818,6 +3818,36 @@ for path, sha, signature in (
         lifecycle_edit(original, start + b"\tsynctest.Test(t, func(t *testing.T) {\n" + slow + b"\n\t})\n}\n")
     compat[path] = subprocess.check_output(["gofmt"], input=candidate)
 
+
+# Integrated run 45490098451: restore the tri-state WireGuard/WARP option
+# and forward it to the existing transport. Standalone AWG retains its
+# fork boolean contract; WARP follows the upstream enabled-by-default policy.
+for mtu_path, fork_sha, upstream_sha, edits in (
+    ("option/wireguard.go", "ee4fb8cf6313136cbf75b4cd84b8795138ecb829", "e1cf0a7832d8d00e0b6f1b2e365359eb3d428248", (
+        (b"\tFallbackAddress badoption.Listable[netip.Addr]", b"\t// MTUDiscovery is enabled unless explicitly false.\n\tMTUDiscovery *bool " + bytes([96]) + b'json:"mtu_discovery,omitempty"' + bytes([96]) + b"\n\tFallbackAddress badoption.Listable[netip.Addr]", 2),
+    )),
+    ("protocol/wireguard/endpoint.go", "1856b99a8703f2fd27f80d1d373e3da695755a6d", "a1166a0961347f07cfa224206cd2023bcbdec027", (
+        (b"\t\tPeerFallback: fallback, // H", b"\t\tDisableMTUDiscovery: options.MTUDiscovery != nil && !*options.MTUDiscovery,\n\t\tPeerFallback: fallback, // H", 1),
+    )),
+    ("protocol/warp/endpoint_warp_wireguard.go", "b4d88e095db8797d922e5f50541dc878466594cc", "45c0971917e35a2045840e7a781563b988d9f046", (
+        (b"\t\tFallbackAddress: options.FallbackAddress,", b"\t\tMTUDiscovery: options.MTUDiscovery,\n\t\tFallbackAddress: options.FallbackAddress,", 1),
+    )),
+    ("protocol/warp/endpoint_warp_awg.go", "7f7ba968992957165e9912ff636767e85765ffe8", "f645804a6307a9f03752d3f207eaeac32d7c362f", (
+        (b"\t\tFallbackAddress: options.FallbackAddress,", b"\t\tMTUDiscovery: options.MTUDiscovery == nil || *options.MTUDiscovery,\n\t\tFallbackAddress: options.FallbackAddress,", 1),
+    )),
+):
+    own = checked_blob(data["patched_tree"], mtu_path, fork_sha)
+    official = checked_blob(data["upstream"], mtu_path, upstream_sha)
+    assert git("show", data["tentative_tree"] + ":" + mtu_path) == own, mtu_path
+    assert b"MTUDiscovery" in official
+    candidate = own
+    for before, after, count in edits:
+        assert candidate.count(before) == count, mtu_path
+        candidate = candidate.replace(before, after)
+    compat[mtu_path] = subprocess.check_output(["gofmt"], input=candidate)
+assert re.search(rb"DisableMTUDiscovery\s+bool", git("show", data["tentative_tree"] + ":transport/wireguard/endpoint_options.go"))
+assert re.search(rb"MTUDiscovery\s+bool\s+", git("show", data["tentative_tree"] + ":option/awg.go"))
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"

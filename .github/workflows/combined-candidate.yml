@@ -6,6 +6,7 @@ on:
     paths:
       - 'scripts/test-combined-candidate.sh'
       - 'scripts/test-reviewed-route.sh'
+      - 'migration/tests/warp_mtu_policy_test.go'
       - 'scripts/verify-combined-dependencies.py'
       - 'scripts/_common.sh'
       - 'scripts/prepare.sh'

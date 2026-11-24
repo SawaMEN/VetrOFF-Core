@@ -21,7 +21,7 @@ groups = ("protocol/warp", "protocol/masque", "hiddify/warpscan",
           "protocol/awg", "protocol/wireguard")
 extra = ("adapter/h_deep_search.go", "adapter/h_detour.go", "adapter/h_status.go",
          "adapter/h_lazy.go", "adapter/experimental.go",
-         "option/h_edge_search.go", "option/h_warp_scanner.go")
+         "option/h_edge_search.go", "option/h_warp_scanner.go", "option/wireguard.go")
 blocked = [p for p in meta["remaining_conflicts"] if p in extra or any(p.startswith(g + "/") for g in groups)]
 assert not blocked, blocked
 def git(*args):
