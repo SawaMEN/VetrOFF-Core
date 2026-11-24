@@ -782,3 +782,21 @@ Tailscale run 45495820645 had no jobs because the workflow YAML was
 corrupted by a previous string insertion; restore the exact anchored
 regex and preserve the original artifact upload step. Both fixes require
 fresh CI. No stable pins or source conflict counts changed.
+
+### Core integration regression follow-up
+
+Run 45496243142 passed the full scoped migration audit, including the
+30-repeat EdgeScan fixture and WARP checks. Run 45496243106 passed all
+five independent Tailscale regressions. Combined run 45496243183 built
+the CLI, passed the three MTU flag cases, integration-test compilation,
+schema validation and effective replacement checks. The remaining failed
+probe was core-tests: an older IPv4-only fixture rejected the intended
+native IPv6 TUN leak guard, and six hot-reload assertions referenced the
+retired StartedService field. Align the older test with the already
+reviewed native/mobile address policy and use the atomic service pointer
+in the hot-reload test without removing its original assertions.
+Require explicit PASS markers for both regressions and the IPv6 preference
+unit test. No production policy, stable pins or conflict count changes.
+The module graph report still shows shared version/replacement differences
+(including AmneziaWG), requiring review before manifest promotion.
+New Core test changes are pending CI; 205/210 source conflicts reviewed.

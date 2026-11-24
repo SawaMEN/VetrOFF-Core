@@ -1027,6 +1027,47 @@ lifecycle_edit(b"\t\tif len(tun.Address) != 1 || !tun.Address[0].Addr().Is4() {\
 		}''')
 core_clean[path] = subprocess.check_output(["gofmt"], input=candidate)
 
+
+# Combined run 45496243183 found a second older IPv4-only regression.
+# On native hosts the IPv6 TUN address protects the default route from
+# bypass; the mobile platform contract and DNS preference stay unchanged.
+path = "v2/config/builder_ipv4only_test.go"
+own = checked_blob(patched, path, "54d072e1a44a995ea397ea04ac6ca2e948fad5fd")
+assert git("show", data["tentative_tree"] + ":" + path) == own
+candidate = own
+lifecycle_edit(b"func TestSetInboundIPv4OnlyDoesNotAdvertiseIPv6(t *testing.T)", b"func TestSetInboundIPv4OnlyKeepsPlatformRoutePolicy(t *testing.T)")
+lifecycle_edit(b'\tif ipv6 != 0 {\n\t\tt.Fatalf("IPv6 address count = %d, want 0", ipv6)\n\t}', b'''	wantIPv6 := 0
+	if !C.IsAndroid && !C.IsIos && shouldEnableIPv6() {
+		wantIPv6 = 1
+	}
+	if ipv6 != wantIPv6 {
+		t.Fatalf("IPv6 address count = %d, want %d for platform route policy", ipv6, wantIPv6)
+	}''')
+assert b"if !options.AutoRoute" in candidate
+core_clean[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# The hot-reload fixture was added on the fork and still refers to the
+# removed public pointer. Use a single atomic snapshot per observation;
+# retain all identity, port, lifecycle and failed-reload assertions.
+path = "v2/hcore/hotreload_test.go"
+own = checked_blob(patched, path, "eb3dcff537b44c7e887edaa3f9026828b63067c7")
+assert git("show", data["tentative_tree"] + ":" + path) == own
+candidate = own
+lifecycle_edit(b"static.StartedService.Instance()", b"runningTestService(t).Instance()", 6)
+lifecycle_edit(b"func runningOutbound(t *testing.T, name string) adapter.Outbound {", b'''// runningTestService fails with a useful assertion rather than a nil panic.
+func runningTestService(t *testing.T) *daemon.StartedService {
+	t.Helper()
+	ss := static.startedService.Load()
+	require.NotNil(t, ss, "expected a running service")
+	require.NotNil(t, ss.Instance(), "expected a running instance")
+	return ss
+}
+
+func runningOutbound(t *testing.T, name string) adapter.Outbound {''')
+lifecycle_edit(b'\t"github.com/sagernet/sing-box/adapter"\n', b'\t"github.com/sagernet/sing-box/adapter"\n\t"github.com/sagernet/sing-box/daemon"\n')
+assert b"static.StartedService" not in candidate
+core_clean[path] = subprocess.check_output(["gofmt"], input=candidate)
+
 # Build recipes: newer Windows launchers, Apple static Cronet linkage and
 # Linux runpath fix; keep pinned generators, Android API/arch targets,
 # native tests, web RPC build and non-mutating module preparation.

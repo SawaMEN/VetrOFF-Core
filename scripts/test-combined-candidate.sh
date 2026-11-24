@@ -181,7 +181,14 @@ probe core-cli go build -mod=mod -trimpath -buildvcs=false -tags "$tags" -ldflag
 test_path="$candidate/v2/config/vetroff_warp_mtu_policy_test.go"
 [[ ! -e "$test_path" ]]
 cp "$ROOT/migration/tests/warp_mtu_policy_test.go" "$test_path"
-probe core-tests go test -mod=mod -count=1 -timeout=6m -tags "$tags" -ldflags '-checklinkname=0' ./v2/config ./v2/hcore ./v2/hcore/adminbgservice
+probe core-tests go test -mod=mod -count=1 -timeout=6m -tags "$tags" -ldflags '-checklinkname=0' -v ./v2/config ./v2/hcore ./v2/hcore/adminbgservice
+# Require the repaired regressions to run, not merely compile.
+for name in TestSetInboundIPv4OnlyKeepsPlatformRoutePolicy TestShouldEnableIPv6 TestHotReload; do
+  if ! grep -Fq -- "--- PASS: $name " "$report/combined-core-tests.log"; then
+    echo "Missing required core regression PASS: $name" >&2
+    failed=1
+  fi
+done
 probe core-warp-mtu-policy go test -mod=mod -count=1 -timeout=2m -tags "$tags" -ldflags '-checklinkname=0' -run '^TestVetrOFFWarpMTUDiscoveryPolicy$' -v ./v2/config
 grep -Fq -- '--- PASS: TestVetrOFFWarpMTUDiscoveryPolicy ' "$report/combined-core-warp-mtu-policy.log" || failed=1
 cd "$candidate/hiddify-sing-box"
