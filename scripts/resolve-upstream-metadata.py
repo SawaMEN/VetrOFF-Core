@@ -1771,6 +1771,45 @@ for path, hashes in (
     resolutions[path] = own
 
 
+
+# Restore upstream attribution without dropping the fork's compatibility
+# notes. Soar differs only by the inserted credits; FinalMask also contains
+# duplicated/formatting edits in the locked docs, which are intentionally
+# preserved until the transport/configuration work is complete.
+for path, old_sha, own_sha, new_sha in (
+    ("docs/hiddify/features/protocols/soar.en.md", None, "a08cc6ad469af7e40d7b22e831e89e158ff580f2", "e66d26954579a0cc296a3d5e51a2e2564b541326"),
+    ("docs/hiddify/features/protocols/soar.fa.md", None, "d73e9a6979e61ad5f961d867f3eb49ee142e4a6b", "41d951ff58763f7edeb0da915e26db9dead9d407"),
+    ("docs/hiddify/features/transports/finalmask.en.md", "bbf58d6fdd3bb7dee4502f4e1098a2cd5569fc4a", "ee235870ed8f0117b5a50053749d5a387b5ecfef", "fdb06331c4852d3221510744ded2c0a58209234c"),
+    ("docs/hiddify/features/transports/finalmask.fa.md", "e28458e8dbf948e5a91fa7f0105291c282f238b9", "882a8bae5da521af09c30d100f772444c0d12228", "aad9e5fba29dd3506e7a136df9dcb3aa8549e1eb"),
+):
+    if old_sha:
+        checked_blob(data["base"], path, old_sha)
+    else:
+        assert not git("ls-tree", data["base"], "--", path)
+    own = checked_blob(data["patched_tree"], path, own_sha)
+    new = checked_blob(data["upstream"], path, new_sha)
+    en = path.endswith(".en.md")
+    credit = ("## Sources and credits" if en else "## منبع‌ها و قدردانی").encode()
+    related = ("## See also" if en else "## همچنین ببینید").encode()
+    assert own.count(credit) == 0 and new.count(credit) == 1
+    i = new.index(credit)
+    j = new.index(related, i)
+    section = new[i:j]
+    assert section.endswith(b"\n\n")
+    if "/soar." in path:
+        assert new[:i] + new[j:] == own
+        resolutions[path] = new
+    else:
+        # The fork repeats the related section. Add credits before its
+        # first occurrence only; every original byte remains recoverable.
+        first = own.index(related)
+        candidate = own[:first] + section + own[first:]
+        assert candidate.replace(section, b"", 1) == own
+        assert b"https://github.com/XTLS/Xray-core" in section
+        assert b"https://github.com/patterniha/Xray-core" in section
+        assert b"https://github.com/PoriyaVali/mirage" in section
+        resolutions[path] = candidate
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"

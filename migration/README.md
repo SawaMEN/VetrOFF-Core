@@ -74,3 +74,12 @@ cleanup registration before node startup) and asserts the expected Tailcat
 source files are included by the build tags. The outbound legacy lifecycle
 is retained; it uses the existing outbound adapter interface. No stable
 source pin has changed. Candidate runtime tests still gate promotion.
+
+### Documentation reconciliation
+
+Four documentation conflicts (Soar and FinalMask, English and Persian) now
+restore upstream project attribution while retaining the complete locked
+compatibility text. Soar is byte-identical to upstream after insertion of
+credits. FinalMask retains its original wording and formatting; duplicate
+related sections can be cleaned once the associated transport behavior is
+fully verified. This is documentation-only and does not change protocols.
