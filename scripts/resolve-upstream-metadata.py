@@ -3750,6 +3750,48 @@ if b"const dnsHijackConcurrency" not in candidate:
     lifecycle_edit(b"func (r *Router) HijackDNSPacket(", b"const dnsHijackConcurrency = 256 // H\n\nfunc (r *Router) HijackDNSPacket(")
     compat[path] = subprocess.check_output(["gofmt"], input=candidate)
 
+# The combined build exposed a duplicate import in the clean merge of
+# balancer/common.go. Preserve every other merged statement.
+path = "protocol/group/balancer/common.go"
+own = checked_blob(data["patched_tree"], path, "1edadda0236b60717fa600794db13e15fe11ce18")
+new = checked_blob(data["upstream"], path, "f521d935699867fb06c6f2853f040eb4f9314647")
+candidate = git("show", data["tentative_tree"] + ":" + path)
+imp = b'\t"github.com/sagernet/sing-box/option"\n'
+assert own.count(imp) == new.count(imp) == 1
+assert candidate.count(imp) == 2
+candidate = candidate.replace(imp, b"", 1)
+compat[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# The Android bootstrap test's fake network manager embedded a nil
+# interface for ProtectFunc, causing a panic before the assertion.
+# Implement only the missing test double; real protection is unchanged.
+path = "protocol/psiphon/h_psiphon_test.go"
+candidate = resolutions[path]
+assert b"type hNetworkManager struct{ adapter.NetworkManager }" in candidate
+lifecycle_edit(b"func (hNetworkManager) AutoDetectInterface() bool", b"func (hNetworkManager) ProtectFunc() control.Func { return nil }\n\nfunc (hNetworkManager) AutoDetectInterface() bool")
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# The two pacing tests assume timers at 50/100 microseconds are exact.
+# On Linux CI they consistently fail even though the synthetic-window
+# tests pass. synctest virtualizes time for these in-memory connections
+# and channels, preserving all existing assertions and production code.
+for path, sha, signature in (
+    ("route/h_read_pace_test.go", "8288929bf1cdcf35650be98e681b1bb682188269", b"func TestH_ReadPaceLeavesAnExchangeAlone(t *testing.T)"),
+    ("route/h_wake_pace_test.go", "51eec59d0726169970a8388d442045ee0b4176bb", b"func TestH_PacedRawConnWaitsAfterAWakeUp(t *testing.T)"),
+):
+    candidate = checked_blob(data["upstream"], path, sha)
+    assert git("show", data["tentative_tree"] + ":" + path) == candidate
+    original = function_blob(candidate, signature)
+    start = signature + b" {\n"
+    assert original.startswith(start) and original.endswith(b"\n}\n")
+    body = original[len(start):-len(b"\n}\n")]
+    wrapped = start + b"\tsynctest.Test(t, func(t *testing.T) {\n" + body + b"\n\t})\n}\n"
+    lifecycle_edit(original, wrapped)
+    lifecycle_edit(b'\t"testing"\n', b'\t"testing"\n\t"testing/synctest"\n')
+    # The original test body is retained verbatim before gofmt.
+    assert body in candidate
+    compat[path] = subprocess.check_output(["gofmt"], input=candidate)
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"
