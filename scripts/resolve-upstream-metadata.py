@@ -2099,6 +2099,46 @@ assert b"scope.Add(h.listener.Close)" in new
 assert b"h.obfs.serve(" in new
 resolutions[path] = new
 
+
+# SSH: restore all upstream regression cases without losing the fork's
+# existing 12 tests. Compare the common test bodies and fixtures after
+# reversing the reviewed API and assertion changes.
+path = "protocol/ssh/h_ssh_test.go"
+old, own, new = (checked_blob(data[rev], path, sha) for rev, sha in zip(
+    ("base", "patched_tree", "upstream"),
+    ("ce3b2f086bdf08bc09c3d5ae8c62ae7c55443ba2",
+     "c77e328a3f4f6db8a68e9113734bab69973b76e4",
+     "fcef4532910fcde76818eaec20260e0dc91a32a4")))
+plain = new[:new.index(b"// the outbound connects in the background after start")].rstrip() + b"\n"
+for line in (b'\t"crypto/rsa"\n', b'\t"github.com/sagernet/sing-box/common/uot"\n',
+             b'\t"github.com/sagernet/sing/common/bufio/deadline"\n',
+             b'\tC "github.com/sagernet/sing-box/constant"\n'):
+    plain = replace_once(plain, line, b"")
+plain = replace_once(plain, function_blob(plain, b"func startInboundOptions("), b"")
+plain = replace_once(plain, b"ListenOptions: option.ListenOptions{Listen: &listen, ListenPort: f.port},",
+    b"Listen: &listen, ListenPort: f.port,")
+plain = replace_once(plain, b"t.Cleanup(func() { f.inbound.Close() })",
+    b"t.Cleanup(func() { _ = htest.Close(f.inbound) })")
+plain = replace_once(plain, b'ServerOptions: option.ServerOptions{Server: "127.0.0.1", ServerPort: f.port},',
+    b'Server: "127.0.0.1", ServerPort: f.port,')
+plain = replace_once(plain, b"t.Cleanup(func() { htest.Close(out.(*Outbound)) })",
+    b"t.Cleanup(func() { out.(*Outbound).Close() })")
+plain = plain.replace(b"adapter.IsReady(out)", b"out.IsReady()")
+plain = replace_once(plain, b'require.Equal(t, adapter.StatusConnecting, out.Status())\n\trequire.Equal(t, "SSH", adapter.DisplayType(out), "the status is shown on its own")',
+    b"require.NotEmpty(t, out.DisplayType())")
+assert b"".join(normalize_imports(plain).split()) == b"".join(normalize_imports(own).split()), path
+candidate = replace_once(new, b"t.Cleanup(func() { f.inbound.Close() })",
+    b"t.Cleanup(func() { _ = htest.Close(f.inbound) })")
+# The deadline regression uses a blocked read; release it on test exit.
+candidate = replace_once(candidate, b"\tconn := deadline.NewConn(&channelConn{Channel: hBlockingChannel{}})",
+    b"\tdone := make(chan struct{})\n\tdefer close(done)\n\tconn := deadline.NewConn(&channelConn{Channel: hBlockingChannel{done: done}})")
+candidate = replace_once(candidate, b"type hBlockingChannel struct{ ssh.Channel }\n\nfunc (hBlockingChannel) Read([]byte) (int, error) { select {} }",
+    b"type hBlockingChannel struct {\n\tssh.Channel\n\tdone <-chan struct{}\n}\n\nfunc (c hBlockingChannel) Read([]byte) (int, error) { <-c.done; return 0, io.EOF }")
+old_tests = set(re.findall(rb"(?m)^func (Test\w+)\(", own))
+new_tests = set(re.findall(rb"(?m)^func (Test\w+)\(", candidate))
+assert len(old_tests) == 12 and len(new_tests) == 21 and old_tests <= new_tests
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"

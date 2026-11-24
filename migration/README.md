@@ -183,3 +183,14 @@ creation. The new independent package test gate exercises DNSTT and
 Shadowsocks with the race detector and restores its temporary overlays.
 The complete candidate still requires successful CI and full integration.
 Stable pins are unchanged.
+
+### SSH regression coverage
+
+Run 45465371861 verified 126 resolutions and passed MasterDNS again. Its
+isolated MASQUE UDP regression passed; DNSTT/Shadowsocks and combined WARP
+steps failed (their logs were still unavailable at this review). The SSH
+conflict restores all 21 upstream tests, including the 12 fork tests,
+with compatible inbound cleanup and a bounded lifetime for the blocked
+read fixture. The scoped protocol test now includes SSH. Combined WARP
+is attempted independently of the isolated MASQUE result once the shared
+edge scanner stage passes. Stable dependencies are not changed.

@@ -54,11 +54,11 @@ jobs:
         id: masque_tests
         if: ${{ !cancelled() && steps.warp_tests.outcome == 'success' }}
         run: bash scripts/test-reviewed-masque.sh
-      - name: Test reviewed DNSTT and Shadowsocks packages
+      - name: Test reviewed DNSTT, Shadowsocks and SSH packages
         if: ${{ !cancelled() && steps.dns_tests.outcome == 'success' }}
         run: bash scripts/test-reviewed-protocols.sh
       - name: Probe combined WARP MASQUE and edgescan candidate
-        if: ${{ !cancelled() && steps.masque_tests.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.warp_tests.outcome == 'success' }}
         run: bash scripts/test-warp-combined-candidate.sh
       - name: Probe Tailscale candidate against locked dependencies
         if: ${{ !cancelled() && steps.merge_audit.outcome == 'success' && steps.setup_go.outcome == 'success' }}
