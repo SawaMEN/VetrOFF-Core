@@ -3294,6 +3294,62 @@ for helper_path, sha in (
         assert b"HIDDIFY_NO_READ_PACE" in helper
 resolutions[path] = new
 
+# XDrive's box-level tests must keep VLESS encryption: the fork still
+# rejects plaintext XDrive. The upstream changes remove that requirement,
+# not the transport tests themselves. Compare the exact baseline blobs.
+path = "h_box_xdrive_test.go"
+own = checked_blob(data["patched_tree"], path, "178d0a297bffec82f9e1f30a02754460ff3793fa")
+new = checked_blob(data["upstream"], path, "4586c6635173b1bdb06502b81d5fac6044295a63")
+plain = own.replace(b'\tdecryption, encryption := hVLESSEncryptionPair(t, "native")\n', b"")
+plain = plain.replace(b'\n "decryption": "' + b'\x60 + decryption + \x60' + b'",', b"")
+plain = plain.replace(b'\n "encryption": "' + b'\x60 + encryption + \x60' + b'",', b"")
+plain = plain.replace(b'\t_, encryption := hVLESSEncryptionPair(t, "native")\n', b"")
+plain = plain.replace(b', "encryption": "' + b'\x60 + encryption + \x60' + b'"', b"")
+assert plain == new, path
+candidate = own
+lifecycle_edit(b"\t\t_, err = conn.Write(payload)\n\t\trequire.NoError(t, err)", b"\t\trequire.NoError(t, conn.SetWriteDeadline(time.Now().Add(20*time.Second)))\n\t\twritten, err := conn.Write(payload)\n\t\trequire.NoError(t, err)\n\t\trequire.Equal(t, len(payload), written)")
+# A separate regression asserts the security contract before any I/O.
+candidate += b'''
+func TestH_XDriveRequiresVLESSEncryption(t *testing.T) {
+	ctx := include.Context(context.Background())
+	config := ''' + bytes([96]) + b'''{"log":{"disabled":true},"outbounds":[{"type":"vless","tag":"x","server":"127.0.0.1","server_port":1,"uuid":"b831381d-6324-4d53-ad4f-8cda48b30811","transport":{"type":"xdrive","service":"local","remote_folder":"test"}}]}''' + bytes([96]) + b'''
+	options, err := json.UnmarshalExtendedContext[option.Options](ctx, []byte(config))
+	require.NoError(t, err)
+	instance, err := box.New(box.Options{Context: ctx, Options: options})
+	if instance != nil {
+		defer instance.Close()
+	}
+	require.ErrorContains(t, err, "XDrive requires VLESS encryption")
+}
+'''
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Keep the earlier Xray integration tests and add the newer XHTTP cases.
+# Compare all old test function names; other code differences were reviewed
+# as formatting, additional test cases, imports and a new TLS test.
+path = "h_xray_interop_test.go"
+own = checked_blob(data["patched_tree"], path, "9c2e193d489ecd62569baef3e83f6925dcecc898")
+new = checked_blob(data["upstream"], path, "bd9e3dd0f7760b203a9763a4eddb20176e984a63")
+test_names = lambda blob: set(re.findall(rb"(?m)^func (Test\w+)\(", blob))
+assert test_names(own) < test_names(new)
+assert test_names(new) - test_names(own) == {b"TestH_XrayXHTTPTLSFingerprint"}
+for marker in (b"stream-one tokenish obfs", b"stream-up tokenish obfs", b"packet-up tokenish obfs cookie", b"hVLESSEncryptionPair", b"tls.GenerateCertificate("):
+    assert marker in new, marker
+resolutions[path] = new
+
+# Keep the locked Xray version's documented limits; upstream's newer
+# backend defaults require the still-pending Xray/Reality dependency pair.
+# Adopt the source attribution, not an unverified performance claim.
+for path, own_sha, new_sha, marker, credits in (
+    ("docs/hiddify/features/transports/xdrive.en.md", "9fcfe9f3c9c8a738e586f4f6ffdd9a39d9b60963", "3c6421c771251e311e2efb46261433ed3b6753a3", b"## See also", b"## Sources and credits\n\n- [XTLS/Xray-core](https://github.com/XTLS/Xray-core): the XDRIVE transport code.\n\n"),
+    ("docs/hiddify/features/transports/xdrive.fa.md", "6e4550972686e491c1daedd17b9c3ffa67188a48", "415ac0ad93ed4968c6ddbda6a25eba456a77c765", "## همچنین ببینید".encode(), "## منبع‌ها و قدردانی\n\n- [XTLS/Xray-core](https://github.com/XTLS/Xray-core): کد ترنسپورت XDRIVE.\n\n".encode()),
+):
+    own = checked_blob(data["patched_tree"], path, own_sha)
+    new = checked_blob(data["upstream"], path, new_sha)
+    assert b"26.10.31" in own and b"26.11.9" in new
+    assert b"storage_dialer" in own and b"https://github.com/XTLS/Xray-core" in new
+    resolutions[path] = replace_once(own, marker, credits + marker)
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"
