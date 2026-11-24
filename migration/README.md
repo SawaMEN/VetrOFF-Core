@@ -700,3 +700,22 @@ Expected after the new source gate: 204/210 (43/44 Core, 161/166 sing-box),
 six outstanding: MasterDNS, Tailscale, three go.mod files and schema.
 202/210 remain CI-confirmed until this commit's audit passes. ROADMAP 9/16.
 The full combined build and cross-platform release gates remain mandatory.
+
+### MasterDNS conditional resolution and staged Tailscale callers
+
+The MasterDNS target a6b6936 has the seven directly compared differences
+already covered by the scoped probe; the readiness race remains mandatory
+to fix. Stage its upstream gitlink in the diagnostic tree only, with a
+required dependency overlay recorded in the review metadata. The combined
+probe requires a nonempty generated patch and a distinct patched nested
+tree before compilation. It is not a release-ready bare gitlink.
+The six previously tested Tailscale caller adaptations now become part of
+the reviewed sing-box tree instead of being an unrecorded extra edit in
+the combined checkout. Their exact blob IDs are checked in the export.
+Tailscale itself remains unresolved: the compare API reports divergent
+histories (71 fork-side commits and 1165 target-side commits), so library
+compilation alone does not certify preservation of all fork behavior.
+The expected candidate count is 205/210 (43/44 Core, 162/166 sing-box),
+five outstanding, pending CI. No stable pin or Adaptive Connect overlay
+is changed. Final promotion requires a reproducible nested MasterDNS
+patch and complete dependency/API review and integrated build tests.

@@ -96,6 +96,8 @@ for module, directory in (("hiddify-core", target), ("hiddify-sing-box", sing_de
 summary = {"core_tree": core["reviewed_tree"], "sing_box_tree": sing["reviewed_tree"],
            "ray2sing_patched_tree": ray_tree, "candidate_dependency_pins": pins,
            "unresolved_core": core["remaining_conflicts"], "unresolved_sing_box": sing["remaining_conflicts"],
+           "required_dependency_overlays": sing.get("required_dependency_overlays", {}),
+           "tailscale_caller_adjustments": sing.get("tailscale_caller_adjustments", []),
            "status": "experimental combined probe; not a release"}
 (report / "combined-candidate-provenance.json").write_text(json.dumps(summary, indent=2) + "\n")
 PY
@@ -110,12 +112,33 @@ git -C "$mdns" fetch --quiet --no-tags --depth=1 origin "$mdns_old"
 python3 "$ROOT/scripts/fix-masterdns-session-readiness.py" "$mdns" "$mdns_old" "$mdns_new"
 git -C "$mdns" diff --cached --binary --full-index "$mdns_new" > "$report/combined-masterdns-readiness.patch"
 git -C "$mdns" write-tree > "$report/combined-masterdns-tree.txt"
-
-# Carry the six Tailscale caller adaptations that passed the scoped
-# candidate tests. Fail closed if the merged source contains other edits.
-python3 "$ROOT/scripts/prepare-tailscale-callers.py" \
-  "$WORK/hiddify-sing-box" "$report" a26e58b376987a3305b201ec87fbc8918f620ad3 \
-  "$candidate/hiddify-sing-box"
+# A raw gitlink cannot represent the nested patch. Prove that the
+# materialized tree includes the required overlay before any compilation.
+python3 - "$report" "$mdns" "$mdns_new" "$candidate/hiddify-sing-box" <<'PY'
+import json, subprocess, sys
+from pathlib import Path
+report, mdns, revision, sing = sys.argv[1:]
+report, mdns, sing = map(Path, (report, mdns, sing))
+meta = json.loads((report / "combined-candidate-provenance.json").read_text())
+required = meta["required_dependency_overlays"]["replace/MasterDnsVPN"]
+assert required["base"] == revision and required["required_for_promotion"]
+assert required["script"] == "scripts/fix-masterdns-session-readiness.py"
+patch = report / "combined-masterdns-readiness.patch"
+assert patch.stat().st_size > 0
+tree = (report / "combined-masterdns-tree.txt").read_text().strip()
+original = subprocess.check_output(["git", "-C", str(mdns), "rev-parse", revision + "^{tree}"], text=True).strip()
+assert tree != original
+meta["materialized_dependency_overlays"] = {"replace/MasterDnsVPN": {"tree": tree, "patch": patch.name}}
+# The six callers are now in the reviewed sing-box tree. Verify the
+# exported files instead of applying an unrecorded second modification.
+callers = meta["tailscale_caller_adjustments"]
+assert len(callers) == 6
+for entry in callers:
+    path = sing / entry["path"]
+    actual = subprocess.check_output(["git", "hash-object", "--", str(path)], text=True).strip()
+    assert actual == entry["candidate_blob"], entry["path"]
+(report / "combined-candidate-provenance.json").write_text(json.dumps(meta, indent=2) + "\n")
+PY
 
 export CGO_ENABLED=0
 cd "$candidate"
