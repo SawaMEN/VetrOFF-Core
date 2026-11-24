@@ -97,10 +97,10 @@ jobs:
       - name: Probe combined WARP MASQUE and edgescan candidate
         if: ${{ !cancelled() && steps.warp_tests.outcome == 'success' }}
         run: bash scripts/test-warp-combined-candidate.sh
-      - name: Test reviewed network reset and DNS invalidation
+      - name: Test reviewed network reset and TCP UDP pacing
         id: network_reset
         if: ${{ !cancelled() && steps.merge_audit.outcome == 'success' && steps.setup_go.outcome == 'success' }}
-        timeout-minutes: 8
+        timeout-minutes: 12
         run: |
           source scripts/_common.sh
           report="$ROOT/.build/upstream-merge-audit"
@@ -114,8 +114,8 @@ jobs:
           from pathlib import Path
           sing, report, tmp = map(Path, sys.argv[1:])
           meta = json.loads((report / "hiddify-sing-box-reviewed.json").read_text())
-          paths = ("route/network.go", "route/router.go", "route/h_network_reset_test.go")
-          assert set(paths[:2]) <= set(meta["reviewed_resolutions"])
+          paths = ("route/network.go", "route/router.go", "route/conn.go", "route/h_network_reset_test.go", "route/h_read_pace.go", "route/h_read_pace_test.go", "route/h_wake_pace.go", "route/h_wake_pace_test.go", "route/h_wake_pace_unix.go", "route/h_wake_pace_unix_test.go", "route/h_wake_pace_other.go", "route/h_path_rtt.go")
+          assert set(paths[:3]) <= set(meta["reviewed_resolutions"])
           assert not set(paths) & set(meta["remaining_conflicts"])
           files = {}
           for path in paths:
@@ -127,8 +127,13 @@ jobs:
           PY
           cd "$sing"
           CGO_ENABLED=1 go test -race -mod=mod -overlay "$tmp/overlay.json" -count=1 -timeout=3m -ldflags '-checklinkname=0' \
-            -run '^TestH_NetworkResetReachesTheDNSServers$' -v ./route 2>&1 | tee "$report/network-reset-candidate-test.log"
-          grep -Fq -- '--- PASS: TestH_NetworkResetReachesTheDNSServers' "$report/network-reset-candidate-test.log"
+            -run '^TestH_(NetworkResetReachesTheDNSServers|ReadPace|WakePace|PacedRawConn|TrackedDatagramSocket|TrackedSockets|PathRoundTrip|BusyDatagramSocket)' -v ./route 2>&1 | tee "$report/network-reset-candidate-test.log"
+          for test in TestH_NetworkResetReachesTheDNSServers TestH_TrackedDatagramSocketKeepsItsReader TestH_WakePaceNeedsALongPath; do
+            grep -Fq -- "--- PASS: $test" "$report/network-reset-candidate-test.log"
+          done
+          HIDDIFY_NO_READ_PACE=1 CGO_ENABLED=1 go test -race -mod=mod -overlay "$tmp/overlay.json" -count=1 -timeout=3m -ldflags '-checklinkname=0' \
+            -run '^TestH_ReadPaceLeavesASlowConnectionAlone$' -v ./route 2>&1 | tee "$report/pacing-disabled-candidate-test.log"
+          grep -Fq -- '--- PASS: TestH_ReadPaceLeavesASlowConnectionAlone' "$report/pacing-disabled-candidate-test.log"
       - name: Probe Tailscale candidate against locked dependencies
         if: ${{ !cancelled() && steps.merge_audit.outcome == 'success' && steps.setup_go.outcome == 'success' }}
         run: bash scripts/test-tailscale-candidate.sh
