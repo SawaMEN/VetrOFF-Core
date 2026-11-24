@@ -36,4 +36,6 @@ Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Cli
 - [ ] Review and integrate additional DPI-CH-specific diagnostic tests.
 - [x] Add opt-in Adaptive MUX policy for validated preconfigured TCP profiles.
 - [ ] Integrate actual profile validation and mux lifecycle into the selector owner.
+- [x] Add opt-in logical connection budget candidate with race-safe reservations.
+- [ ] Wire connection budget into actual dial/close lifecycle and verify transport resource usage.
 - [ ] Validate candidate builds and real network behavior before promotion.
