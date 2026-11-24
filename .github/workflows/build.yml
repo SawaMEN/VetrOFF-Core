@@ -25,7 +25,7 @@ on:
       - 'scripts/verify-migration-checkpoints.py'
       - '.github/workflows/upstream-merge-audit.yml'
       - '.github/workflows/combined-candidate.yml'
-      - '.github/workflows/migration-checkpoints.yml'
+      - '.github/workflows/verify-migration-checkpoints.yml'
   pull_request:
   schedule:
     - cron: '15 5 * * 1'
