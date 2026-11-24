@@ -593,3 +593,21 @@ manifests now have explicit candidates, but none is promoted until the
 combined build is verified. The four gitlinks and generated schema remain
 open. Count remains 202/210 source-confirmed, eight outstanding; stable
 pins unchanged. ROADMAP remains 9/16.
+
+### Carry nested dependency fixes into the combined tree
+
+The combined build 45487277566 remains in progress at the time of this
+checkpoint; no new compiler results are available yet. The manifest audit
+45487671031 passed its source gate, including test/go.mod candidate syntax.
+The combined probe previously checked out the raw MasterDNS target without
+the race-tested sessionReady fix. Apply that exact reviewed fix, retain the
+patch and resulting tree ID in the diagnostics, and rerun library/session
+race tests. Extract the six already reviewed Tailscale caller adaptations
+into a reusable helper; use the same helper in the scoped and combined
+probes. The combined helper rejects an unexpected merged caller instead of
+silently overwriting it. The combined probe also tests the exact sing and
+Soar targets with local race regressions. The selected dependency targets
+remain provisional; no gitlink or stable version is promoted.
+202/210 source resolutions confirmed; 8 still outstanding (3 manifests,
+4 nested gitlinks and generated schema). ROADMAP 9/16. Running and pending
+combined jobs may be superseded by newer commits; inspect the latest run.
