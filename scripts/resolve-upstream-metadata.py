@@ -2259,7 +2259,12 @@ resolutions[path] = own
 path = "hiddify/finalmask/h_xdns_legacy.go"
 own, new = added_pair(path, "b6308a2cbae093800c4a9725c5a728d823991d14",
                       "b0c5884cecc0b9abad79049f79d918beb2ca86f9")
-assert own.splitlines() == new.splitlines()
+# The only difference is the fork's blank line between external imports.
+# Keep an exact comparison so any other upstream change fails the audit.
+plain = replace_once(new,
+    b'E "github.com/sagernet/sing/common/exceptions"\n\t"google.golang.org/protobuf/proto"',
+    b'E "github.com/sagernet/sing/common/exceptions"\n\n\t"google.golang.org/protobuf/proto"')
+assert plain == own, path
 resolutions[path] = own
 
 path = "hiddify/finalmask/xray_tls.go"
