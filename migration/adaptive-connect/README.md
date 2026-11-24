@@ -43,3 +43,9 @@ in-flight results. No telemetry is transmitted.
 
 No stable gitlink, patch series, expected tree, or release version changes.
 The candidate does not yet select real traffic or implement packet manipulation.
+
+## Runtime adapter candidate
+
+The new Runtime accepts typed completed probe events and filters resolved tunnel candidates by TCP/UDP support. Canceled and skipped tests never count as failures. A selector-owner adapter must implement SwitchVerified as a compare-and-activate transaction, keeping the old selection on errors. Rejected activation invalidates the candidate's health streak. Manual resume starts a new generation. The tests use an in-memory selector double, not a real tunnel. An independent CI workflow runs the package race tests on Anti-DPI without fetching upstream or releasing binaries.
+
+The remaining integration work is to wire this adapter into actual URLTest result delivery and the Selector owner, coordinate lifecycle events, and validate the real switch transaction. The current migration candidate is not part of a production binary.

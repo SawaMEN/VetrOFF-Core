@@ -26,6 +26,7 @@ Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Cli
 
 - [x] Port the independent selection policy from 3x-ui.
 - [x] Add network-generation isolation, manual mode and deterministic tests.
-- [ ] Integrate with the existing URLTest/Selector and platform network lifecycle.
+- [x] Add a typed URLTest/Selector adapter candidate and independent race-test workflow.
+- [ ] Wire the adapter into the actual URLTest/Selector and platform network lifecycle.
 - [ ] Define versioned opt-in 3x-ui configuration and diagnostics interface.
 - [ ] Validate candidate builds and real network behavior before promotion.

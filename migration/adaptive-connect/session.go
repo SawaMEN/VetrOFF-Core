@@ -94,3 +94,14 @@ func (s *Session) ConfirmActive(generation uint64, now time.Time, active string)
 	defer s.mu.Unlock()
 	return generation == s.generation && s.selector.Confirm(now, active)
 }
+
+// Invalidate discards evidence after a rejected activation without counting it
+// as a completed probe. All subsequent success streaks must start afresh.
+func (s *Session) Invalidate(generation uint64, id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if generation != s.generation { return }
+	s.selector.mu.Lock()
+	defer s.selector.mu.Unlock()
+	delete(s.selector.health,id)
+}

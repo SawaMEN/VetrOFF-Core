@@ -1,0 +1,22 @@
+name: Adaptive Connect candidate
+on:
+  push:
+    branches: [Anti-DPI]
+    paths:
+      - 'migration/adaptive-connect/**'
+      - 'scripts/test-adaptive-connect.sh'
+      - '.github/workflows/adaptive-connect.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - run: bash scripts/test-adaptive-connect.sh
