@@ -28,5 +28,6 @@ Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Cli
 - [x] Add network-generation isolation, manual mode and deterministic tests.
 - [x] Add a typed URLTest/Selector adapter candidate and independent race-test workflow.
 - [ ] Wire the adapter into the actual URLTest/Selector and platform network lifecycle.
-- [ ] Define versioned opt-in 3x-ui configuration and diagnostics interface.
+- [x] Define versioned opt-in policy v1 and strict decoder.
+- [ ] Wire policy import into the app/core lifecycle and define diagnostics interface.
 - [ ] Validate candidate builds and real network behavior before promotion.

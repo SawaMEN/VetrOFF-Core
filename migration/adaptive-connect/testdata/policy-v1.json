@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "enabled": false,
+  "failureThreshold": 2,
+  "recoveryThreshold": 3,
+  "cooldownSeconds": 30,
+  "maxAgeSeconds": 90,
+  "failback": false
+}
