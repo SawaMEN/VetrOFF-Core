@@ -134,6 +134,18 @@ probe() {
   cd "$mdns"
   CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=4m -run 'Session|Runtime' ./internal/client
 ) 2>&1 | tee "$report/combined-masterdns-session.log" || failed=1
+# Exercise the remaining two updated nested modules in isolation, using
+# deterministic, local tests for cached connections and resolver discovery.
+(
+  cd "$candidate/hiddify-sing-box/replace/sing"
+  CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=5m \
+    ./common/bufio ./common/canceler ./protocol/socks
+) 2>&1 | tee "$report/combined-sing-library.log" || failed=1
+(
+  cd "$candidate/hiddify-sing-box/replace/soar"
+  CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=4m \
+    -run '^(TestDiscoveryList|TestDiscoveryListUnmapsIPv4MappedResolvers|TestCloseWakesAllBlockedReaders|TestConcurrentReadersAllSeeDataAndEOF|TestFragmentedReassemblyIsBounded)$' .
+) 2>&1 | tee "$report/combined-soar-library.log" || failed=1
 probe core-modules go list -mod=mod -m all
 probe core-cli go build -mod=mod -trimpath -buildvcs=false -tags "$tags" -ldflags '-checklinkname=0' -o "$candidate/vetroff-core-probe" ./cmd/main
 probe core-tests go test -mod=mod -count=1 -timeout=6m -tags "$tags" -ldflags '-checklinkname=0' ./v2/config ./v2/hcore ./v2/hcore/adminbgservice
