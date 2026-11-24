@@ -800,3 +800,21 @@ unit test. No production policy, stable pins or conflict count changes.
 The module graph report still shows shared version/replacement differences
 (including AmneziaWG), requiring review before manifest promotion.
 New Core test changes are pending CI; 205/210 source conflicts reviewed.
+
+### Reconcile effective AWG v1 and OpenVPN source pins
+
+Combined run 45496243183 recorded 1195, 1034 and 1041 non-main modules
+in Core, sing-box and the test main module respectively, with 45 shared
+selection differences. Go only honors replace directives in the main
+module. The legacy AWG v1 module was unreplaced in Core but used the
+reviewed hiddifydeveloper revision in sing-box and tests. Add that exact
+replacement in Core (v3 still uses the existing local checkout). Mirror
+Core's existing OpenVPN source pin into sing-box and the test module;
+these already selected that same revision, so this is explicit locking.
+Preserve all original requirements and other replacements. Validate Go's
+parsed replacement map as well as requirements. Audit actual source
+identity separately from nominal versions, and enforce both reviewed
+source pins across all three graphs. Two new verifier unit tests cover
+source identity and missing/mismatched pin detection. Other shared source
+differences remain diagnostic, not silently upgraded. Candidate only;
+new integration results and stable manifest promotion remain pending.

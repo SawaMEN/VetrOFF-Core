@@ -110,6 +110,25 @@ def merge(component):
         # Preserve every active fork replacement, including native/vendored modules.
         # If a shared replacement was changed only by upstream, take its change.
         replacements[key] = (c if b == a and c is not None else b) or c
+    # Go ignores replacements in dependency modules. Mirror the reviewed
+    # legacy AWG v1 replacement into Core, and its existing OpenVPN pin
+    # into sing-box; the test main module inherits the sing-box candidate.
+    # Keep v3 AWG and all local/vendored replacements unchanged.
+    reviewed_cross_module = {}
+    if component == "hiddify-core":
+        key = "github.com/amnezia-vpn/amneziawg-go"
+        target = "github.com/hiddifydeveloper/amneziawg-go v0.0.0-20261001141816-70b344f2f78b"
+        assert key not in replacements and merged[key][0] == "v1.0.4"
+        reviewed_cross_module[key] = target
+    else:
+        key = "github.com/sagernet/sing-openvpn"
+        target = "github.com/sagernet/sing-openvpn v0.0.0-20260903200517-e060dda5b1f1"
+        assert key not in replacements and merged[key][0] == target.split()[1]
+        reviewed_cross_module[key] = target
+        # Check the original AWG replacement before depending on its identity.
+        assert replacements["github.com/amnezia-vpn/amneziawg-go"] == "github.com/hiddifydeveloper/amneziawg-go v0.0.0-20261001141816-70b344f2f78b"
+    assert not set(reviewed_cross_module) & set(replacements)
+    replacements.update(reviewed_cross_module)
     directives = dict(fork["directives"])
     assert directives["module"] == upstream["directives"]["module"]
     assert directives["godebug"] == upstream["directives"]["godebug"] == "multipathtcp=0"
@@ -128,7 +147,7 @@ def merge(component):
     validated = parse(candidate)
     assert validated["require"] == merged and validated["replace"] == replacements
     assert set(fork["require"]) | set(upstream["require"]) == set(merged)
-    assert set(fork["replace"]) | set(upstream["replace"]) == set(replacements)
+    assert set(fork["replace"]) | set(upstream["replace"]) | set(reviewed_cross_module) == set(replacements)
     for key in ("github.com/xtls/xray-core", "github.com/metacubex/utls", "github.com/sagernet/sing-vmess"):
         assert replacements[key] == fork["replace"][key]
     assert "github.com/SawaMEN/VetroffProxy" in merged
@@ -141,8 +160,15 @@ def merge(component):
     assert go["Go"] == directives["go"]
     actual_require = {x["Path"]:(x["Version"],x.get("Indirect", False)) for x in go["Require"]}
     assert actual_require == merged
+    actual_replace = {
+        " ".join(filter(None, (entry["Old"]["Path"], entry["Old"].get("Version")))):
+        " ".join(filter(None, (entry["New"]["Path"], entry["New"].get("Version"))))
+        for entry in go["Replace"]
+    }
+    assert actual_replace == replacements
     summary = {"component":component,"requirements":len(merged),"replacements":len(replacements),
                "reviewed_version_choices":reviewed,
+               "reviewed_cross_module_replacements":reviewed_cross_module,
                "status":"candidate; combined build and dependency API review still required"}
     (report / (component + "-dependency-candidate.json")).write_text(json.dumps(summary, indent=2)+"\n")
     print(f'{component}: dependency candidate validated, {len(merged)} requirements, '

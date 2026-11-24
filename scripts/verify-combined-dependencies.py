@@ -76,6 +76,45 @@ def differences(graphs):
     return result
 
 
+# The selected version of a replaced module is not the source identity.
+# Compare the actual source rather than treating a local replacement's
+# nominal version difference as distinct code.
+def source_identity(path, entry):
+    replacement = entry["replace"]
+    if replacement is not None:
+        return replacement
+    return {"path": path, "version": entry["version"]}
+
+
+CROSS_MODULE_PINS = {
+    "github.com/amnezia-vpn/amneziawg-go": {
+        "path": "github.com/hiddifydeveloper/amneziawg-go",
+        "version": "v0.0.0-20261001141816-70b344f2f78b",
+    },
+    "github.com/sagernet/sing-openvpn": {
+        "path": "github.com/sagernet/sing-openvpn",
+        "version": "v0.0.0-20260903200517-e060dda5b1f1",
+    },
+}
+
+
+def verify_cross_module_pins(graphs):
+    for path, expected in CROSS_MODULE_PINS.items():
+        for name in MODULES:
+            if name not in graphs or path not in graphs[name]:
+                raise ValueError(f"{name}: missing cross-module pin {path}")
+            actual = source_identity(path, graphs[name][path])
+            if actual != expected:
+                raise ValueError(f"{name}: {path}: expected {expected}, got {actual}")
+
+
+def source_differences(graphs):
+    sources = {name: {path: source_identity(path, entry)
+                      for path, entry in graph.items()}
+               for name, graph in graphs.items()}
+    return differences(sources)
+
+
 def collect(root, report):
     root, report = root.resolve(), report.resolve()
     if root.parent != report.parent or not root.name.startswith("combined-candidate."):
@@ -106,11 +145,18 @@ def collect(root, report):
                     data = source.read_bytes()
                     Path(str(prefix) + "." + filename).write_bytes(data)
                     snapshots[name][filename] = hashlib.sha256(data).hexdigest()
+    if not errors:
+        try:
+            verify_cross_module_pins(graphs)
+        except ValueError as exc:
+            errors["cross_module_pins"] = str(exc)
     report_data = {
-        "status": "failed" if errors else "replacement checks passed; version differences require review",
+        "status": "failed" if errors else "replacement and reviewed cross-module pins passed; other source differences require review",
         "module_counts": {name: len(graph) for name, graph in graphs.items()},
         "manifest_sha256": snapshots,
         "shared_module_differences": differences(graphs),
+        "shared_source_differences": source_differences(graphs),
+        "reviewed_cross_module_pins": CROSS_MODULE_PINS,
         "errors": errors,
     }
     (report / "combined-effective-dependencies.json").write_text(
@@ -150,6 +196,28 @@ class GraphTests(unittest.TestCase):
         self.assertIsNone(verify_graph(graph, manifest, root, root)["dep"]["replace"])
         with self.assertRaises(ValueError):
             verify_graph({"dep": {"Version": "v1.0.0"}}, manifest, root, root)
+
+    def test_source_identity(self):
+        replacement = {"local": "hiddify-sing-box/replace/sing"}
+        graphs = {"core": {"dep": {"version": "v1", "replace": replacement}},
+                  "sing": {"dep": {"version": "v2", "replace": replacement}}}
+        self.assertEqual(set(differences(graphs)), {"dep"})
+        self.assertEqual(source_differences(graphs), {})
+        graphs["sing"]["dep"]["replace"] = None
+        self.assertEqual(set(source_differences(graphs)), {"dep"})
+
+    def test_cross_module_pins(self):
+        graphs = {name: {path: {"version": "v1", "replace": expected}
+                         for path, expected in CROSS_MODULE_PINS.items()}
+                  for name in MODULES}
+        verify_cross_module_pins(graphs)
+        path = "github.com/amnezia-vpn/amneziawg-go"
+        graphs["hiddify-core"][path]["replace"] = None
+        with self.assertRaises(ValueError):
+            verify_cross_module_pins(graphs)
+        del graphs["hiddify-core"][path]
+        with self.assertRaises(ValueError):
+            verify_cross_module_pins(graphs)
 
     def test_differences(self):
         graphs = {"core": {"dep": {"version": "v1"}, "only": {}},
