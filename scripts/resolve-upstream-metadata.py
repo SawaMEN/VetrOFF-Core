@@ -892,7 +892,8 @@ assert marker in new and marker not in own
 before = new[:new.index(marker)].rstrip()
 # All old speed tests are retained; the only preceding edits are imports.
 extra_imports = b'\n\t"github.com/sagernet/sing-box/adapter"\n\t"github.com/sagernet/sing-box/adapter/outbound"\n\tC "github.com/sagernet/sing-box/constant"\n\t"github.com/stretchr/testify/require"'
-assert before.replace(extra_imports, b"").rstrip() == own.rstrip()
+assert before.count(extra_imports) == 1
+assert [line for line in before.replace(extra_imports, b"").splitlines() if line.strip()] == [line for line in own.splitlines() if line.strip()]
 resolutions[path] = new
 
 apply_reviewed(data, resolutions, core_clean)
