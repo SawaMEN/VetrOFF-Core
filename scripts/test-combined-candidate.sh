@@ -151,6 +151,7 @@ probe core-cli go build -mod=mod -trimpath -buildvcs=false -tags "$tags" -ldflag
 probe core-tests go test -mod=mod -count=1 -timeout=6m -tags "$tags" -ldflags '-checklinkname=0' ./v2/config ./v2/hcore ./v2/hcore/adminbgservice
 cd "$candidate/hiddify-sing-box"
 probe sing-modules go list -mod=mod -m all
+probe route-regressions bash "$ROOT/scripts/test-reviewed-route.sh" --combined "$candidate/hiddify-sing-box"
 # Test the paired library and callers with the feature tags enabled.
 CGO_ENABLED=1 probe tailscale go test -race -mod=mod -count=1 -timeout=5m \
   -tags with_tailscale,with_tailcat -ldflags '-checklinkname=0' ./protocol/tailscale/...
