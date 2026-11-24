@@ -423,3 +423,21 @@ returning unknown-user errors and closes a connection discarded after a
 failed request write. The reviewed-protocol test overlay now includes the
 tunnel package and its queue regression under the race detector. The newer
 source audit and runtime tests are pending. Stable pins remain unchanged.
+
+### Router and network reset lifecycle
+
+Audits 45480994448 and 45481191194 passed the reviewed-source gate;
+43/44 Core and 136/166 sing-box resolutions are now source-confirmed.
+The next candidate resolves route/network.go and route/router.go together.
+The network manager uses the lifecycle scope context, unregisters interface
+callbacks and closes monitors, and forwards network resets to the router's
+DNS/HTTP/process caches without recursive resets. The router no longer
+initializes a second neighbor resolver, and registers process searcher
+cleanup. DNS flush retains the fork monitoring notification in addition
+to native inbound cache flushing. Interface dispatch skips canceled scopes.
+A separate CI step runs the upstream network reset/DNS group regression
+under the race detector, with a temporary overlay and locked dependencies.
+Expected count: 43/44 Core and 138/166 sing-box (181/210; 29 remaining).
+179 source resolutions confirmed, two pending. route/conn.go remains open:
+read/wake pacing changes require dedicated regressions, including the two
+previously failing pacing tests. Stable pins remain unchanged.
