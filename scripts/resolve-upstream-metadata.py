@@ -794,6 +794,107 @@ assert b"func Reload(" in new
 assert b"func Authenticate(" in new
 resolutions[path] = new
 
+# Diagnostics: the two implementations serve distinct RPCs. Retain the
+# fork's bounded, cancellable probe and IP lookup alongside upstream's
+# report export. Keep service and context from one running snapshot.
+path = "v2/hcore/diagnostics.go"
+own = checked_blob(patched, path, "f40b90bebfc4f0429046b828f2c1791d2634b9b3")
+new = checked_blob(upstream, path, "000af39f5558c4ed3e618cdb9383353f32d80357")
+candidate = new
+lifecycle_edit(b'\t"io"\n', b'\t"io"\n\t"net"\n\t"net/http"\n\t"net/url"\n')
+lifecycle_edit(b'\t"github.com/sagernet/sing-box/experimental/libbox"\n', b'\t"github.com/sagernet/sing-box/adapter"\n\t"github.com/sagernet/sing-box/experimental/libbox"\n\t"github.com/sagernet/sing-box/hiddify/ipinfo"\n\tM "github.com/sagernet/sing/common/metadata"\n\t"google.golang.org/grpc/codes"\n\t"google.golang.org/grpc/status"\n')
+probe = own[own.index(b"func selectedOutbound("):]
+assert all(name not in new for name in (b"func selectedOutbound(", b"func validateProbeRequest(", b"func readProbeDownload(", b"func (s *CoreService) ProbeConnection(", b"func (s *CoreService) GetCurrentIpInfo("))
+candidate = candidate.rstrip() + b"\n\n" + probe
+lifecycle_edit(b"\tif instance == nil {\n\t\treturn nil, nil, nil, status.Error(codes.FailedPrecondition, \"VPN is stopped\")\n\t}", b"\tif instance == nil || instance.Box() == nil || instance.Context() == nil {\n\t\treturn nil, nil, nil, status.Error(codes.FailedPrecondition, \"VPN is stopped\")\n\t}")
+lifecycle_edit(b"slices.Contains(running, static.CoreState)", b"slices.Contains(running, currentCoreState())")
+lifecycle_edit(b"static.CoreState.String()", b"currentCoreState().String()")
+marker = b"\tpath, encrypted, err := exportDiagnostics(sWorkingPath, sTempPath, req)"
+lifecycle_edit(marker, b'\tif req == nil {\n\t\treturn nil, status.Error(codes.InvalidArgument, "missing diagnostics request")\n\t}\n' + marker)
+assert b"downloadProbeGate" in candidate and b"maxProbeDownload" in candidate
+assert b"encryptDirectory(" in candidate and b"writeSensitiveFiles(" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# Proxy info: retain the readiness-only fork interface, while adopting
+# upstream's on-demand conversion, resting status and stream deduplication.
+# Keep the fork's explicit extra-security entry in the full selector list.
+path = "v2/hcore/proxy_info.go"
+own = checked_blob(patched, path, "c0bee6976d82436e46c2d6d9901b83eb4e6ac326")
+new = checked_blob(upstream, path, "40b419c46288ec610b681ebd038c1eaffe339dae")
+candidate = new
+lifecycle_edit(b"Status(detour.Status())", b"Status(adapter.OutboundStatus(detour))")
+lifecycle_edit(b'\t"github.com/sagernet/sing-box/common/monitoring"\n', b'\t"github.com/sagernet/sing-box/common/monitoring"\n\tC "github.com/sagernet/sing-box/constant"\n')
+lifecycle_edit(b"\t\tif it, loaded := box.Outbound().Outbound(tag); loaded { // an outbound, or an endpoint", b"\t\tit, loaded := box.Outbound().Outbound(tag)\n\t\tif !loaded {\n\t\t\tif endpoint, ok := box.Endpoint().Get(tag); ok {\n\t\t\t\tit, loaded = endpoint, true\n\t\t\t}\n\t\t}\n\t\tif loaded {")
+# The same cached info may be used in several groups. Per-group fields
+# must not mutate another group's selection or the cached chain display.
+lifecycle_edit(b"\t\t\tpinfo.IsSelected = itemTag == selectedTag", b"\t\t\tpinfo = proto.Clone(pinfo).(*OutboundInfo)\n\t\t\tpinfo.IsSelected = itemTag == selectedTag")
+marker = b"\t\tgroups.Items = append(groups.Items, &group)"
+lifecycle_edit(marker, b'''		if group.Tag == config.OutboundSelectTag && !onlyGroupitems {
+			entryInfos := make(map[string]*OutboundInfo)
+			addEntry := func(tag string) {
+				if config.IsChainExtraSecurityTag(tag) || tag == selectedTag {
+					if info := infoOf(tag); info != nil {
+						entryInfos[tag] = proto.Clone(info).(*OutboundInfo)
+					}
+				}
+			}
+			addEntry(selectedTag)
+			for _, out := range box.Outbound().Outbounds() {
+				addEntry(out.Tag())
+			}
+			for _, endpoint := range box.Endpoint().Endpoints() {
+				addEntry(endpoint.Tag())
+			}
+			showEntryHop(&group, entryInfos, func(tag string) string {
+				if out, ok := box.Outbound().Outbound(tag); ok {
+					return C.ProxyDisplayName(out.Type())
+				}
+				if ep, ok := box.Endpoint().Get(tag); ok {
+					return C.ProxyDisplayName(ep.Type())
+				}
+				return TrimTagName(tag)
+			})
+		}
+
+''' + marker)
+helper = lifecycle_section(own, b"// showEntryHop", b"func TrimTagName(")
+lifecycle_edit(b"func TrimTagName(", helper + b"func TrimTagName(")
+lifecycle_edit(b"if config.IsChainExtraSecurityTag(tag) && (entry == nil || tag < entry.Tag)", b"if candidate != nil && config.IsChainExtraSecurityTag(tag) && (entry == nil || tag < entry.Tag)")
+assert b"proto.Equal(sent, info)" in candidate
+assert b"monitor.KeepTopPicking()" in candidate
+assert b"ev.Priority" in candidate
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "v2/hcore/proxy_info_test.go"
+own = checked_blob(patched, path, "65dbd61400ee1a3d717c8149acd96860e98973f9")
+new = checked_blob(upstream, path, "78a372760890d41911b3b083a1c36325ec0f93e9")
+# The fork's readiness method is the only source difference.
+readiness = [line for line in own.splitlines(keepends=True) if b"func (g *fakeGroup) IsReady()" in line]
+assert len(readiness) == 1 and own.replace(readiness[0], b"") == new
+resolutions[path] = own
+
+# Speed tests: avoid repeatedly measuring every member of auto-selected
+# groups, skip parked proxies for bulk tests, retain direct tagged tests.
+path = "v2/hcore/speedtest.go"
+own = checked_blob(patched, path, "90017d4d1fcbfe6ad4507970f08e2334ecc8731a")
+new = checked_blob(upstream, path, "3d5c8b7b499a8a61568c5c7ff848a6d1b25236a9")
+candidate = new
+assert b"box, ctx := h.running()" in candidate
+assert b"speedTestTargets(outbound, box.Outbound().Outbound, proxyRests" in candidate
+lifecycle_edit(b"if tag := member(group.Tag()); tag != group.Tag() {", b"if tag := member(group.Tag()); tag != group.Tag() && !rests(tag) {")
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+path = "v2/hcore/speedtest_test.go"
+own = checked_blob(patched, path, "e4a69d6444cbee5a533b93f6f9abccf8a287be56")
+new = checked_blob(upstream, path, "64ce3047dbefeff62f3a57df20ebaadeba62545a")
+marker = b"type speedGroup struct {"
+assert marker in new and marker not in own
+before = new[:new.index(marker)].rstrip()
+# All old speed tests are retained; the only preceding edits are imports.
+extra_imports = b'\n\t"github.com/sagernet/sing-box/adapter"\n\t"github.com/sagernet/sing-box/adapter/outbound"\n\tC "github.com/sagernet/sing-box/constant"\n\t"github.com/stretchr/testify/require"'
+assert before.replace(extra_imports, b"").rstrip() == own.rstrip()
+resolutions[path] = new
+
 apply_reviewed(data, resolutions, core_clean)
 
 repo = repo / "hiddify-sing-box"
