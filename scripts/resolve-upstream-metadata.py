@@ -3737,6 +3737,19 @@ for path, sha, edits in (
         lifecycle_edit(before, after, count)
     compat[path] = subprocess.check_output(["gofmt"], input=candidate)
 
+# The fork had inlined this queue bound in its router constructor.
+# The merged constructor uses the upstream named constant; retain it
+# even when dns.go has no textual merge conflict.
+path = "route/dns.go"
+own = checked_blob(data["patched_tree"], path, "be34ce1c5b5379c3ea9b90679bcf491527f9d158")
+new = checked_blob(data["upstream"], path, "3ff0f74e22728daf0c12f5375c12d4b8e503e345")
+candidate = git("show", data["tentative_tree"] + ":" + path)
+assert candidate in (own, new)
+assert b"case r.dnsHijackSlots <- struct{}{}:" in candidate
+if b"const dnsHijackConcurrency" not in candidate:
+    lifecycle_edit(b"func (r *Router) HijackDNSPacket(", b"const dnsHijackConcurrency = 256 // H\n\nfunc (r *Router) HijackDNSPacket(")
+    compat[path] = subprocess.check_output(["gofmt"], input=candidate)
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"
