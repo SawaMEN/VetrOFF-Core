@@ -263,7 +263,127 @@ candidate = new.replace(b"Content: oneProxyProfile", b"Content: chainTestProfile
 marker = b"\nconst ports ="
 assert candidate.count(marker) == 1
 assert candidate.replace(marker, regression + marker, 1) == own
-resolutions[path] = subprocess.check_output(["gofmt"], input=own)
+# Add focused regressions to the existing port test file. The real config
+# package test uses the merged options and the original locked dependencies.
+candidate = own.replace(b'import (\n', b'import (\n\t"encoding/json"\n\t"strings"\n', 1)
+candidate += b'''
+func TestVetrOFFMergedOptionsJSON(t *testing.T) {
+	opts := DefaultHiddifyOptions()
+	data := []byte("{\\\"lan-sharing-password\\\":\\\"secret\\\",\\\"local-proxy-auth\\\":true,\\\"wifi-vpn-sharing\\\":true,\\\"keep-top\\\":3,\\\"keep-top-batch\\\":7,\\\"keep-top-quick\\\":true,\\\"keep-top-countries\\\":[\\\"DE\\\"],\\\"keep-top-pinned\\\":[\\\"a\\\"],\\\"delegate-system-proxy\\\":true,\\\"log-level-until\\\":\\\"2026-11-25T00:00:00Z\\\",\\\"log-level-after\\\":\\\"warn\\\"}")
+	if err := json.Unmarshal(data, opts); err != nil {
+		t.Fatal(err)
+	}
+	if opts.LanSharingPassword != "secret" || !opts.LocalProxyAuth || !opts.WifiVPNSharing ||
+		opts.KeepTop != 3 || opts.KeepTopBatch != 7 || !opts.KeepTopQuick ||
+		len(opts.KeepTopCountries) != 1 || opts.KeepTopCountries[0] != "DE" ||
+		len(opts.KeepTopPinned) != 1 || opts.KeepTopPinned[0] != "a" ||
+		!opts.DelegateSystemProxy || opts.LogLevelUntil == "" || opts.LogLevelAfter != "warn" {
+		t.Fatal("merged options lost configured values")
+	}
+	encoded, err := json.Marshal(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(encoded), "\\\"lan-sharing-password\\\"") != 1 {
+		t.Fatal("LAN password JSON field was duplicated or lost")
+	}
+	var roundTrip HiddifyOptions
+	if err := json.Unmarshal(encoded, &roundTrip); err != nil || roundTrip.LanSharingPassword != "secret" {
+		t.Fatal("LAN password failed to round trip")
+	}
+}
+
+func TestVetrOFFKeepTopNumericOverrides(t *testing.T) {
+	opts := GetOverridableHiddifyOptions(map[string][]string{
+		"keep-top": {"3"}, "keep-top-batch": {"-1"}, "keep-top-quick": {"true"},
+		"mux.max-streams": {"12"},
+	})
+	if opts.KeepTop != 3 || opts.KeepTopBatch != -1 || !opts.KeepTopQuick || opts.Mux.MaxStreams != 12 {
+		t.Fatal("numeric or boolean subscription overrides were lost")
+	}
+}
+'''
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# HiddifyOptions: use the fork's field names and retain every fork JSON
+# setting. Import the new upstream settings as exact reviewed blocks.
+path = "v2/config/hiddify_option.go"
+own = checked_blob(patched, path, "79ef4deb62e0c00f7632d0fd4acb035377945828")
+new = checked_blob(upstream, path, "6b47205d0d7751963caac6bf677bf9ca14a1596b")
+candidate = own
+def core_insert(anchor, payload):
+    global candidate
+    assert candidate.count(anchor) == 1, anchor
+    candidate = candidate.replace(anchor, payload + anchor, 1)
+
+def core_section(start, end):
+    i = new.index(start)
+    return new[i:new.index(end, i)]
+
+core_insert(b"\tLogFile ", core_section(b"\tLogLevelUntil ", b"\tLogFile "))
+start = b"\t// KeepTop, when above 0,"
+end = b"\t// KeepTags are the tags"
+old_keep = candidate[candidate.index(start):candidate.index(end)]
+assert b"\tKeepTop int " in old_keep
+candidate = candidate.replace(old_keep, core_section(start, end), 1)
+core_insert(b"\tMixedPort ", core_section(b"\t// DelegateSystemProxy ", b"\tMixedPort "))
+core_insert(b"}\n\ntype URLTestOptions", core_section(b"\t// RouterMode ", b"}\n\ntype URLTestOptions"))
+
+# Integer overrides were parsed to int64/uint64 and silently ignored for
+# Go int/uint16/duration fields. Assign directly only when representable.
+for kind, parse, overflow, setter in (
+    (b"int", b"parseInt", b"OverflowInt", b"SetInt"),
+    (b"uint", b"parseUint", b"OverflowUint", b"SetUint"),
+):
+    name = kind + b"Val"
+    before = b"\t\t\t\t\tif " + name + b", err := " + parse + b"(overrideValue); err == nil {\n\t\t\t\t\t\tparsedValue = reflect.ValueOf(" + name + b")\n\t\t\t\t\t}"
+    after = b"\t\t\t\t\tif " + name + b", err := " + parse + b"(overrideValue); err == nil && !field." + overflow + b"(" + name + b") {\n\t\t\t\t\t\tfield." + setter + b"(" + name + b")\n\t\t\t\t\t}"
+    assert candidate.count(before) == 1
+    candidate = candidate.replace(before, after, 1)
+
+# Verify per-struct field inventories, including the embedded inbound
+# settings, so a duplicate JSON key cannot silently shadow the password.
+import re
+def core_fields(blob):
+    result = {}
+    for name, body in re.findall(rb"type (\w+) struct \{\n(.*?)\n\}", blob, re.S):
+        fields = {}
+        for field, typ, tag in re.findall(rb"^\t(\w+)\s+([^" + bytes([96]) + rb"\n]+?)\s+" + bytes([96]) + rb'json:"([^"]+)"', body, re.M):
+            key = tag.split(b",")[0]
+            assert key not in fields, (name, key)
+            fields[key] = (field, typ.strip(), tag)
+        result[name] = fields
+    return result
+
+fork_fields, upstream_fields, merged_fields = map(core_fields, (own, new, candidate))
+assert set(merged_fields) == set(fork_fields) == set(upstream_fields)
+for name, fields in fork_fields.items():
+    official = dict(upstream_fields[name])
+    if name == b"InboundOptions":
+        del official[b"lan-sharing-password"] # fork stores it in HiddifyOptions
+    assert merged_fields[name] == {**official, **fields}, name
+assert candidate.count(b'json:"lan-sharing-password,omitempty"') == 1
+resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
+
+# KeepTop config helper and its tests: the new implementation is a strict
+# extension of the locked helper. Verify all old functions and test bodies.
+path = "v2/config/keep_top.go"
+own = checked_blob(patched, path, "72d0c4e09234dc02c5d9fe560be2914f66da4bbf")
+new = checked_blob(upstream, path, "9d755c09f6fcd05b1ca9d2020949c4295bff6e23")
+plain = new[:new.index(b"// lazyTypes")] + new[new.index(b"// ChosenProxies"):]
+plain = plain.replace(b'\t"time"\n', b"").replace(b'\t"github.com/sagernet/sing/common/json/badoption"\n', b"")
+plain = plain[:plain.index(b"// With keep-top")] + own[own.index(b"// With keep-top"):own.index(b"// UserProxyTags")] + plain[plain.index(b"// UserProxyTags"):]
+assert plain == own, path
+resolutions[path] = new
+
+path = "v2/config/keep_top_test.go"
+own = checked_blob(patched, path, "36e89e9475e7e07398722c2555f6b3158ba8b7fd")
+new = checked_blob(upstream, path, "67bb41702fee5ecb91f6797db340a400f9c48299")
+plain = new[:new.index(b"\nconst keepTopEndpointsProfile")]
+for imp in (b"fmt", b"time", b"github.com/sagernet/sing/common/json/badoption"):
+    plain = plain.replace(b'\t"' + imp + b'"\n', b"")
+assert plain == own, path
+resolutions[path] = new
 
 apply_reviewed(data, resolutions)
 
