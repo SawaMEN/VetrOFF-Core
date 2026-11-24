@@ -24,6 +24,7 @@ def git(*args):
 # Tailscale library. Each reviewed replacement is restricted to the
 # exact locked blob and exact upstream blob, not a blanket checkout.
 specs = [
+    ("protocol/tailscale/tailcat_inbound.go", "3ddef2f8622af9e824a4696b09bc68d0f1370b9a", "2be55c6309f4b67bf2cf9c1c98475ba739bc3f2c"),
     ("protocol/tailscale/endpoint.go", "62d8d7de2522fc2fde9eacbe4aaa144c135dc20a", "b4a699ec062daae920375fbb7d9fc5c292a70d74"),
     ("protocol/tailscale/system_binding.go", "656d4141896a9c512acbf971747f302783a8c40e", "e68185f07d90cbd675e3d37321b42e20e47bb066"),
     ("protocol/tailscale/port.go", "aa5b3667064375d2ff5a06222e95a3b6f8d5ff53", "fb382504e3cdc626ea0abac7e0920a730465f89d"),
@@ -42,6 +43,20 @@ for path, old, new in specs:
     elif path.endswith("/taildrop_send.go"):
         candidate = own.replace(b"localBackend.ExportSelf()", b"nodeBackend.Self()").replace(b"localBackend.ExportPeers()", b"nodeBackend.Peers()")
         candidate = candidate.replace(b'!peer.Valid() || peer.Hostinfo().OS()', b'!peer.Valid() || !peer.Hostinfo().Valid() || peer.Hostinfo().OS()')
+        assert candidate == official
+    elif path.endswith("/tailcat_inbound.go"):
+        # The stable adapter already uses scoped inbound lifecycles. Restore
+        # upstream Start(stage, scope), preserving routing/user/key behavior.
+        candidate = own.replace(
+            b"Start(stage adapter.StartStage) error",
+            b"Start(stage adapter.StartStage, scope *adapter.Scope) error")
+        candidate = candidate.replace(b"Context:      i.ctx,", b"Context:      scope.Context(),")
+        candidate = candidate.replace(
+            b"\terr = node.start()\n\tif err != nil {\n\t\tnode.close()\n\t\treturn err\n\t}",
+            b"\tscope.Add(func() error {\n\t\tnode.close()\n\t\treturn nil\n\t})\n\terr = node.start()\n\tif err != nil {\n\t\treturn err\n\t}")
+        close = b"func (i *TailcatInbound) Close() error {\n\tif i.node != nil {\n\t\ti.node.close()\n\t\ti.node = nil\n\t}\n\treturn nil\n}\n\n"
+        assert candidate.count(close) == 1
+        candidate = candidate.replace(close, b"")
         assert candidate == official
     elif path.endswith("/endpoint.go"):
         # Preserve fork HTTP transport, lifecycle and platform behavior;
@@ -117,6 +132,12 @@ git -C "$ts" diff --stat "$old" "$new" > "$report/tailscale-tree-diff.txt"
 # dependencies remain locked so any further required API changes are visible.
 git -C "$ts" checkout --detach "$new"
 assert_sha "$ts" "$new"
+# Verify build-tag selection, so Tailcat cannot silently disappear from
+# the migration check even if its package still compiles without the tag.
 cd "$sing"
+go list -mod=mod -tags with_tailscale,with_tailcat -f '{{range .GoFiles}}{{println .}}{{end}}' ./protocol/tailscale > "$report/tailscale-candidate-files.txt"
+grep -Fxq tailcat_inbound.go "$report/tailscale-candidate-files.txt"
+grep -Fxq tailcat_outbound.go "$report/tailscale-candidate-files.txt"
+grep -Fxq tailcat_node.go "$report/tailscale-candidate-files.txt"
 CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=5m -tags with_tailscale,with_tailcat -ldflags '-checklinkname=0' \
   ./protocol/tailscale/... 2>&1 | tee "$report/tailscale-candidate-test.log"

@@ -66,3 +66,11 @@ the exported engine used by filtering/packet I/O, restores the full system
 binding/default-route hook, and explicitly enables both with_tailscale and
 with_tailcat build tags. These changes are not yet an approved dependency
 migration; compilation and runtime regressions still gate promotion.
+
+Run 45445885849 passed the transport race tests and stable build, but the
+explicit Tailcat tag uncovered an inbound lifecycle mismatch. The probe now
+restores the exact upstream scoped Tailcat inbound lifecycle (including
+cleanup registration before node startup) and asserts the expected Tailcat
+source files are included by the build tags. The outbound legacy lifecycle
+is retained; it uses the existing outbound adapter interface. No stable
+source pin has changed. Candidate runtime tests still gate promotion.
