@@ -328,3 +328,20 @@ once, after closing the service. The updated candidate must still pass
 source verification and integrated builds; the generated RPC schemas,
 admin service and mobile wrappers are not yet reconciled. Stable pins
 remain unchanged.
+
+### Protobuf and elevated service reconciliation
+
+Run 45476707575 passed the reviewed-source gate for gRPC and service
+commands. The next candidate replays only the five protobuf source and
+generated files from the verified historical Core checkpoint, checks their
+exact blob IDs and verifies that the schema contains the union of both
+current source inventories (wire numbers, field types, RPC signatures).
+This avoids editing generated code by hand. Adopt upstream elevated
+service reload/restart and delegated proxy status, retain nonblocking
+liveness checks and both regression tests, and fail a new start when the
+previous engine could not be closed. Preserve the authenticated privileged
+RPC allowlist and the inline-only diagnostics guard, including generic
+files. Seven further conflict resolutions are submitted (31/44, expected
+13 remaining), plus the service schema clean-tree adjustment if needed.
+Schema verification and integrated build are pending; no stable pins
+have changed.
