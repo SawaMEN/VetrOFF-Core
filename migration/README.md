@@ -769,3 +769,16 @@ scoped audit 45494490133 reported an EdgeScan/WARP failure; its complete
 job log was not available yet. No speculative fix or stable pin change.
 205/210 source conflicts reviewed; five open. ROADMAP 36/53 including
 Adaptive Connect. Tailscale remains pending broader behavioral review.
+
+### Fix deterministic EdgeScan rating fixture and Tailscale workflow YAML
+
+Audit 45494490133 failed only at TestH_ScanRatesBlocks: the randomly
+sampled 16 candidates can all land in the same /24, leaving the other
+block's score at zero. Explicitly seed one answering and one failing
+address, cap the count at two, and assert a single result plus the original
+positive/negative scores. The production scanner is unchanged. Repeat the
+fixture 30 times under the race detector and require all PASS markers.
+Tailscale run 45495820645 had no jobs because the workflow YAML was
+corrupted by a previous string insertion; restore the exact anchored
+regex and preserve the original artifact upload step. Both fixes require
+fresh CI. No stable pins or source conflict counts changed.

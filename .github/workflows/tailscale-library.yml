@@ -53,12 +53,7 @@ jobs:
           cp migration/tailscale-tests/admission_test.go "$src/derp/derpserver/vetroff_admission_test.go"
           cp migration/tailscale-tests/return_path_test.go "$src/net/tstun/vetroff_return_path_test.go"
           cd "$src"
-          go test -race -mod=mod -count=1 -timeout=3m -run '^TestVetrOFF(StaticClientAdmission|ReturnPathValidation|InputRequiresDevice)        if: always()
-        with:
-          name: tailscale-library-evidence
-          path: .build/tailscale-evidence/
-          if-no-files-found: warn
- -v ./derp/derpserver ./net/tstun 2>&1 | tee ../tailscale-evidence/contracts.log
+          go test -race -mod=mod -count=1 -timeout=3m -run '^TestVetrOFF(StaticClientAdmission|ReturnPathValidation|InputRequiresDevice)$' -v ./derp/derpserver ./net/tstun 2>&1 | tee ../tailscale-evidence/contracts.log
           for name in TestVetrOFFStaticClientAdmission TestVetrOFFReturnPathValidation TestVetrOFFInputRequiresDevice; do
             grep -Fq -- "--- PASS: $name " ../tailscale-evidence/contracts.log
           done

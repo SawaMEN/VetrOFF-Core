@@ -3848,6 +3848,27 @@ for mtu_path, fork_sha, upstream_sha, edits in (
 assert re.search(rb"DisableMTUDiscovery\s+bool", git("show", data["tentative_tree"] + ":transport/wireguard/endpoint_options.go"))
 assert re.search(rb"MTUDiscovery\s+bool\s+", git("show", data["tentative_tree"] + ":option/awg.go"))
 
+
+# Audit 45494490133: random draws need not cover both /24 blocks in
+# sixteen attempts. Test rating, not the randomness of address sampling.
+path = "hiddify/edgescan/h_search_test.go"
+candidate = checked_blob(data["upstream"], path, "8748ec2b5f77c2333a08041d25f5de5a6c1a205d")
+assert git("show", data["tentative_tree"] + ":" + path) == candidate
+signature = b"func TestH_ScanRatesBlocks(t *testing.T)"
+original = function_blob(candidate, signature)
+updated = replace_once(original, b"Concurrency: 1, Count: 16,", b"Concurrency: 1, Count: 2,")
+updated = replace_once(updated, b"\t\tEnough:  16,", b"""\t\t// Explicitly exercise one successful and one failed probe. No random
+		// candidate is required to test how the two blocks are rated.
+		Seeds: []Target{
+			{AddrPort: netip.MustParseAddrPort("192.0.2.1:1")},
+			{AddrPort: netip.MustParseAddrPort("192.0.3.1:1")},
+		},
+		Enough: 2,""")
+updated = replace_once(updated, b"\t_, err := Scan(", b"\tresults, err := Scan(")
+updated = replace_once(updated, b"\trequire.NoError(t, err)\n", b"\trequire.NoError(t, err)\n\trequire.Len(t, results, 1)\n")
+assert b"require.Positive" in updated and b"require.Negative" in updated
+compat[path] = subprocess.check_output(["gofmt"], input=replace_once(candidate, original, updated))
+
 # This file merged cleanly at the textual level, but the AWG constructor
 # changed. Reconfigure the existing path instead of replacing a live one.
 path = "transport/awg/h_path_test.go"

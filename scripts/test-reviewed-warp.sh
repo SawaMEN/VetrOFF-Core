@@ -34,5 +34,10 @@ PY
 cd "$sing"
 CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=4m -ldflags '-checklinkname=0' \
   ./hiddify/edgescan 2>&1 | tee "$report/edgescan-candidate-test.log"
+# Repeatedly exercise the deterministic rating fixture; require every run
+# to pass explicitly rather than silently accepting an unmatched regex.
+CGO_ENABLED=1 go test -race -mod=mod -count=30 -timeout=2m -run '^TestH_ScanRatesBlocks$' -v -ldflags '-checklinkname=0' \
+  ./hiddify/edgescan 2>&1 | tee "$report/edgescan-block-rating-test.log"
+[[ $(grep -Fc -- '--- PASS: TestH_ScanRatesBlocks ' "$report/edgescan-block-rating-test.log") == 30 ]]
 CGO_ENABLED=1 go test -race -mod=mod -count=1 -timeout=2m -run '^TestH_IsWARPHost$' -ldflags '-checklinkname=0' \
   ./common/cloudflare 2>&1 | tee "$report/warp-classification-test.log"
