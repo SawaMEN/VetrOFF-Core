@@ -57,3 +57,12 @@ Tailcat and the TUN filter, records the exact caller patch and dependency
 history, and tests with other dependencies locked. This is a compatibility
 probe only: remaining fork-only behavior and dependency combinations must
 be reviewed before the Tailscale gitlink is resolved or stable pins change.
+
+Run 45444977114 confirmed the WireGuard/AWG tests and initial Tailscale
+caller checks, then failed compiling the endpoint (TunDevice renamed to Tun,
+ExportIPStack now returns sing-tun.Go). The probe adapts the endpoint without
+replacing its fork-specific HTTP transport or lifecycle. It also initializes
+the exported engine used by filtering/packet I/O, restores the full system
+binding/default-route hook, and explicitly enables both with_tailscale and
+with_tailcat build tags. These changes are not yet an approved dependency
+migration; compilation and runtime regressions still gate promotion.
