@@ -103,9 +103,13 @@ def checksum_union(data, hashes, path="go.sum"):
     print(f'{data["component"]}: {path} fork={len(fork)}, upstream={len(official)}, union={len(combined)}')
     return b"".join(b" ".join((*key, combined[key])) + b"\n" for key in sorted(combined))
 
-def apply_reviewed(data, resolutions):
+def apply_reviewed(data, resolutions, clean_adjustments=None):
     component = data["component"]
     assert set(resolutions) <= set(data["conflicts"])
+    clean_adjustments = clean_adjustments or {}
+    assert not set(clean_adjustments) & set(data["conflicts"])
+    conflict_resolutions = resolutions
+    resolutions = {**resolutions, **clean_adjustments}
     with tempfile.TemporaryDirectory() as tmp:
         env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "index"))
         git("read-tree", data["tentative_tree"], env=env)
@@ -130,11 +134,13 @@ def apply_reviewed(data, resolutions):
         (report / (component + "-reviewed-resolutions.patch")).write_bytes(
             git("diff", "--binary", "--full-index", data["tentative_tree"], tree)
         )
-    remaining = sorted(set(data["conflicts"]) - set(resolutions))
-    data.update(reviewed_tree=tree, reviewed_resolutions=sorted(resolutions),
-                remaining_conflicts=remaining)
+    remaining = sorted(set(data["conflicts"]) - set(conflict_resolutions))
+    data.update(reviewed_tree=tree, reviewed_resolutions=sorted(conflict_resolutions),
+                clean_adjustments=sorted(clean_adjustments), remaining_conflicts=remaining)
     (report / (component + "-reviewed.json")).write_text(json.dumps(data, indent=2) + "\n")
-    print(f"{component}: {len(resolutions)} reviewed resolutions, {len(remaining)} unresolved paths")
+    print(f"{component}: {len(conflict_resolutions)} reviewed resolutions, {len(remaining)} unresolved paths")
+    if clean_adjustments:
+        print(f"{component}: {len(clean_adjustments)} additional compatibility adjustments")
     for path in remaining:
         print("  " + path)
 
@@ -1325,6 +1331,24 @@ assert b"func (e *Endpoint) waitNetworkActive(" in candidate
 assert b"func (e *Endpoint) ensureDeviceStarted(" in candidate
 assert b"e.closeOnce.Do(" in candidate
 assert b"e.tunDevice.SetDevice(wgDevice, nil)" in candidate
+# Start and Close share a lifecycle lock, separate from device stateAccess.
+# Start publishes the bind and pause registration before Close reads them.
+# Closing the done channel first rejects new work; queued writes cannot
+# block Start on the detour (the reviewed ClientBind uses sendqueue).
+candidate = replace_once(candidate, b"\tstateAccess    sync.Mutex\n",
+    b"\tstateAccess    sync.Mutex\n\tlifecycleAccess sync.Mutex\n")
+candidate = replace_once(candidate, b"func (e *Endpoint) Start(postStart bool) error {\n",
+    b"func (e *Endpoint) Start(postStart bool) error {\n\te.lifecycleAccess.Lock()\n\tdefer e.lifecycleAccess.Unlock()\n\tif isDone(e.done) {\n\t\treturn net.ErrClosed\n\t}\n\tif e.device.Load() != nil {\n\t\treturn nil\n\t}\n")
+# Publish the pause manager once at construction, before any callbacks or
+# data-plane goroutines can observe it. Only registration belongs in Start.
+candidate = replace_once(candidate, b"\t\tpauseUpdated:   make(chan struct{}),",
+    b"\t\tpause:          service.FromContext[pause.Manager](options.Context),\n\t\tpauseUpdated:   make(chan struct{}),")
+candidate = replace_once(candidate, b"\te.pause = service.FromContext[pause.Manager](e.options.Context)\n", b"")
+candidate = replace_once(candidate, b"\t\tclose(e.done)\n",
+    b"\t\tclose(e.done)\n\t\te.lifecycleAccess.Lock()\n\t\tdefer e.lifecycleAccess.Unlock()\n")
+# Do not leak the private key or PSKs if device configuration fails.
+candidate = replace_once(candidate, b'E.Cause(err, "setup wireguard: \\n", ipcConf.String())',
+    b'E.Cause(err, "setup wireguard")')
 resolutions[path] = subprocess.check_output(["gofmt"], input=candidate)
 # WARP diagnostics and configuration validation. Explicit registration
 # detours remain strict; only automatic selection may try other outbounds.
@@ -1746,4 +1770,25 @@ for path, hashes in (
     assert new.replace(b"//H", b"// H") == own, path
     resolutions[path] = own
 
-apply_reviewed(data, resolutions)
+
+# This file merged cleanly at the textual level, but the AWG constructor
+# changed. Reconfigure the existing path instead of replacing a live one.
+path = "transport/awg/h_path_test.go"
+clean = checked_blob(data["tentative_tree"], path, "a837c542cec35985d6572a7a36ea7ddb650f2266")
+assert checked_blob(data["base"], path, "0674856118733ea57d638832773ebc51a7d46db8") == checked_blob(data["upstream"], path, "0674856118733ea57d638832773ebc51a7d46db8")
+old_setup = b'''	// The helper starts without fallback configured; create the path as it would
+	// be created at construction when fallback_address is supplied.
+	client.path = newDevicePath(ctx, logger.NOP(), client.tun, DeviceOpts{
+		Address:  []netip.Prefix{netip.MustParsePrefix("10.77.0.2/32")},
+		MTU:      1408,
+		Peer:     dead,
+		Fallback: []netip.AddrPort{real},
+	})
+	client.path.start(client)'''
+clean = replace_once(clean, old_setup,
+    b"\tclient.path.setAddresses([]netip.AddrPort{dead, real})")
+# The revised server bind explicitly listens on its configured port.
+clean = replace_once(clean, b"DeviceOpts{Address: []netip.Prefix{serverAddress}, MTU: 1500}",
+    b"DeviceOpts{Address: []netip.Prefix{serverAddress}, MTU: 1500, ListenPort: serverPort}")
+apply_reviewed(data, resolutions, {path: subprocess.check_output(["gofmt"], input=clean)})
+

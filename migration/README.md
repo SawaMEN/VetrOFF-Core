@@ -37,3 +37,13 @@ AWG already uses `a2ae165`. Other dependencies remain locked for this scoped
 check. Tailscale requires separate reconciliation: its candidate and fork
 histories diverge, so it is not automatically replaced. This does not certify
 the complete upstream candidate or authorize promotion of stable pins.
+
+### Transport test follow-up
+
+Run 45442636110 confirmed 109 reviewed conflicts but exposed an AWG test
+constructor mismatch and a WireGuard Start/Close data race. The candidate
+now serializes lifecycle initialization and shutdown, initializes the pause
+manager once, avoids logging private IPC keys on error, and adjusts the
+cleanly merged AWG test to use the live path. Clean compatibility adjustments
+are reported separately from conflict counts. Full transport CI must pass
+before this migration stage is marked complete.
