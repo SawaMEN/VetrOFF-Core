@@ -19,3 +19,13 @@
 - [ ] Resolve the other conflicts and review dependencies.
 - [ ] Fix failing routing tests and pass the integrated regression suite.
 - [ ] Pass the full build matrix and promote verified source pins together.
+
+## Adaptive Connect / Anti-DPI
+
+Client runtime target: VetrOFF-Core (used by the future client), not VetrOFF Client. See [integration candidate](migration/adaptive-connect/README.md). Stable pins are unchanged until reviewed integration and test completion.
+
+- [x] Port the independent selection policy from 3x-ui.
+- [x] Add network-generation isolation, manual mode and deterministic tests.
+- [ ] Integrate with the existing URLTest/Selector and platform network lifecycle.
+- [ ] Define versioned opt-in 3x-ui configuration and diagnostics interface.
+- [ ] Validate candidate builds and real network behavior before promotion.
