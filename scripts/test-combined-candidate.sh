@@ -104,6 +104,12 @@ python3 "$ROOT/scripts/fix-masterdns-session-readiness.py" "$mdns" "$mdns_old" "
 git -C "$mdns" diff --cached --binary --full-index "$mdns_new" > "$report/combined-masterdns-readiness.patch"
 git -C "$mdns" write-tree > "$report/combined-masterdns-tree.txt"
 
+# Carry the six Tailscale caller adaptations that passed the scoped
+# candidate tests. Fail closed if the merged source contains other edits.
+python3 "$ROOT/scripts/prepare-tailscale-callers.py" \
+  "$WORK/hiddify-sing-box" "$report" a26e58b376987a3305b201ec87fbc8918f620ad3 \
+  "$candidate/hiddify-sing-box"
+
 export CGO_ENABLED=0
 cd "$candidate"
 tags=$(cli_tags)
@@ -133,6 +139,9 @@ probe core-cli go build -mod=mod -trimpath -buildvcs=false -tags "$tags" -ldflag
 probe core-tests go test -mod=mod -count=1 -timeout=6m -tags "$tags" -ldflags '-checklinkname=0' ./v2/config ./v2/hcore ./v2/hcore/adminbgservice
 cd "$candidate/hiddify-sing-box"
 probe sing-modules go list -mod=mod -m all
+# Test the paired library and callers with the feature tags enabled.
+CGO_ENABLED=1 probe tailscale go test -race -mod=mod -count=1 -timeout=5m \
+  -tags with_tailscale,with_tailcat -ldflags '-checklinkname=0' ./protocol/tailscale/...
 probe sing-tests go test -mod=mod -count=1 -timeout=6m -tags "$tags,with_xdrive" -ldflags '-checklinkname=0' \
   -run '^TestH_(NetworkResetReachesTheDNSServers|Psiphon|XDrive|EveryPeerBridgeHasTheSessionsHandlers)' \
   ./route ./protocol/psiphon ./transport/call/telemost ./transport/v2rayxdrive .
