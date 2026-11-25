@@ -5,6 +5,13 @@ on:
     paths:
       - '.github/workflows/consumer-compatibility.yml'
       - 'scripts/audit-panel-consumer.py'
+      - 'scripts/prepare.sh'
+      - 'patches/**'
+      - '.gitmodules'
+      - 'hiddify-core'
+      - 'hiddify-sing-box'
+      - 'ray2sing'
+      - 'VERSION'
   workflow_dispatch:
 permissions:
   contents: read
@@ -92,6 +99,7 @@ jobs:
         with:
           distribution: zulu
           java-version: '17'
+      - uses: android-actions/setup-android@v3
       - name: Install matching Android build tools
         run: |
           set -euo pipefail
