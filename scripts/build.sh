@@ -9,7 +9,7 @@ fi
 verify_prepared_sources
 
 version=$(< "$ROOT/VERSION")
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid VERSION' >&2; exit 1; }
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]*)?$ ]] || { echo 'Invalid VERSION' >&2; exit 1; }
 mkdir -p "$DIST"
 cd "$WORK"
 export GOOS="${GOOS:-linux}"

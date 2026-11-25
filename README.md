@@ -1,6 +1,6 @@
 # VetrOFF-Core
 
-VetrOFF-Core 0.0.4 is a standalone CLI built from [Hiddify Core](https://github.com/hiddify/hiddify-core), [Hiddify sing-box](https://github.com/hiddify/hiddify-sing-box), and [ray2sing](https://github.com/hiddify/ray2sing).
+VetrOFF-Core 0.0.5-rc is a standalone CLI built from [Hiddify Core](https://github.com/hiddify/hiddify-core), [Hiddify sing-box](https://github.com/hiddify/hiddify-sing-box), and [ray2sing](https://github.com/hiddify/ray2sing).
 
 The three original projects appear at the root as Git submodules. Each submodule links to the exact original commit used for stable builds. The `.gitmodules` file records their clone URLs.
 
@@ -14,9 +14,16 @@ The stable sing-box commit matches the original Core gitlink. The ray2sing submo
 
 The 0.0.4 release trees are reproduced from the root pins, regenerated patch series and the separately pinned MasterDNS overlay. The old migration pipeline remains in Git history for reproducibility. Subsequent updates must regenerate the relevant patch series and verify the new source trees before promotion.
 
+The latest published stable release remains 0.0.4. Main builds
+the verified reduced 0.0.5-rc candidate from the same official root pins
+and the appended Core/sing-box patches. See patches/v5-candidate.lock.json
+for exact tested source provenance. Ten runtime commits are included;
+three require the unavailable upstream Sing and Soar dependencies.
+No native iOS or client integration is implied.
+
 ## Builds
 
-GitHub Actions builds the CLI for Linux and macOS on AMD64 and ARM64, and for Windows on AMD64. The first successful build and test run on `main` publishes the version in `VERSION` with five binaries and a single `SHA256SUMS` file. Source provenance remains available in the repository and CI logs. Subsequent builds of a published version produce Actions artifacts.
+GitHub Actions builds the CLI for Linux and macOS on AMD64 and ARM64, and for Windows on AMD64. The first successful build and test run on `main` publishes the version in `VERSION` with five binaries and a single `SHA256SUMS` file. Source provenance remains available in the repository and CI logs. Subsequent builds of a published version and release-candidate versions produce Actions artifacts only.
 
 ```sh
 bash scripts/build.sh

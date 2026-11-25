@@ -169,6 +169,10 @@ jobs:
         run: |
           version=$(< VERSION)
           tag="v$version"
+          if [[ "$version" == *-rc* ]]; then
+            echo "Release candidate: retain build artifacts, do not publish a stable release"
+            exit 0
+          fi
           if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "$tag" ]]; then
             echo "Tag $GITHUB_REF_NAME must match VERSION ($tag)" >&2
             exit 1

@@ -1,0 +1,56 @@
+diff --git a/v2/hcore/hotreload_test.go b/v2/hcore/hotreload_test.go
+index fae53d4ba78ab40679b3858db49c886011c3fc27..50a22968bc78ce67f769cafa94e157624e552f36 100644
+--- a/v2/hcore/hotreload_test.go
++++ b/v2/hcore/hotreload_test.go
+@@ -11,6 +11,7 @@ import (
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/daemon"
++	"github.com/sagernet/sing-box/log"
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+@@ -139,20 +140,36 @@ func TestHotReload(t *testing.T) {
+ 	require.True(t, listening(newMixedPort), "the inbound moved to the new port")
+ 	require.False(t, listening(mixedPort))
+ 
+-	// something that cannot be hot reloaded changes (the log level): refused, core unchanged
++	// A log-level-only reload must preserve the service and all outbounds.
+ 	_, err = ChangeHiddifySettings(&ChangeHiddifySettingsRequest{HiddifySettingsJson: hotReloadSettings(t, newMixedPort, "error")}, false)
+ 	require.NoError(t, err)
++	proxyB = runningOutbound(t, "proxy-b")
+ 	proxyC := runningOutbound(t, "proxy-c")
++	response, err = HotReload(static.BaseContext, &StartRequest{
++		ConfigContent: profile(socks("proxy-a", 1080), socks("proxy-b", 2081), socks("proxy-c", 1082)),
++	})
++	require.NoError(t, err)
++	require.Equal(t, MessageType_EMPTY, response.MessageType)
++	require.Same(t, instance, runningTestService(t).Instance(), "log level does not restart Core")
++	require.Same(t, proxyA, runningOutbound(t, "proxy-a"))
++	require.Same(t, proxyB, runningOutbound(t, "proxy-b"))
++	require.Same(t, proxyC, runningOutbound(t, "proxy-c"))
++	require.True(t, listening(newMixedPort), "the listener remains open")
++	require.Equal(t, "error", log.FormatLevel(instance.Box().LogFactory().Level()))
++
++	// Log level and an outbound removal can also be applied together.
++	_, err = ChangeHiddifySettings(&ChangeHiddifySettingsRequest{HiddifySettingsJson: hotReloadSettings(t, newMixedPort, "warn")}, false)
++	require.NoError(t, err)
+ 	response, err = HotReload(static.BaseContext, &StartRequest{
+ 		ConfigContent: profile(socks("proxy-a", 1080), socks("proxy-b", 2081)),
+ 	})
+-	require.Error(t, err)
+-	require.Contains(t, err.Error(), "hot reload cannot change: log")
+-	require.Equal(t, MessageType_HOT_RELOAD_FAILED, response.MessageType)
+-	require.Contains(t, []CoreStates{CoreStates_WAITING, CoreStates_STARTED, CoreStates_NO_AVAILABLE_PROXIES}, response.CoreState)
+-	require.Contains(t, []CoreStates{CoreStates_WAITING, CoreStates_STARTED, CoreStates_NO_AVAILABLE_PROXIES}, currentCoreState())
++	require.NoError(t, err)
++	require.Equal(t, MessageType_EMPTY, response.MessageType)
+ 	require.Same(t, instance, runningTestService(t).Instance())
+-	require.Same(t, proxyC, runningOutbound(t, "proxy-c"), "nothing was applied")
++	require.Same(t, proxyA, runningOutbound(t, "proxy-a"))
++	require.Same(t, proxyB, runningOutbound(t, "proxy-b"))
++	require.Nil(t, runningOutbound(t, "proxy-c"))
++	require.Equal(t, "warn", log.FormatLevel(instance.Box().LogFactory().Level()))
+ 
+ 	// the TUN inbound changes (here: TUN is turned on): refused so the app restarts instead
+ 	_, err = ChangeHiddifySettings(&ChangeHiddifySettingsRequest{HiddifySettingsJson: strings.Replace(hotReloadSettings(t, newMixedPort, "warn"), "{", `{"enable-tun":true,`, 1)}, false)

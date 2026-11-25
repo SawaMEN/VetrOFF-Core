@@ -1,0 +1,3099 @@
+diff --git a/adapter/experimental.go b/adapter/experimental.go
+index ba7c24c0bae3e952206b2a79e462c041fa01217d..0960578a054b852d78a4dfefc0b64300e3229c02 100644
+--- a/adapter/experimental.go
++++ b/adapter/experimental.go
+@@ -40,6 +40,10 @@ type URLTestHistory struct {
+ 	// LastGood: the last delay of a test that worked, kept when a later one fails: of the
+ 	// outbounds that fail, the ones that worked are tested first. //H
+ 	LastGood uint16 `json:"last_good,omitempty"` //H
++	// Tentative: Delay is a staged test's miss at its first mark, while an attempt may still
++	// answer. A group may prefer another member on it, but must not take the member for dead
++	// and close its connections. Only what monitoring hands a group; never stored. //H
++	Tentative bool `json:"-"` //H
+ }
+ 
+ type URLTestHistoryStorage interface {
+diff --git a/adapter/h_deep_search.go b/adapter/h_deep_search.go
+index c90114adf4c29717c2f7c7e0916c7fbab826e9b4..1de8563bb02a9e1e671a3713767f3c4741602c3a 100644
+--- a/adapter/h_deep_search.go
++++ b/adapter/h_deep_search.go
+@@ -1,7 +1,9 @@
+ package adapter
+ 
++import "sync"
++
+ // DeepSearcher is an outbound or an endpoint that searches for a way through (a WARP endpoint, a
+-// CDN edge for Psiphon) and gave up after its search time (search_timeout, 3 minutes by
++// CDN edge for Psiphon) and gave up after its search time (search_timeout, 1 minute by
+ // default). A deep search goes on much longer, hours maybe, with more workers: it costs battery
+ // and CPU, so the app asks the user before it starts one.
+ type DeepSearcher interface {
+@@ -17,3 +19,42 @@ func DeepSearchAvailable(outbound any) bool {
+ 	searcher, ok := outbound.(DeepSearcher)
+ 	return ok && searcher.DeepSearchAvailable()
+ }
++
++// deepSearchListeners hear when a DeepSearcher starts or stops offering a deep search. The app
++// learns of it from the proxy list, which is otherwise sent again only with news of the
++// monitoring: a search gives up between two of its tests, and the offer waited for the next one,
++// minutes later.
++var deepSearchListeners struct {
++	sync.Mutex
++	channels map[chan struct{}]struct{}
++}
++
++// SubscribeDeepSearch returns a channel that receives when a deep search is offered or no longer
++// is, and the function that ends the subscription. Changes close together are one receive.
++func SubscribeDeepSearch() (<-chan struct{}, func()) {
++	ch := make(chan struct{}, 1)
++	deepSearchListeners.Lock()
++	if deepSearchListeners.channels == nil {
++		deepSearchListeners.channels = make(map[chan struct{}]struct{})
++	}
++	deepSearchListeners.channels[ch] = struct{}{}
++	deepSearchListeners.Unlock()
++	return ch, func() {
++		deepSearchListeners.Lock()
++		delete(deepSearchListeners.channels, ch)
++		deepSearchListeners.Unlock()
++	}
++}
++
++// DeepSearchChanged tells the listeners that a DeepSearcher started or stopped offering a deep
++// search.
++func DeepSearchChanged() {
++	deepSearchListeners.Lock()
++	defer deepSearchListeners.Unlock()
++	for ch := range deepSearchListeners.channels {
++		select {
++		case ch <- struct{}{}:
++		default:
++		}
++	}
++}
+diff --git a/adapter/inbound.go b/adapter/inbound.go
+index b024344004a67b84e8d57c967ae7614f81001243..7928a4033b7914c97ece6e8c2903a9be4aa75ce3 100644
+--- a/adapter/inbound.go
++++ b/adapter/inbound.go
+@@ -121,7 +121,8 @@ type InboundContext struct {
+ 	DeferredIPCIDRMatchGroups    uint8
+ 	IgnoreDestinationIPCIDRMatch bool
+ 
+-	RealOutbound string // H
++	RealOutbound       string // H
++	IPv6RouteLookahead bool   // H: route rule lookahead guard
+ }
+ 
+ func (c *InboundContext) SetRealOutbound(tag string) {
+diff --git a/common/monitoring/h_monitoring_test.go b/common/monitoring/h_monitoring_test.go
+index df85dc29a5a2ad6c3cc586bedfe4b67d912c164f..49a65722485b7cdec495e3ab9d064453ac46526e 100644
+--- a/common/monitoring/h_monitoring_test.go
++++ b/common/monitoring/h_monitoring_test.go
+@@ -15,7 +15,6 @@ import (
+ 	"github.com/sagernet/sing-box/adapter/htest"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+-	"github.com/sagernet/sing-box/adapter/htest"
+ 	"github.com/sagernet/sing-box/hiddify/ipinfo"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+diff --git a/common/monitoring/h_settle.go b/common/monitoring/h_settle.go
+index 1212a25df3b82144a2ae9188394e8dc94020e446..71080d42821acf249bdde8e5776f470c3636b87e 100644
+--- a/common/monitoring/h_settle.go
++++ b/common/monitoring/h_settle.go
+@@ -146,7 +146,10 @@ func (m *OutboundMonitoring) applyInterim(task *testTask, state *outboundState,
+ // one cached from the previous run) has nothing to keep: the miss is all this run knows of it,
+ // and the groups see it, so lowest-delay leaves a cached pick that does not answer for one that
+ // does. It used to keep the cached result, marked as fresh, and stay on a member the app showed
+-// as not responding while others worked.
++// as not responding while others worked. That miss comes marked Tentative: the group may send new
++// connections elsewhere, but the member is not dead until its test ends failed, so its open
++// connections stay (hiddify-app #2637: a working proxy's connections were cut a second after
++// start, and it answered in 313 ms right after).
+ func (m *OutboundMonitoring) confirmed(groupTag, outboundTag string, his *adapter.URLTestHistory) *adapter.URLTestHistory {
+ 	if groupTag == "" || his == nil {
+ 		return his
+@@ -161,7 +164,9 @@ func (m *OutboundMonitoring) confirmed(groupTag, outboundTag string, his *adapte
+ 		return his
+ 	}
+ 	if !Worked(state.confirmed.Delay, state.confirmed.IsFromCache) {
+-		return his
++		miss := *his
++		miss.Tentative = true
++		return &miss
+ 	}
+ 	last := state.confirmed
+ 	last.IsFromCache = false
+diff --git a/common/monitoring/h_settle_test.go b/common/monitoring/h_settle_test.go
+index b61df673bea0f13739b37fa35517ebc1a1dfe046..f75df8127845e4c8af44d4d84851352d12db5258 100644
+--- a/common/monitoring/h_settle_test.go
++++ b/common/monitoring/h_settle_test.go
+@@ -246,6 +246,12 @@ func TestH_MonitoringMissOfACachedMemberIsSeenByTheGroups(t *testing.T) {
+ 	groupSees := func() uint16 { return m.OutboundsHistory("grp")["cached"].Delay }
+ 	require.Eventually(t, func() bool { return m.OutboundsHistory("")["cached"].Delay == TimeoutDelay }, time.Second, 5*time.Millisecond)
+ 	require.Equal(t, TimeoutDelay, groupSees(), "nothing of this run to keep: the group sees the miss")
++	require.True(t, m.OutboundsHistory("grp")["cached"].Tentative, "marked tentative, so the group does not close its connections on it (hiddify-app #2637)")
++	require.False(t, m.OutboundsHistory("")["cached"].Tentative, "the app's view is not marked")
++	require.Eventually(t, func() bool {
++		his := m.OutboundsHistory("grp")["cached"]
++		return his.Delay == TimeoutDelay && !his.Tentative
++	}, 5*time.Second, 10*time.Millisecond, "the test ending failed is a real failure for the group")
+ }
+ 
+ // A failed attempt is tried again at the next mark, and so until the last mark: a proxy that
+diff --git a/docs/hiddify/app_considerations.md b/docs/hiddify/app_considerations.md
+index 84d837c4a7733155e12be318d37f69ed846c3024..37c4e264ce57627e01441cf1acf447cbc8ac8c07 100644
+--- a/docs/hiddify/app_considerations.md
++++ b/docs/hiddify/app_considerations.md
+@@ -370,3 +370,11 @@ branch before pushing hiddify-sing-box, or the submodule commits cannot be fetch
+ - The reviewed candidates include keep-top monitoring, independent outbound readiness and security classification, scoped network resets and Psiphon controller restart. Their full GUI and platform integration still needs testing.
+ - Preserve Android socket protection, Conduit pairing, encrypted XDrive, legacy final_mask, standalone smart_dns_pool and explicit WARP fallback addresses.
+ - The consuming Go modules must carry the correct local replacements themselves. Do not publish candidate binaries before the combined regression and release build gates pass.
++
++## Broad v5 candidate (not released)
++
++The candidate includes the available sing-box runtime changes at
++1267fe6 with the original Sing and Soar gitlinks retained. The Soar
++Abort integration, Sing buffer updates, native iOS OOM service
++integration, and Core/client subscription integration are not included.
++See the exact upstream changelog for deferred work, not current behavior.
+diff --git a/experimental/libbox/export.go b/experimental/libbox/export.go
+index b4f8adc99d6a98c4a58a99f4ee2dd805b1edf0db..34ea02f85c733f40bf3ef100590bf106bb8c5d28 100644
+--- a/experimental/libbox/export.go
++++ b/experimental/libbox/export.go
+@@ -38,7 +38,9 @@ func SetMemoryLimit(enabled bool) {
+ 	if limit == 0 && C.IsIos {
+ 		limit = oomkiller.DefaultAppleNetworkExtensionMemoryLimit
+ 	}
+-	if limit > 0 {
++	if limit > 0 && sOOMKillerEnabled { //H: the OOM killer's limit, as Setup set it: one source for it
++		debug.SetMemoryLimit(int64(oomkiller.RuntimeMemoryLimit(uint64(limit)))) //H
++	} else if limit > 0 { //H
+ 		debug.SetMemoryLimit(limit * 3 / 4)
+ 	} else {
+ 		debug.SetMemoryLimit(math.MaxInt64)
+diff --git a/experimental/libbox/h_oom.go b/experimental/libbox/h_oom.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d503ccc41455b663ccde73a64a0ee98c119da932
+--- /dev/null
++++ b/experimental/libbox/h_oom.go
+@@ -0,0 +1,73 @@
++//go:build darwin || linux || windows
++
++package libbox
++
++import (
++	"path/filepath"
++	"time"
++
++	"github.com/sagernet/sing-box/daemon"
++	"github.com/sagernet/sing-box/experimental/libbox/internal/runtimeinfo"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/service/oomkiller"
++	"github.com/sagernet/sing/common/byteformats"
++)
++
++// Hiddify runs its own service rather than the command server, and starts a new
++// daemon.StartedService at every start of the core. The OOM recorder lives for the whole process,
++// as the command server's does, so it reads the service that runs when it writes a report.
++
++// OOMKillerOptions are the OOM killer settings of Setup, for a service built without the command
++// server: daemon.ServiceOptions takes them as they are.
++func OOMKillerOptions() (enabled bool, killerDisabled bool, memoryLimit uint64) {
++	return sOOMKillerEnabled, sOOMKillerDisabled, uint64(sOOMMemoryLimit)
++}
++
++// OOMRecorderOptionsFor is OOMRecorderOptions for a service that changes: current gives the
++// running one, or nil between two starts.
++func OOMRecorderOptionsFor(current func() *daemon.StartedService) oomkiller.RecorderOptions {
++	return oomkiller.RecorderOptions{
++		BasePath:    sWorkingPath,
++		Logger:      log.StdLogger(),
++		AcceptDraft: acceptOOMDraft,
++		MetadataCallback: func(status oomkiller.ReportStatus) any {
++			metadata := oomReportMetadata{
++				reportMetadata: baseReportMetadata(),
++				RecordedAt:     status.RecordedAt.UTC().Format(time.RFC3339),
++				MemoryUsage:    byteformats.FormatMemoryBytes(status.PeakMemory),
++				Snapshots:      status.Snapshots,
++			}
++			metadata.StartedAt = status.StartedAt.UTC().Format(time.RFC3339)
++			if status.MemoryLimit > 0 {
++				metadata.MemoryLimit = byteformats.FormatMemoryBytes(status.MemoryLimit)
++			}
++			if status.AvailableKnown {
++				metadata.AvailableMemory = byteformats.FormatMemoryBytes(status.MinAvailable)
++			}
++			return metadata
++		},
++		OwnerCallback: chownReport,
++		LogCallback: func() []byte {
++			startedService := current()
++			if startedService == nil {
++				return nil
++			}
++			return formatLogEntries(startedService.SavedLog())
++		},
++		SnapshotCallback: func(directory string, prefix string) {
++			for _, name := range oomReportProfiles {
++				writeOOMProfile(filepath.Join(directory, prefix+"."+name+".pb"), name)
++			}
++			runtimeInfoPath := filepath.Join(directory, prefix+".runtime.json")
++			if runtimeinfo.WriteFile(runtimeInfoPath) == nil {
++				chownReport(runtimeInfoPath)
++			}
++			copyConfigSnapshot(directory)
++			if startedService := current(); startedService != nil {
++				if content := oomConnectionsContent(startedService); content != nil {
++					writeReportFile(directory, prefix+".connections.json", content)
++				}
++			}
++		},
++	}
++}
+diff --git a/experimental/libbox/h_oom_test.go b/experimental/libbox/h_oom_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a5d9d5fc57a36fd97f9e6d87e62954f794eda5ec
+--- /dev/null
++++ b/experimental/libbox/h_oom_test.go
+@@ -0,0 +1,35 @@
++//go:build darwin || linux || windows
++
++package libbox
++
++import (
++	"runtime/debug"
++	"testing"
++
++	"github.com/sagernet/sing-box/service/oomkiller"
++	"github.com/stretchr/testify/require"
++)
++
++// With the OOM killer on, the Go memory limit is the one it derives from its limit, whoever sets
++// it: Setup, or SetMemoryLimit at every start of the core. SetMemoryLimit put three quarters of it
++// back (37.5 MB of an iOS extension's 50, against the OOM killer's 45).
++func TestH_SetMemoryLimitKeepsTheOOMKillersLimit(t *testing.T) {
++	defer debug.SetMemoryLimit(debug.SetMemoryLimit(-1))
++	defer ReloadSetupOptions(&SetupOptions{})
++
++	ReloadSetupOptions(&SetupOptions{OomKillerEnabled: true, OomMemoryLimit: 50 << 20})
++	want := int64(oomkiller.RuntimeMemoryLimit(50 << 20))
++	require.Equal(t, want, debug.SetMemoryLimit(-1), "Setup")
++	SetMemoryLimit(true)
++	require.Equal(t, want, debug.SetMemoryLimit(-1), "a start keeps it")
++
++	enabled, killerDisabled, limit := OOMKillerOptions()
++	require.True(t, enabled)
++	require.False(t, killerDisabled)
++	require.Equal(t, uint64(50<<20), limit)
++
++	// without the OOM killer, as before
++	ReloadSetupOptions(&SetupOptions{OomMemoryLimit: 40 << 20})
++	SetMemoryLimit(true)
++	require.Equal(t, int64(30<<20), debug.SetMemoryLimit(-1))
++}
+diff --git a/h_box_hotreload.go b/h_box_hotreload.go
+index 7a6dc29c812647b1e9b98a2e4b43be1368b0e70b..9b61e661c553d4173599554a737a122231a840e0 100644
+--- a/h_box_hotreload.go
++++ b/h_box_hotreload.go
+@@ -9,6 +9,7 @@ import (
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/common/monitoring"
+ 	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+ 	"github.com/sagernet/sing/common"
+ 	E "github.com/sagernet/sing/common/exceptions"
+@@ -20,8 +21,8 @@ import (
+ // H: hot reload: apply new options to a running box without restarting it.
+ //
+ // Reloadable: outbounds, endpoints, inbounds (TUN too: closed, then opened again), DNS
+-// servers/rules/final and route rules/rule_set/final. Anything else must stay the same (see
+-// CheckHotReload).
++// servers/rules/final, route rules/rule_set/final and the log level. Anything else must stay the
++// same (see CheckHotReload).
+ 
+ // HotReloadChanges lists the tags a hot reload touched.
+ type HotReloadChanges struct {
+@@ -43,8 +44,10 @@ type HotReloadResult struct {
+ 	RouteFinal bool
+ 	DNSFinal   bool
+ 	KeepTop    bool // the keep top options of the monitoring changed
++	LogLevel   bool // the log level changed: set on the running log, nothing rebuilt
+ }
+ 
++// IsEmpty says that nothing has to be rebuilt; a new log level is set either way.
+ func (r HotReloadResult) IsEmpty() bool {
+ 	return r.Outbounds.IsEmpty() && r.DNSServers.IsEmpty() && r.Inbounds.IsEmpty() &&
+ 		!r.RouteRules && !r.DNSRules && !r.RouteFinal && !r.DNSFinal && !r.KeepTop
+@@ -68,6 +71,9 @@ func (s *Box) HotReloadWithResult(ctx context.Context, options *option.Options)
+ 	if err != nil {
+ 		return HotReloadResult{}, err
+ 	}
++	if plan.result.LogLevel {
++		s.logFactory.SetLevel(plan.logLevel)
++	}
+ 	if !plan.result.IsEmpty() {
+ 		if err = s.applyHotReload(ctx, plan); err != nil {
+ 			return plan.result, err
+@@ -93,6 +99,7 @@ func CheckHotReload(ctx context.Context, oldOptions, newOptions option.Options)
+ 	for _, options := range []*option.Options{&oldRest, &newRest} {
+ 		options.Inbounds, options.Outbounds, options.Endpoints, options.DNS, options.Route = nil, nil, nil, nil, nil
+ 		options.Experimental = withoutKeepTop(options.Experimental)
++		options.Log = withoutLevel(options.Log)
+ 	}
+ 	keys, err := changedKeys(ctx, &oldRest, &newRest)
+ 	if err != nil {
+@@ -487,7 +494,8 @@ type hotReloadPlan struct {
+ 	dnsServers  *hotReloadDiff
+ 	inbounds    *hotReloadDiff
+ 	newOptions  option.Options
+-	ruleSetsNew bool // the route rule-sets changed, so DNS rules must be rebuilt too
++	ruleSetsNew bool      // the route rule-sets changed, so DNS rules must be rebuilt too
++	logLevel    log.Level // the new level, when result.LogLevel
+ }
+ 
+ func planHotReload(ctx context.Context, oldOptions, newOptions option.Options) (*hotReloadPlan, error) {
+@@ -541,9 +549,45 @@ func planHotReload(ctx context.Context, oldOptions, newOptions option.Options) (
+ 	if plan.result.KeepTop, err = contentChanged(ctx, keepTopOptions(oldOptions), keepTopOptions(newOptions)); err != nil {
+ 		return nil, err
+ 	}
++	oldLevel, err := logLevel(oldOptions.Log)
++	if err != nil {
++		return nil, E.Cause(err, "running options")
++	}
++	if plan.logLevel, err = logLevel(newOptions.Log); err != nil {
++		return nil, err
++	}
++	plan.result.LogLevel = plan.logLevel != oldLevel
+ 	return plan, nil
+ }
+ 
++// logLevel is the level a log of these options runs at, as log.New sets it: trace when unset.
++func logLevel(options *option.LogOptions) (log.Level, error) {
++	if options == nil || options.Level == "" {
++		return log.LevelTrace, nil
++	}
++	level, err := log.ParseLevel(options.Level)
++	if err != nil {
++		return 0, E.Cause(err, "parse log level")
++	}
++	return level, nil
++}
++
++// withoutLevel is the log options without the level, which a hot reload can change: a trace
++// session from the app's Report a problem, its end, or a level picked on the logs page used to
++// restart the core, and the VPN with it (hiddify-app #2637).
++// Log options that hold only a level count as none, as log.New reads them.
++func withoutLevel(options *option.LogOptions) *option.LogOptions {
++	if options == nil {
++		return nil
++	}
++	rest := *options
++	rest.Level = ""
++	if rest == (option.LogOptions{DisableColor: rest.DisableColor}) {
++		return nil
++	}
++	return &rest
++}
++
+ // keepTopOptions are the keep top options of the monitoring, which a hot reload can change.
+ func keepTopOptions(options option.Options) *option.KeepTopOptions {
+ 	if options.Experimental == nil || options.Experimental.Monitoring == nil {
+diff --git a/h_box_hotreload_test.go b/h_box_hotreload_test.go
+index ef5a69e87ce808f77c953e2dd362f8a70366f8a0..ea990a4949c81318576d73cbf4794369c00973e5 100644
+--- a/h_box_hotreload_test.go
++++ b/h_box_hotreload_test.go
+@@ -13,6 +13,7 @@ import (
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/common/monitoring"
+ 	"github.com/sagernet/sing-box/include"
++	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+ 	R "github.com/sagernet/sing-box/route/rule"
+ 	"github.com/sagernet/sing/common/json"
+@@ -397,3 +398,40 @@ func TestH_HotReloadInbounds(t *testing.T) {
+ 	require.True(t, listening(port2))
+ 	require.False(t, listening(port3))
+ }
++
++// The log level is set on the running log by a hot reload; the rest of the log options still
++// cannot change. A trace session from the app's Report a problem, its end, or a level picked on
++// the logs page refused the reload, and the app restarted the core, and the VPN with it
++// (hiddify-app #2637: "hot reload cannot change: log").
++func TestH_HotReloadLogLevel(t *testing.T) {
++	ctx := include.Context(context.Background())
++	output := t.TempDir() + "/box.log"
++	withLog := func(log string) option.Options {
++		return hParseOptions(t, ctx, `{"log": `+log+`, "outbounds": [{"type": "direct", "tag": "direct"}]}`)
++	}
++	instance, err := box.New(box.Options{Context: ctx, Options: withLog(`{"level": "warn", "output": "` + output + `"}`)})
++	require.NoError(t, err)
++	defer instance.Close()
++	require.NoError(t, instance.Start())
++	direct := hOutbound(t, instance, "direct")
++
++	debug := withLog(`{"level": "debug", "output": "` + output + `"}`)
++	result, err := instance.HotReloadWithResult(context.Background(), &debug)
++	require.NoError(t, err)
++	require.True(t, result.LogLevel)
++	require.True(t, result.IsEmpty(), "nothing is rebuilt for a log level")
++	require.Equal(t, "debug", log.FormatLevel(instance.LogFactory().Level()))
++	require.Same(t, direct, hOutbound(t, instance, "direct"))
++
++	// unset is trace, as at a start
++	unset := withLog(`{"output": "` + output + `"}`)
++	require.NoError(t, instance.HotReload(context.Background(), &unset))
++	require.Equal(t, "trace", log.FormatLevel(instance.LogFactory().Level()))
++
++	moved := withLog(`{"level": "warn", "output": "` + output + `.2"}`)
++	require.ErrorContains(t, instance.HotReload(context.Background(), &moved), "hot reload cannot change: log")
++	require.Equal(t, "trace", log.FormatLevel(instance.LogFactory().Level()), "nothing is applied")
++
++	// options with only a level are as none
++	require.NoError(t, box.CheckHotReload(ctx, withLog(`{"level": "info"}`), hParseOptions(t, ctx, `{"outbounds": [{"type": "direct", "tag": "direct"}]}`)))
++}
+diff --git a/h_warp_masque_sni_live_test.go b/h_warp_masque_sni_live_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b8b14ff7df7bfb2909238ffbc148cefcc35882a
+--- /dev/null
++++ b/h_warp_masque_sni_live_test.go
+@@ -0,0 +1,14 @@
++package box_test
++
++import "testing"
++
++// MASQUE to WARP with www.speedtest.net as the TLS server name (the speedtest noise preset):
++// Cloudflare's endpoint answers it over HTTP/3 and HTTP/2, and the pinned key still checks it.
++func TestH_WARPLiveMASQUESpeedtestServerName(t *testing.T) {
++	for _, vhttp := range []string{"h3", "h2"} {
++		t.Run(vhttp, func(t *testing.T) {
++			hWARPTrace(t, `"endpoints": [{"type": "warp", "tag": "warp", "scanner": {"enabled": true},
++				"masque": {"vhttp": "`+vhttp+`", "server_name": "www.speedtest.net"}}]`)
++		})
++	}
++}
+diff --git a/hiddify/edgescan/h_lastway_test.go b/hiddify/edgescan/h_lastway_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a23ddb84034c20e7afe96b5ffe98e2dac4a61ba8
+--- /dev/null
++++ b/hiddify/edgescan/h_lastway_test.go
+@@ -0,0 +1,90 @@
++package edgescan
++
++import (
++	"context"
++	"errors"
++	"net/netip"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/hiddify/rating"
++
++	"github.com/stretchr/testify/require"
++)
++
++// The last way is saved with the books and loaded again by a box started again; one older than
++// Lifetime is gone.
++func TestH_StoreLastWay(t *testing.T) {
++	cache := newMemoryCache()
++	store := OpenStore(cache, t.Name())
++	_, found := store.LastWay("warp/wireguard")
++	require.False(t, found)
++	target := Target{AddrPort: netip.MustParseAddrPort("162.159.192.7:2408")}
++	store.RememberWay("warp/wireguard", LastWay{Network: "wifi/IR", Target: target, Methods: map[string]string{"noise": "sip"}})
++	store.RememberWay("warp/auto", LastWay{Methods: map[string]string{"tunnel": "awg"}})
++	store.RememberWay("old", LastWay{Target: target, At: time.Now().Add(-Lifetime - time.Hour)})
++	require.NoError(t, store.Save())
++
++	restarted := newMemoryCache()
++	restarted.data = cache.data
++	loaded := OpenStore(restarted, t.Name())
++	require.NotSame(t, store, loaded)
++	way, found := loaded.LastWay("warp/wireguard")
++	require.True(t, found)
++	require.Equal(t, "wifi/IR", way.Network)
++	require.Equal(t, target, way.Target)
++	require.Equal(t, "sip", way.Method("noise"))
++	way.Methods["noise"] = "changed"
++	way, _ = loaded.LastWay("warp/wireguard")
++	require.Equal(t, "sip", way.Method("noise"), "a copy")
++	way, found = loaded.LastWay("warp/auto")
++	require.True(t, found, "a way may be a method alone")
++	require.Equal(t, "awg", way.Method("tunnel"))
++	_, found = loaded.LastWay("old")
++	require.False(t, found)
++
++	loaded.ForgetWay("warp/wireguard")
++	_, found = loaded.LastWay("warp/wireguard")
++	require.False(t, found)
++}
++
++func TestH_TryLastWay(t *testing.T) {
++	target := netip.MustParseAddrPort("162.159.192.7:2408")
++	attempts := 0
++	rtt, err := TryLastWay(context.Background(), func(ctx context.Context, addrPort netip.AddrPort) (time.Duration, error) {
++		attempts++
++		require.Equal(t, target, addrPort)
++		if _, ok := ctx.Deadline(); !ok {
++			t.Fatal("an attempt has a deadline")
++		}
++		if attempts == 1 {
++			return 0, errors.New("lost")
++		}
++		return 30 * time.Millisecond, nil
++	}, target)
++	require.NoError(t, err, "one lost packet does not lose the way")
++	require.Equal(t, 30*time.Millisecond, rtt)
++
++	attempts = 0
++	_, err = TryLastWay(context.Background(), func(context.Context, netip.AddrPort) (time.Duration, error) {
++		attempts++
++		return 0, errors.New("blocked")
++	}, target)
++	require.Error(t, err)
++	require.Equal(t, LastWayAttempts, attempts)
++}
++
++// A working endpoint is left for a clearly better one only: a higher score, or as good a score
++// and a much faster handshake.
++func TestH_Better(t *testing.T) {
++	current := netip.MustParseAddrPort("162.159.192.7:2408")
++	other := netip.MustParseAddrPort("162.159.192.9:500")
++	result := func(addrPort netip.AddrPort, score int, rtt time.Duration) Result {
++		return Result{Target: Target{AddrPort: addrPort}, Score: rating.Score(score), RTT: rtt}
++	}
++	require.False(t, Better(result(current, 10, time.Millisecond), current, 3, time.Second), "the same endpoint")
++	require.True(t, Better(result(other, 4, 300*time.Millisecond), current, 3, 100*time.Millisecond), "a higher score")
++	require.False(t, Better(result(other, 2, time.Millisecond), current, 3, time.Second), "a lower score")
++	require.True(t, Better(result(other, 3, 50*time.Millisecond), current, 3, 100*time.Millisecond), "half the time")
++	require.False(t, Better(result(other, 3, 80*time.Millisecond), current, 3, 100*time.Millisecond), "a small gain")
++}
+diff --git a/hiddify/edgescan/h_search_test.go b/hiddify/edgescan/h_search_test.go
+index eae57571e78c583eda0533cf88fc8608ad5b639d..f81c897c6cf543f68ff9fe44e92fac2bf29f2d70 100644
+--- a/hiddify/edgescan/h_search_test.go
++++ b/hiddify/edgescan/h_search_test.go
+@@ -58,8 +58,8 @@ func TestH_Search(t *testing.T) {
+ 	require.Equal(t, 1, rounds, "behind another proxy: one round")
+ }
+ 
+-// search_timeout is the one setting: 3 minutes by default; a deep search has no limit, or a long
+-// one.
++// search_timeout is the one setting: 1 minute by default; a deep search has no limit, or a long
++// one (above 3 minutes).
+ func TestH_SearchLimit(t *testing.T) {
+ 	limit := func(timeout time.Duration, asked bool) (time.Duration, bool) {
+ 		return SearchLimit(&option.EdgeSearchOptions{SearchTimeout: badoption.Duration(timeout)}, asked)
+@@ -69,10 +69,13 @@ func TestH_SearchLimit(t *testing.T) {
+ 		require.Equal(t, want, got, "%s asked=%v", timeout, asked)
+ 		require.Equal(t, wantDeep, deep, "%s asked=%v", timeout, asked)
+ 	}
++	require.Equal(t, time.Minute, DefaultSearchTimeout)
+ 	check(0, false, DefaultSearchTimeout, false)
+ 	check(0, true, 0, true)
+ 	check(time.Minute, false, time.Minute, false)
+ 	check(time.Minute, true, 0, true)
++	check(3*time.Minute, false, 3*time.Minute, false)
++	check(3*time.Minute+time.Second, false, 3*time.Minute+time.Second, true)
+ 	check(2*time.Hour, false, 2*time.Hour, true)
+ 	check(2*time.Hour, true, 2*time.Hour, true)
+ 	check(-1, false, 0, true)
+diff --git a/hiddify/edgescan/h_status_test.go b/hiddify/edgescan/h_status_test.go
+index 1a28319d3d9bbc9188739a239b3944278f714490..31783fb255ee9402e46707bab1dc572e8b2aad31 100644
+--- a/hiddify/edgescan/h_status_test.go
++++ b/hiddify/edgescan/h_status_test.go
+@@ -3,6 +3,9 @@ package edgescan
+ import (
+ 	"net/netip"
+ 	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
+ 
+ 	"github.com/stretchr/testify/require"
+ )
+@@ -68,3 +71,34 @@ func TestH_StatusDeepSearch(t *testing.T) {
+ 	require.True(t, status.IsDeep())
+ 	require.False(t, status.DeepSearchAvailable())
+ }
++
++// The app is told when a deep search is offered and when it no longer is: it learns of it from the
++// proxy list, which the monitoring sends again only with its next test, minutes after a search
++// gave up.
++func TestH_StatusDeepSearchNotifies(t *testing.T) {
++	changes, unsubscribe := adapter.SubscribeDeepSearch()
++	defer unsubscribe()
++	notified := func() bool {
++		select {
++		case <-changes:
++			return true
++		case <-time.After(100 * time.Millisecond):
++			return false
++		}
++	}
++	var status Status
++	status.Exhausted(false)
++	require.False(t, notified(), "nothing changed")
++	status.Exhausted(true)
++	require.True(t, notified(), "a search gave up: offered")
++	status.Exhausted(true)
++	require.False(t, notified(), "still offered")
++	require.True(t, status.TryStartDeep())
++	require.True(t, notified(), "a deep search runs: no longer offered")
++	status.Exhausted(true)
++	require.False(t, notified(), "a deep search asked for keeps the offer away")
++	status.Deep(false)
++	require.True(t, notified(), "the deep search ended without a find: offered again")
++	status.Exhausted(false)
++	require.True(t, notified(), "found: no longer offered")
++}
+diff --git a/hiddify/edgescan/lastway.go b/hiddify/edgescan/lastway.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9b1037ce8c0e60b8276d699b75a28020494a3e92
+--- /dev/null
++++ b/hiddify/edgescan/lastway.go
+@@ -0,0 +1,100 @@
++package edgescan
++
++import (
++	"context"
++	"maps"
++	"net/netip"
++	"time"
++
++	"github.com/sagernet/sing-box/hiddify/rating"
++)
++
++// A last way is checked with LastWayAttempts handshakes, each within LastWayTimeout: one lost
++// packet does not send the start to a full search, and a way that is gone costs a few seconds.
++const (
++	LastWayAttempts = 2
++	LastWayTimeout  = 3 * time.Second
++)
++
++// A LastWay is the way through that worked last for a kind of scanner: the target it connected
++// to (none for a way that is only a method) and the methods it used (a noise, a tunnel, a Psiphon
++// protocol), on the network it was on.
++// The next start tries it first, before it names the network or scans: a quick check of it is
++// enough to connect, and the search for a better way goes on once it is connected. The store
++// keeps one per key, saved with the books, for Lifetime.
++type LastWay struct {
++	Network string            `json:"n,omitempty"`
++	Target  Target            `json:"t"`
++	Methods map[string]string `json:"m,omitempty"`
++	At      time.Time         `json:"at"`
++}
++
++// Method is the value of a method of the way, "" when it has none.
++func (w LastWay) Method(name string) string {
++	return w.Methods[name]
++}
++
++// LastWay returns the way through kept under key, unless it is older than Lifetime.
++func (s *Store) LastWay(key string) (LastWay, bool) {
++	s.access.Lock()
++	defer s.access.Unlock()
++	way, found := s.lastWays[key]
++	if !found || time.Since(way.At) > Lifetime {
++		return LastWay{}, false
++	}
++	way.Methods = maps.Clone(way.Methods)
++	return way, true
++}
++
++// RememberWay keeps way under key, as the way through that worked last; the caller saves the
++// store.
++func (s *Store) RememberWay(key string, way LastWay) {
++	if way.At.IsZero() {
++		way.At = time.Now()
++	}
++	way.Methods = maps.Clone(way.Methods)
++	s.access.Lock()
++	defer s.access.Unlock()
++	if s.lastWays == nil {
++		s.lastWays = make(map[string]LastWay)
++	}
++	s.lastWays[key] = way
++}
++
++// ForgetWay drops the way kept under key: it no longer works.
++func (s *Store) ForgetWay(key string) {
++	s.access.Lock()
++	defer s.access.Unlock()
++	delete(s.lastWays, key)
++}
++
++// TryLastWay checks target with probe (see LastWayAttempts) and returns the handshake time.
++func TryLastWay(ctx context.Context, probe Probe, target netip.AddrPort) (time.Duration, error) {
++	var err error
++	for range LastWayAttempts {
++		attemptCtx, cancel := context.WithTimeout(ctx, LastWayTimeout)
++		var rtt time.Duration
++		rtt, err = probe(attemptCtx, target)
++		cancel()
++		if err == nil {
++			return rtt, nil
++		}
++		if ctx.Err() != nil {
++			return 0, ctx.Err()
++		}
++	}
++	return 0, err
++}
++
++// Better reports whether found is better than the target in use, which has score on the network
++// and answered in rtt: another target with a higher score, or as good a score and a handshake in
++// less than two thirds of the time. A working way is not dropped for a small gain.
++func Better(found Result, current netip.AddrPort, score rating.Score, rtt time.Duration) bool {
++	if found.AddrPort == current {
++		return false
++	}
++	if found.Score != score {
++		return found.Score > score
++	}
++	return rtt > 0 && found.RTT > 0 && found.RTT*3 < rtt*2
++}
+diff --git a/hiddify/edgescan/search.go b/hiddify/edgescan/search.go
+index 6706ad21894ba9c05aa61fd383fa4d202c29953f..efbd3ef23e0e0eb4edc12ac3d3b0946b812a3e90 100644
+--- a/hiddify/edgescan/search.go
++++ b/hiddify/edgescan/search.go
+@@ -10,8 +10,14 @@ import (
+ 	"github.com/sagernet/sing/common/logger"
+ )
+ 
+-// DefaultSearchTimeout is how long a search goes on before it offers a deep search.
+-const DefaultSearchTimeout = 3 * time.Minute
++// DefaultSearchTimeout is how long a search goes on before it offers a deep search. It is short:
++// while the unblocker hop searches, the VPN is on and nothing loads, and users gave up before the
++// offer came (it was 3 minutes).
++const DefaultSearchTimeout = time.Minute
++
++// deepSearchAbove is the search_timeout above which a search is a deep one from the start, with
++// that limit.
++const deepSearchAbove = 3 * time.Minute
+ 
+ // minRound spaces the rounds of a search, so a small space is not probed in a tight loop.
+ var minRound = 5 * time.Second
+@@ -21,9 +27,9 @@ var minRound = 5 * time.Second
+ var ErrSearchExhausted = errors.New("search exhausted")
+ 
+ // SearchLimit is how long a search of options goes on, 0 for no limit, and whether it is a deep
+-// one (more workers, see Request.Deep). search_timeout is the one setting: 3 minutes by default;
+-// a deep search has no limit (below zero) or a long one (above DefaultSearchTimeout). A deep
+-// search the user asked for keeps a long search_timeout, and otherwise has no limit.
++// one (more workers, see Request.Deep). search_timeout is the one setting: 1 minute by default;
++// a deep search has no limit (below zero) or a long one (above deepSearchAbove, 3 minutes). A
++// deep search the user asked for keeps a long search_timeout, and otherwise has no limit.
+ func SearchLimit(options *option.EdgeSearchOptions, deepAsked bool) (time.Duration, bool) {
+ 	timeout := DefaultSearchTimeout
+ 	if options != nil && options.SearchTimeout != 0 {
+@@ -32,7 +38,7 @@ func SearchLimit(options *option.EdgeSearchOptions, deepAsked bool) (time.Durati
+ 	switch {
+ 	case timeout < 0:
+ 		return 0, true
+-	case timeout > DefaultSearchTimeout:
++	case timeout > deepSearchAbove:
+ 		return timeout, true
+ 	case deepAsked:
+ 		return 0, true
+diff --git a/hiddify/edgescan/shared.go b/hiddify/edgescan/shared.go
+index 42f3169bf2b8f1609a7ca01500d1353c9fad06f1..52e621e184e8d866ca94b6bb8dd7c5014249fac3 100644
+--- a/hiddify/edgescan/shared.go
++++ b/hiddify/edgescan/shared.go
+@@ -32,6 +32,7 @@ type Store struct {
+ 	legacy    *Book // a single book saved before stores, given to the first kind that asks
+ 	merged    map[string]bool
+ 	flights   map[string]*flight
++	lastWays  map[string]LastWay // see LastWay
+ 
+ 	networkAccess sync.Mutex
+ 	network       *NetworkInfo
+@@ -115,6 +116,8 @@ type savedStore struct {
+ 	Books   map[string]json.RawMessage `json:"k"`
+ 	// Adopted are the keys whose books joined the store (see Adopt), not read again
+ 	Adopted []string `json:"a,omitempty"`
++	// LastWays are the ways through that worked last, by key (see LastWay)
++	LastWays map[string]LastWay `json:"g,omitempty"`
+ }
+ 
+ func (s *Store) load(cacheFile adapter.CacheFile) {
+@@ -130,6 +133,7 @@ func (s *Store) load(cacheFile adapter.CacheFile) {
+ 		for _, key := range content.Adopted {
+ 			s.merged[key] = true
+ 		}
++		s.lastWays = content.LastWays
+ 		for kind, raw := range content.Books {
+ 			book := NewBook()
+ 			if book.UnmarshalJSON(raw) == nil {
+@@ -194,6 +198,14 @@ func (s *Store) Save() error {
+ 		return nil
+ 	}
+ 	content := savedStore{Version: storeVersion, Books: make(map[string]json.RawMessage, len(s.books))}
++	for key, way := range s.lastWays {
++		if time.Since(way.At) > Lifetime {
++			delete(s.lastWays, key)
++		}
++	}
++	if len(s.lastWays) > 0 {
++		content.LastWays = s.lastWays
++	}
+ 	for key := range s.merged {
+ 		content.Adopted = append(content.Adopted, key)
+ 	}
+diff --git a/hiddify/edgescan/status.go b/hiddify/edgescan/status.go
+index 0bc7abd4cf79cde8cb4cdda30334bbd391f23257..73394b34447701c2813fde30c0412115dec40a5a 100644
+--- a/hiddify/edgescan/status.go
++++ b/hiddify/edgescan/status.go
+@@ -3,6 +3,8 @@ package edgescan
+ import (
+ 	"net/netip"
+ 	"sync"
++
++	"github.com/sagernet/sing-box/adapter"
+ )
+ 
+ // Status is what the scanner of an outbound is doing, for its display type. Scans may overlap
+@@ -25,8 +27,24 @@ type Status struct {
+ // Exhausted marks a search that found nothing within its time, or clears the mark.
+ func (s *Status) Exhausted(exhausted bool) {
+ 	s.access.Lock()
++	offered := s.offeredLocked()
+ 	s.exhausted = exhausted
++	now := s.offeredLocked()
+ 	s.access.Unlock()
++	offerChanged(offered, now)
++}
++
++// offeredLocked is whether a deep search is offered; s.access must be held.
++func (s *Status) offeredLocked() bool {
++	return s.exhausted && !s.deep
++}
++
++// offerChanged tells the app, through adapter.DeepSearchChanged, when the offer of a deep search
++// changed: it is sent the proxy list again, without waiting for the monitoring's next test.
++func offerChanged(was, now bool) {
++	if now != was {
++		adapter.DeepSearchChanged()
++	}
+ }
+ 
+ // DeepSearchAvailable reports whether the last search found nothing within its time, and no
+@@ -34,19 +52,23 @@ func (s *Status) Exhausted(exhausted bool) {
+ func (s *Status) DeepSearchAvailable() bool {
+ 	s.access.Lock()
+ 	defer s.access.Unlock()
+-	return s.exhausted && !s.deep
++	return s.offeredLocked()
+ }
+ 
+ // TryStartDeep marks a deep search asked for, and reports whether it was not already: one caller
+ // starts it.
+ func (s *Status) TryStartDeep() bool {
+ 	s.access.Lock()
+-	defer s.access.Unlock()
+ 	if s.deep {
++		s.access.Unlock()
+ 		return false
+ 	}
++	offered := s.offeredLocked()
+ 	s.deep = true
+ 	s.exhausted = false
++	now := s.offeredLocked()
++	s.access.Unlock()
++	offerChanged(offered, now)
+ 	return true
+ }
+ 
+@@ -54,11 +76,14 @@ func (s *Status) TryStartDeep() bool {
+ // only when it was a deep one: a deep search asked for while a normal one ran is kept for after.
+ func (s *Status) Deep(deep bool) {
+ 	s.access.Lock()
++	offered := s.offeredLocked()
+ 	s.deep = deep
+ 	if deep {
+ 		s.exhausted = false
+ 	}
++	now := s.offeredLocked()
+ 	s.access.Unlock()
++	offerChanged(offered, now)
+ }
+ 
+ // IsDeep reports whether a deep search was asked for and has not ended.
+diff --git a/hiddify/warpscan/noise.go b/hiddify/warpscan/noise.go
+index 5355541679ad5a5a61de15c94582b1d9f25d10dc..ab6cad82be6aa37843ba009582234a9775dc5650 100644
+--- a/hiddify/warpscan/noise.go
++++ b/hiddify/warpscan/noise.go
+@@ -1,6 +1,8 @@
+ package warpscan
+ 
+ import (
++	"strings"
++
+ 	"github.com/sagernet/sing-box/option"
+ 	"github.com/sagernet/wireguard-go/hiddify"
+ )
+@@ -80,3 +82,38 @@ func AWGProbeNoise(awg *option.AwgOptions) hiddify.NoiseOptions {
+ 		Size:    hiddify.Range{From: int32(awg.Jmin), To: int32(awg.Jmax)},
+ 	}}
+ }
++
++// MASQUENoisePreset is a noise of a MASQUE tunnel: a TLS server name that gets the handshake
++// through where the default one (consumer-masque.cloudflareclient.com) is blocked. Cloudflare's
++// endpoint answers any name, and the tunnel pins the endpoint's key, not the name.
++type MASQUENoisePreset struct {
++	Name       string
++	ServerName string
++}
++
++// MASQUENoisePresets are the noises the MASQUE scanner tries with search_noise, in this order
++// when none is rated on the network.
++var MASQUENoisePresets = []MASQUENoisePreset{
++	{Name: "speedtest", ServerName: "www.speedtest.net"},
++}
++
++// MASQUENoisePresetByName returns the MASQUE preset called name, in any case.
++func MASQUENoisePresetByName(name string) (MASQUENoisePreset, bool) {
++	name = strings.ToLower(strings.TrimSpace(name))
++	for _, preset := range MASQUENoisePresets {
++		if preset.Name == name {
++			return preset, true
++		}
++	}
++	return MASQUENoisePreset{}, false
++}
++
++// IsNoisePreset reports whether name is a WireGuard or a MASQUE noise preset: noise_presets
++// names both, and each tunnel takes its own.
++func IsNoisePreset(name string) bool {
++	if _, found := NoisePresetByName(name); found {
++		return true
++	}
++	_, found := MASQUENoisePresetByName(name)
++	return found
++}
+diff --git a/option/h_edge_search.go b/option/h_edge_search.go
+index 33ec4308896658411851b6daf06c6c432cddd88e..020931274ed9088d269bba9f9459b5442ef5c42d 100644
+--- a/option/h_edge_search.go
++++ b/option/h_edge_search.go
+@@ -8,7 +8,7 @@ import "github.com/sagernet/sing/common/json/badoption"
+ // address blocks it tries. Zero values keep the defaults.
+ type EdgeSearchOptions struct {
+ 	// SearchTimeout is how long a search goes on, round after round, before it gives up and
+-	// offers a deep search; 3m when zero. A deep search has no time limit: below zero, the search
++	// offers a deep search; 1m when zero. A deep search has no time limit: below zero, the search
+ 	// is one from the start, and above 3m it is a deep one with that limit (DeepConcurrency
+ 	// workers, and Psiphon's aggressive mode).
+ 	SearchTimeout badoption.Duration `json:"search_timeout,omitempty"`
+diff --git a/option/h_warp_scanner.go b/option/h_warp_scanner.go
+index d3b4c7452f974bcf3afc0f10401dbf843fa5bcb7..ff3a5573c39fe31a659bb2690f5797f538087255 100644
+--- a/option/h_warp_scanner.go
++++ b/option/h_warp_scanner.go
+@@ -24,12 +24,15 @@ type WARPScannerOptions struct {
+ 	// Concurrency is the number of probes run at once; 8 on Android and iOS, 32 elsewhere, when
+ 	// zero.
+ 	Concurrency int `json:"concurrency,omitempty"`
+-	// SearchNoise also looks for noise that gets through (WireGuard and AmneziaWG): when no
+-	// endpoint answers with the noise drawn first, the scan is tried again with the others, and
+-	// the one that works gains a point on the network (see warpscan.Book.OrderMethods).
++	// SearchNoise also looks for noise that gets through: when no endpoint answers with the noise
++	// drawn first, the scan is tried again with the others, and the one that works gains a point
++	// on the network (see warpscan.Book.OrderMethods). WireGuard and AmneziaWG try the packets of
++	// warpscan.NoisePresets; MASQUE tries the TLS server names of warpscan.MASQUENoisePresets
++	// (www.speedtest.net) next to its configured one.
+ 	SearchNoise bool `json:"search_noise,omitempty"`
+ 	// NoisePresets are the presets tried, in a weighted random order by their rating on the
+-	// network; all of warpscan.NoisePresets when empty.
++	// network; each tunnel takes the names of its own presets. All of warpscan.NoisePresets
++	// (WireGuard, AmneziaWG) and warpscan.MASQUENoisePresets (MASQUE) when empty.
+ 	NoisePresets badoption.Listable[string] `json:"noise_presets,omitempty"`
+ 	// EdgeSearchOptions: how long and how hard the search goes on.
+ 	EdgeSearchOptions
+diff --git a/protocol/group/balancer/h_balancer_bugs_test.go b/protocol/group/balancer/h_balancer_bugs_test.go
+index 58bf855df9ef036a873804d7777fa85e5e450934..7cd4ed0802def6d7741e4d45ce6aecb511394618 100644
+--- a/protocol/group/balancer/h_balancer_bugs_test.go
++++ b/protocol/group/balancer/h_balancer_bugs_test.go
+@@ -10,7 +10,6 @@ import (
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+-	"github.com/sagernet/sing/common"
+ 	N "github.com/sagernet/sing/common/network"
+ 
+ 	"github.com/stretchr/testify/require"
+diff --git a/protocol/group/balancer/h_balancer_test.go b/protocol/group/balancer/h_balancer_test.go
+index b4da43df8f0bba9d318e53396482006933e86dad..5d60ffe0ffb3b2fd45dc38b0778407a5c18134e4 100644
+--- a/protocol/group/balancer/h_balancer_test.go
++++ b/protocol/group/balancer/h_balancer_test.go
+@@ -13,7 +13,6 @@ import (
+ 	"github.com/sagernet/sing-box/adapter/htest"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+-	"github.com/sagernet/sing-box/adapter/htest"
+ 	"github.com/sagernet/sing-box/common/monitoring"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+diff --git a/protocol/group/balancer/h_stable.go b/protocol/group/balancer/h_stable.go
+index 71695b1de20068533f4609a6babe38b4a0726f5e..55a862d048750e86bcc575b1d4348ab02bc30d41 100644
+--- a/protocol/group/balancer/h_stable.go
++++ b/protocol/group/balancer/h_stable.go
+@@ -67,9 +67,11 @@ func Rank(his *adapter.URLTestHistory) uint16 {
+ }
+ 
+ // memberDead says whether a member's last test failed. A member that has no result yet is
+-// not dead: its connections may be fine, and it is tested soon.
++// not dead: its connections may be fine, and it is tested soon. Nor is one whose test missed only
++// its first mark (Tentative): an attempt may still answer, and on a slow network it does, so its
++// connections are closed only when the test ends failed (hiddify-app #2637).
+ func memberDead(his *adapter.URLTestHistory) bool {
+-	return his != nil && his.Delay >= monitoring.TimeoutDelay
++	return his != nil && his.Delay >= monitoring.TimeoutDelay && !his.Tentative
+ }
+ 
+ // memberGroup is the interrupt group of the member's connections, so a member that dies closes
+@@ -130,6 +132,9 @@ func (s *Balancer) settle(history map[string]*adapter.URLTestHistory) {
+ 	}
+ 	s.settled.Store(true)
+ 	for tag, group := range s.members {
++		if his := history[tag]; his != nil && his.Tentative {
++			continue // its test still runs: update closes its connections if it ends failed
++		}
+ 		if !keep[tag] {
+ 			group.Interrupt(s.interruptExternalConnections)
+ 		}
+diff --git a/protocol/group/balancer/h_stable_test.go b/protocol/group/balancer/h_stable_test.go
+index 56f407f3d70260cfc41219e9b4ab794e8b04cee9..df5488270c60326a84c382ca544bc919da687458 100644
+--- a/protocol/group/balancer/h_stable_test.go
++++ b/protocol/group/balancer/h_stable_test.go
+@@ -212,6 +212,27 @@ func TestH_BalancerInterruptsOnlyDeadMember(t *testing.T) {
+ 	requireOpen(t, onA, "external connections are kept without interrupt_exist_connections")
+ }
+ 
++// A staged test's miss at its first mark (Tentative) may move new connections, but it does not
++// close the member's open ones; only the test ending failed does. hiddify-app #2637: right after
++// start, the selected proxy missed the first mark, its connections were all cut, and it
++// answered in 313 ms a moment later.
++func TestH_BalancerKeepsConnectionsThroughATentativeMiss(t *testing.T) {
++	f := newStable(t, option.BalancerOutboundOptions{Strategy: StrategyLowestDelay, InterruptExistConnections: true})
++	f.lb.update(map[string]*adapter.URLTestHistory{"a": cached(80), "b": cached(300)})
++	require.Equal(t, "a", f.lb.Now())
++	onA := f.dial(t)
++
++	miss := timeout()
++	miss.Tentative = true
++	f.lb.update(map[string]*adapter.URLTestHistory{"a": miss, "b": cached(300)})
++	requireOpen(t, onA, "a tentative miss does not close the member's connections")
++	f.lb.settle(map[string]*adapter.URLTestHistory{"a": miss, "b": his(250)})
++	requireOpen(t, onA, "nor does the settle while the member's test still runs")
++
++	f.lb.update(map[string]*adapter.URLTestHistory{"a": timeout(), "b": his(250)})
++	requireClosed(t, onA, "the test ending failed closes them")
++}
++
+ // The first tests after start may move the selection several times; the connections made
+ // before them are moved once, when the settle window ends, and never again for speed.
+ func TestH_BalancerSettlesOnce(t *testing.T) {
+diff --git a/protocol/group/balancer/h_strategy_test.go b/protocol/group/balancer/h_strategy_test.go
+index 5efd75b7ed1e567c2fec3dbd6629fd0bf3f0cd96..d866c582b7de8692a02fa7b9ed1333e4434b1eab 100644
+--- a/protocol/group/balancer/h_strategy_test.go
++++ b/protocol/group/balancer/h_strategy_test.go
+@@ -14,7 +14,6 @@ import (
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/common/monitoring"
+ 	"github.com/sagernet/sing-box/option"
+-	"github.com/sagernet/sing/common"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
+ 
+diff --git a/protocol/masque/h_last_way_test.go b/protocol/masque/h_last_way_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..edc6e7089d12105bed0e2655e0d724b094eb2376
+--- /dev/null
++++ b/protocol/masque/h_last_way_test.go
+@@ -0,0 +1,55 @@
++package masque
++
++import (
++	"context"
++	"errors"
++	"net"
++	"net/netip"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/hiddify/edgescan"
++	"github.com/sagernet/sing-box/hiddify/warpscan"
++	"github.com/sagernet/sing-box/log"
++
++	"github.com/stretchr/testify/require"
++)
++
++// The endpoint a tunnel connected to is kept per HTTP version, and the first scan of the next
++// outbound takes it after one check, before it scans.
++func TestH_MASQUELastWay(t *testing.T) {
++	store := edgescan.OpenStore(nil, t.Name())
++	var probed []netip.AddrPort
++	answer := true
++	probe := func(ctx context.Context, addrPort netip.AddrPort) (time.Duration, error) {
++		probed = append(probed, addrPort)
++		if !answer {
++			return 0, errors.New("no answer")
++		}
++		return 10 * time.Millisecond, nil
++	}
++	newScanner := func() *masqueScanner {
++		return &masqueScanner{
++			ctx: context.Background(), logger: log.NewNOPFactory().Logger(), store: store,
++			book: store.Book(edgescan.KindWARPMASQUE), status: &warpscan.Status{},
++			probes:    map[bool]warpscan.Probe{false: probe, true: probe},
++			network:   warpscan.NetworkInfo{Name: "wifi/IR", IPv4: true},
++			searching: map[bool]bool{}, found: map[bool]net.Addr{}, lastTried: map[bool]bool{},
++		}
++	}
++	first := newScanner()
++	require.Nil(t, first.tryLastWay(true, nil), "nothing connected yet")
++	endpoint := netip.MustParseAddrPort("162.159.198.2:443")
++	first.OnConnected(endpointAddr(endpoint, true), true, 50*time.Millisecond)
++
++	next := newScanner()
++	require.Nil(t, next.tryLastWay(false, nil), "a way per HTTP version")
++	got := next.tryLastWay(true, nil)
++	require.Equal(t, endpointAddr(endpoint, true).String(), got.String())
++	require.Equal(t, []netip.AddrPort{endpoint}, probed)
++	require.False(t, next.status.IsScanning())
++	require.Nil(t, next.tryLastWay(true, nil), "once per outbound")
++
++	answer = false
++	require.Nil(t, newScanner().tryLastWay(true, nil), "a way that does not answer: the scan")
++}
+diff --git a/protocol/masque/h_noise.go b/protocol/masque/h_noise.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c62b0970ed3a129d8ae56c9253b4c77ea7e14870
+--- /dev/null
++++ b/protocol/masque/h_noise.go
+@@ -0,0 +1,274 @@
++package masque
++
++import (
++	"context"
++	"net/netip"
++	"sync"
++	"time"
++
++	"github.com/sagernet/sing-box/common/tls"
++	"github.com/sagernet/sing-box/hiddify/rating"
++	"github.com/sagernet/sing-box/hiddify/warpscan"
++	"github.com/sagernet/sing-box/option"
++	E "github.com/sagernet/sing/common/exceptions"
++	N "github.com/sagernet/sing/common/network"
++)
++
++// The noise of a MASQUE tunnel is its TLS server name: with search_noise, the scanner tries the
++// configured one and those of warpscan.MASQUENoisePresets (www.speedtest.net), keeps the one an
++// endpoint answers, and the tunnel connects with it. "" is the configured server name.
++
++type masqueScannerOptions = option.WARPScannerOptions
++
++// lastWayNoise is the method of a last way (see edgescan.LastWay) that names its noise.
++const lastWayNoise = "noise"
++
++// configuredNoisePrior is the score the configured server name counts as on a network where it
++// was never tried: the user chose it, so it comes first more often than an untried preset.
++const configuredNoisePrior rating.Score = 2
++
++// noiseSearchCount is the most endpoints a scan probes with a noise that did not get through on
++// the network before: the endpoints known to answer come first, so a few are enough to tell.
++const noiseSearchCount = 16
++
++// masqueNoises keeps the TLS configurations and probes of each noise, and the noise in use per
++// HTTP version.
++type masqueNoises struct {
++	probeDialer N.Dialer
++	base        tls.Config // the configured server name
++
++	access  sync.Mutex
++	configs map[string]tls.Config
++	probes  map[noiseProbeKey]warpscan.Probe
++	current map[bool]string // per HTTP/2
++}
++
++type noiseProbeKey struct {
++	noise string
++	http2 bool
++}
++
++func newMASQUENoises(probeDialer N.Dialer, base tls.Config) *masqueNoises {
++	return &masqueNoises{
++		probeDialer: probeDialer,
++		base:        base,
++		configs:     map[string]tls.Config{"": base},
++		probes:      make(map[noiseProbeKey]warpscan.Probe),
++		current:     make(map[bool]string),
++	}
++}
++
++// config is the TLS of noise: the configured one with the preset's server name.
++func (n *masqueNoises) config(noise string) tls.Config {
++	n.access.Lock()
++	defer n.access.Unlock()
++	if config, loaded := n.configs[noise]; loaded {
++		return config
++	}
++	preset, found := warpscan.MASQUENoisePresetByName(noise)
++	if !found {
++		return n.base
++	}
++	config := n.base.Clone()
++	config.SetServerName(preset.ServerName)
++	n.configs[noise] = config
++	return config
++}
++
++// probe is the probe of the HTTP version with noise.
++func (n *masqueNoises) probe(http2 bool, noise string) warpscan.Probe {
++	config := n.config(noise)
++	n.access.Lock()
++	defer n.access.Unlock()
++	key := noiseProbeKey{noise, http2}
++	if probe, loaded := n.probes[key]; loaded {
++		return probe
++	}
++	probe := warpscan.MASQUEProbe(n.probeDialer, config, http2)
++	n.probes[key] = probe
++	return probe
++}
++
++// TLSConfig is the TLS of the next connect of the HTTP version (see masque.TunnelOptions).
++func (n *masqueNoises) TLSConfig(http2 bool) tls.Config {
++	return n.config(n.noise(http2))
++}
++
++func (n *masqueNoises) noise(http2 bool) string {
++	if n == nil {
++		return ""
++	}
++	n.access.Lock()
++	defer n.access.Unlock()
++	return n.current[http2]
++}
++
++// use puts noise in use for the HTTP version, and reports whether it changed.
++func (n *masqueNoises) use(http2 bool, noise string) bool {
++	if n == nil {
++		return false
++	}
++	n.access.Lock()
++	defer n.access.Unlock()
++	changed := n.current[http2] != noise
++	n.current[http2] = noise
++	return changed
++}
++
++// noiseName names a noise for the log.
++func noiseName(noise string) string {
++	if noise == "" {
++		return "the configured server name"
++	}
++	if preset, found := warpscan.MASQUENoisePresetByName(noise); found {
++		return "server name " + preset.ServerName
++	}
++	return noise
++}
++
++// noisePresets are the MASQUE presets of options' scanner: those of noise_presets that are
++// MASQUE's, or all of them when it names none.
++func noisePresets(options *masqueScannerOptions) []string {
++	var presets []string
++	if len(options.NoisePresets) == 0 {
++		for _, preset := range warpscan.MASQUENoisePresets {
++			presets = append(presets, preset.Name)
++		}
++		return presets
++	}
++	for _, name := range options.NoisePresets {
++		if preset, found := warpscan.MASQUENoisePresetByName(name); found {
++			presets = append(presets, preset.Name)
++		}
++	}
++	return presets
++}
++
++// validateNoisePresets fails a noise_presets name that is no preset of WireGuard or MASQUE.
++func validateNoisePresets(options *masqueScannerOptions) error {
++	if options == nil {
++		return nil
++	}
++	for _, name := range options.NoisePresets {
++		if !warpscan.IsNoisePreset(name) {
++			return E.New("masque: unknown noise preset: ", name)
++		}
++	}
++	return nil
++}
++
++// noiseCandidates are the noises a scan tries on network (the configured server name, then the
++// presets), in a weighted random order by their score there (see warpscan.Book.OrderMethods):
++// the one that gets through most is tried first most of the time, the others now and then.
++// Without search_noise, the configured one alone.
++func (s *masqueScanner) noiseCandidates(networkName string) []string {
++	scanner := s.options.Scanner
++	if scanner == nil || !scanner.SearchNoise {
++		return []string{""}
++	}
++	byMethod := map[string]string{warpscan.NoiseMethod(""): ""}
++	methods := []string{warpscan.NoiseMethod("")}
++	for _, preset := range noisePresets(scanner) {
++		method := warpscan.NoiseMethod(preset)
++		if _, seen := byMethod[method]; !seen {
++			byMethod[method] = preset
++			methods = append(methods, method)
++		}
++	}
++	if len(methods) == 1 {
++		return []string{""}
++	}
++	ordered := s.book.OrderMethods(networkName, methods, func(method string) rating.Score {
++		if method == warpscan.NoiseMethod("") {
++			return configuredNoisePrior
++		}
++		return 0
++	})
++	candidates := make([]string, len(ordered))
++	for i, method := range ordered {
++		candidates[i] = byMethod[method]
++	}
++	return candidates
++}
++
++// noiseCount is the most endpoints the scan with the i-th of candidates probes: the full count
++// for the first, unless it never got through on the network while another did; noiseSearchCount
++// for the others.
++func (s *masqueScanner) noiseCount(networkName string, candidates []string, i int, count int) int {
++	if count > 0 && count <= noiseSearchCount {
++		return count
++	}
++	if i == 0 {
++		if score, _ := s.book.MethodScore(networkName, warpscan.NoiseMethod(candidates[0])); score > 0 {
++			return count
++		}
++		for _, candidate := range candidates {
++			if score, _ := s.book.MethodScore(networkName, warpscan.NoiseMethod(candidate)); score > 0 {
++				return noiseSearchCount
++			}
++		}
++		return count
++	}
++	return noiseSearchCount
++}
++
++// scanNoises scans with each noise of noiseCandidates until an endpoint answers, and returns the
++// endpoints and the noise. That noise gains a point on the network, and those tried before it
++// lose one; when none gets through, none is marked down.
++func (s *masqueScanner) scanNoises(ctx context.Context, network string, scan func(options *masqueScannerOptions, probe warpscan.Probe) ([]warpscan.Result, error), http2 bool) ([]warpscan.Result, string, error) {
++	candidates := s.noiseCandidates(network)
++	var (
++		lastErr error
++		failed  []string
++	)
++	for i, noise := range candidates {
++		options := *s.options.Scanner
++		if len(candidates) > 1 {
++			options.Count = s.noiseCount(network, candidates, i, options.Count)
++		}
++		results, err := scan(&options, s.probe(http2, noise))
++		if err != nil {
++			lastErr = err
++			if ctx.Err() != nil {
++				break
++			}
++			failed = append(failed, warpscan.NoiseMethod(noise))
++			continue
++		}
++		if len(candidates) > 1 {
++			s.book.SettleMethods(network, warpscan.NoiseMethod(noise), failed, time.Now())
++		}
++		return results, noise, nil
++	}
++	return nil, "", lastErr
++}
++
++// probe is the probe of the HTTP version with noise.
++func (s *masqueScanner) probe(http2 bool, noise string) warpscan.Probe {
++	if noise == "" || s.noises == nil {
++		return s.probes[http2]
++	}
++	return s.noises.probe(http2, noise)
++}
++
++// useNoise puts noise in use for the next connect of the HTTP version.
++func (s *masqueScanner) useNoise(http2 bool, noise string) {
++	if s.noises.use(http2, noise) {
++		s.logger.InfoContext(s.ctx, "WARP scanner: ", noiseName(noise), " gets through", versionSuffix(http2))
++	}
++}
++
++// probeLastWay checks addrPort with the noise of the last way, and puts that noise in use when it
++// answers.
++func (s *masqueScanner) probeLastWay(ctx context.Context, http2 bool, noise string, addrPort netip.AddrPort, try func(probe warpscan.Probe) (time.Duration, error)) (time.Duration, error) {
++	if noise != "" {
++		if _, found := warpscan.MASQUENoisePresetByName(noise); !found || s.options.Scanner == nil || !s.options.Scanner.SearchNoise {
++			noise = "" // a preset that is no longer offered
++		}
++	}
++	rtt, err := try(s.probe(http2, noise))
++	if err == nil {
++		s.useNoise(http2, noise)
++	}
++	return rtt, err
++}
+diff --git a/protocol/masque/h_noise_test.go b/protocol/masque/h_noise_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5d48e431bba91a3abba6954fb597c522279c57a6
+--- /dev/null
++++ b/protocol/masque/h_noise_test.go
+@@ -0,0 +1,101 @@
++package masque
++
++import (
++	"context"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"errors"
++	"net"
++	"net/netip"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/common/tls"
++	"github.com/sagernet/sing-box/hiddify/edgescan"
++	"github.com/sagernet/sing-box/hiddify/warpscan"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing-box/transport/masque"
++
++	"github.com/stretchr/testify/require"
++)
++
++func hMASQUETLS(t *testing.T) tls.Config {
++	t.Helper()
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	require.NoError(t, err)
++	cert, err := masque.GenerateCert(key, &key.PublicKey)
++	require.NoError(t, err)
++	config, err := tls.NewMASQUEClient(context.Background(), log.NewNOPFactory().Logger(), defaultServerName, cert, key, &key.PublicKey, option.MASQUEOutboundTLSOptions{})
++	require.NoError(t, err)
++	return config
++}
++
++// With search_noise, an endpoint that answers only www.speedtest.net is found (whichever server
++// name is drawn first), the server name gains a point on the network, and the tunnel's next
++// connect uses it.
++func TestH_MASQUESearchNoise(t *testing.T) {
++	store := edgescan.OpenStore(nil, t.Name())
++	endpoint := netip.MustParseAddrPort("162.159.198.1:443")
++	var probedNames []string
++	probe := func(serverName string) warpscan.Probe {
++		return func(ctx context.Context, addrPort netip.AddrPort) (time.Duration, error) {
++			probedNames = append(probedNames, serverName)
++			if serverName != "www.speedtest.net" || addrPort != endpoint {
++				return 0, errors.New("blocked")
++			}
++			return 10 * time.Millisecond, nil
++		}
++	}
++	noises := newMASQUENoises(nil, hMASQUETLS(t))
++	noises.probes[noiseProbeKey{"speedtest", false}] = probe("www.speedtest.net")
++	scanner := &masqueScanner{
++		ctx: context.Background(), logger: log.NewNOPFactory().Logger(), store: store,
++		book: store.Book(edgescan.KindWARPMASQUE), status: &warpscan.Status{},
++		options: option.MASQUEOutboundOptions{Scanner: &option.WARPScannerOptions{
++			Enabled: true, SearchNoise: true, Count: 4, CIDRs: []netip.Prefix{netip.PrefixFrom(endpoint.Addr(), 32)}, Ports: []uint16{443},
++		}},
++		probes:    map[bool]warpscan.Probe{false: probe(defaultServerName)},
++		noises:    noises,
++		network:   warpscan.NetworkInfo{Name: "wifi/IR", IPv4: true},
++		searching: map[bool]bool{}, found: map[bool]net.Addr{}, lastTried: map[bool]bool{},
++	}
++	require.Equal(t, defaultServerName, noises.TLSConfig(false).ServerName())
++
++	got, err := scanner.Scan(false, nil)
++	require.NoError(t, err)
++	require.Equal(t, endpointAddr(endpoint, false).String(), got.String())
++	require.Equal(t, "www.speedtest.net", noises.TLSConfig(false).ServerName())
++	require.Equal(t, defaultServerName, noises.TLSConfig(true).ServerName(), "per HTTP version")
++	score, _ := scanner.book.MethodScore("wifi/IR/h3", warpscan.NoiseMethod("speedtest"))
++	require.Positive(t, score)
++
++	// the next outbound checks the last way with its server name first
++	scanner.OnConnected(got, false, 50*time.Millisecond)
++	next := *scanner
++	next.noises = newMASQUENoises(nil, noises.base)
++	next.noises.probes[noiseProbeKey{"speedtest", false}] = probe("www.speedtest.net")
++	next.lastTried = map[bool]bool{}
++	probedNames = nil
++	require.NotNil(t, next.tryLastWay(false, nil))
++	require.Equal(t, []string{"www.speedtest.net"}, probedNames)
++	require.Equal(t, "www.speedtest.net", next.noises.TLSConfig(false).ServerName())
++}
++
++// Without search_noise, only the configured server name is tried.
++func TestH_MASQUENoiseCandidates(t *testing.T) {
++	store := edgescan.OpenStore(nil, t.Name())
++	scanner := &masqueScanner{book: store.Book(edgescan.KindWARPMASQUE), options: option.MASQUEOutboundOptions{Scanner: &option.WARPScannerOptions{Enabled: true}}}
++	require.Equal(t, []string{""}, scanner.noiseCandidates("wifi"))
++	scanner.options.Scanner.SearchNoise = true
++	require.ElementsMatch(t, []string{"", "speedtest"}, scanner.noiseCandidates("wifi"))
++	// noise_presets with WireGuard names only: no MASQUE preset is tried
++	scanner.options.Scanner.NoisePresets = []string{"dns"}
++	require.Equal(t, []string{""}, scanner.noiseCandidates("wifi"))
++	scanner.options.Scanner.NoisePresets = []string{"dns", "Speedtest"}
++	require.ElementsMatch(t, []string{"", "speedtest"}, scanner.noiseCandidates("wifi"))
++
++	require.NoError(t, validateNoisePresets(scanner.options.Scanner))
++	require.Error(t, validateNoisePresets(&option.WARPScannerOptions{NoisePresets: []string{"nope"}}))
++}
+diff --git a/protocol/masque/h_scanner.go b/protocol/masque/h_scanner.go
+index df6602065153706bb506d9de26448314c7f75bc7..06c2a7bb33920c09691ebd8daac836a163dd834c 100644
+--- a/protocol/masque/h_scanner.go
++++ b/protocol/masque/h_scanner.go
+@@ -48,7 +48,8 @@ type masqueScanner struct {
+ 	options     option.MASQUEOutboundOptions
+ 	key         string
+ 	traceDialer N.Dialer
+-	probes      map[bool]warpscan.Probe // per HTTP/2
++	probes      map[bool]warpscan.Probe // per HTTP/2, with the configured server name
++	noises      *masqueNoises           // the TLS and probes of the other server names, see h_noise.go
+ 
+ 	status *warpscan.Status
+ 
+@@ -62,6 +63,13 @@ type masqueScanner struct {
+ 	// while it holds its lock, and gets the one it found at its next ask
+ 	searching map[bool]bool
+ 	found     map[bool]net.Addr
++	// lastTried: the last way of the HTTP version was checked (see Scan)
++	lastTried map[bool]bool
++}
++
++// wayKey is the key of the last way of the HTTP version in the store (see edgescan.LastWay).
++func wayKey(http2 bool) string {
++	return edgescan.KindWARPMASQUE + versionSuffix(http2)
+ }
+ 
+ // Close ends the searches.
+@@ -85,6 +93,7 @@ func newMASQUEScanner(ctx context.Context, logger log.ContextLogger, key string,
+ 		ctx:         ctx,
+ 		cancel:      cancel,
+ 		searching:   make(map[bool]bool),
++		lastTried:   make(map[bool]bool),
+ 		found:       make(map[bool]net.Addr),
+ 		logger:      logger,
+ 		options:     options,
+@@ -95,13 +104,20 @@ func newMASQUEScanner(ctx context.Context, logger log.ContextLogger, key string,
+ 			false: warpscan.MASQUEProbe(probeDialer, tlsConfig, false),
+ 			true:  warpscan.MASQUEProbe(probeDialer, tlsConfig, true),
+ 		},
++		noises: newMASQUENoises(probeDialer, tlsConfig),
+ 	}
+ 	// the store shared by the scanners that reach the network directly, where the scores kept
+ 	// under the profile's key before join the others
+ 	scanner.store = edgescan.OpenScannerStore(ctx, options.Detour, key+"/edge-scanner")
+ 	scanner.store.Adopt(edgescan.KindWARPMASQUE, key+"/warp-scanner")
+ 	scanner.book = scanner.store.Book(edgescan.KindWARPMASQUE)
+-	scanner.DetectNetwork(false)
++	_, lastHTTP3 := scanner.store.LastWay(wayKey(false))
++	_, lastHTTP2 := scanner.store.LastWay(wayKey(true))
++	if lastHTTP3 || lastHTTP2 {
++		go scanner.DetectNetwork(false) // the last way is checked first, the network named meanwhile
++	} else {
++		scanner.DetectNetwork(false)
++	}
+ 	return scanner, nil
+ }
+ 
+@@ -116,10 +132,18 @@ func (s *masqueScanner) DetectNetwork(changed bool) {
+ 	s.access.Unlock()
+ }
+ 
++// currentNetwork is the network, named first when the start took the last way and has not yet.
+ func (s *masqueScanner) currentNetwork() warpscan.NetworkInfo {
+ 	s.access.Lock()
+-	defer s.access.Unlock()
+-	return s.network
++	network := s.network
++	s.access.Unlock()
++	if network.Name == "" {
++		s.DetectNetwork(false) // joins the naming that runs (see edgescan.Store.Network)
++		s.access.Lock()
++		network = s.network
++		s.access.Unlock()
++	}
++	return network
+ }
+ 
+ func (s *masqueScanner) save() {
+@@ -130,18 +154,25 @@ func (s *masqueScanner) save() {
+ 
+ // Scan finds the best answering endpoint of the HTTP version, without exclude, in one round: the
+ // tunnel's start waits for it.
++// The first scan of each HTTP version checks the way that worked last (see edgescan.LastWay)
++// before anything else, and takes it when it answers.
+ func (s *masqueScanner) Scan(http2 bool, exclude []netip.AddrPort) (net.Addr, error) {
++	if endpoint := s.tryLastWay(http2, exclude); endpoint != nil {
++		return endpoint, nil
++	}
+ 	s.status.Begin()
+-	results, err := s.scanRound(s.ctx, http2, exclude, false)
++	results, noise, err := s.scanRound(s.ctx, http2, exclude, false)
+ 	if err != nil {
+ 		s.status.NotFound()
+ 		return nil, err
+ 	}
+-	return s.use(results, http2), nil
++	return s.use(results, http2, noise), nil
+ }
+ 
+-func (s *masqueScanner) use(results []warpscan.Result, http2 bool) net.Addr {
++// use takes the best of results, found with noise.
++func (s *masqueScanner) use(results []warpscan.Result, http2 bool, noise string) net.Addr {
+ 	best := results[0]
++	s.useNoise(http2, noise)
+ 	s.status.Found(best.AddrPort)
+ 	s.logger.InfoContext(s.ctx, "WARP scanner: using ", best.AddrPort, versionSuffix(http2), " (score ", best.Score, ", ", best.RTT, ")")
+ 	return endpointAddr(best.AddrPort, http2)
+@@ -156,18 +187,29 @@ func (s *masqueScanner) search(http2 bool, exclude []netip.AddrPort, deepAsked b
+ 	if !edgescan.Direct(s.ctx, s.options.Detour) {
+ 		timeout, deep = -1, false // behind another proxy: one round, as before (see edgescan.Search)
+ 	}
++	type found struct { // the endpoints and the noise they answered with
++		results []warpscan.Result
++		noise   string
++	}
+ 	run := func(ctx context.Context) (any, error) {
+-		return edgescan.Search(ctx, s.logger, timeout, func(ctx context.Context) ([]warpscan.Result, error) {
+-			return s.scanRound(ctx, http2, exclude, deep)
++		var noise string
++		results, err := edgescan.Search(ctx, s.logger, timeout, func(ctx context.Context) ([]warpscan.Result, error) {
++			results, roundNoise, err := s.scanRound(ctx, http2, exclude, deep)
++			if err == nil {
++				noise = roundNoise
++			}
++			return results, err
+ 		})
++		return found{results, noise}, err
+ 	}
+ 	s.status.Begin()
+ 	value, err := s.store.Do(s.ctx, s.searchKey(http2, deep), run)
+-	results, _ := value.([]warpscan.Result)
+-	results = excludeResults(results, exclude)
++	shared, _ := value.(found)
++	results := excludeResults(shared.results, exclude)
+ 	if err == nil && len(results) == 0 { // every answer of the shared search is excluded here
+ 		value, err = run(s.ctx)
+-		results, _ = value.([]warpscan.Result)
++		shared, _ = value.(found)
++		results = shared.results
+ 	}
+ 	switch {
+ 	case err == nil && len(results) > 0:
+@@ -175,7 +217,7 @@ func (s *masqueScanner) search(http2 bool, exclude []netip.AddrPort, deepAsked b
+ 		if deepAsked {
+ 			s.status.Deep(false)
+ 		}
+-		return s.use(results, http2), nil
++		return s.use(results, http2, shared.noise), nil
+ 	case errors.Is(err, edgescan.ErrSearchExhausted):
+ 		s.status.NotFound()
+ 		if deepAsked {
+@@ -194,10 +236,11 @@ func (s *masqueScanner) search(http2 bool, exclude []netip.AddrPort, deepAsked b
+ // searchKey names a search for sharing: the network, the HTTP version and the scanner's options.
+ func (s *masqueScanner) searchKey(http2 bool, deep bool) string {
+ 	content, _ := json.Marshal(struct {
+-		Scanner any
+-		IPv6    bool
+-		Deep    bool
+-	}{s.options.Scanner, s.options.UseIPv6, deep})
++		Scanner    any
++		IPv6       bool
++		Deep       bool
++		ServerName string `json:",omitempty"` // the probes' configured server name
++	}{s.options.Scanner, s.options.UseIPv6, deep, s.options.ServerName})
+ 	sum := sha256.Sum256(content)
+ 	return edgescan.KindWARPMASQUE + "|" + s.currentNetwork().Name + versionSuffix(http2) + "|" + hex.EncodeToString(sum[:8])
+ }
+@@ -215,8 +258,9 @@ func excludeResults(results []warpscan.Result, exclude []netip.AddrPort) []warps
+ 	return kept
+ }
+ 
+-// scanRound is one round of a search.
+-func (s *masqueScanner) scanRound(ctx context.Context, http2 bool, exclude []netip.AddrPort, deep bool) ([]warpscan.Result, error) {
++// scanRound is one round of a search: with search_noise, one scan per noise until one gets an
++// answer (see scanNoises). It returns the noise the endpoints answered with.
++func (s *masqueScanner) scanRound(ctx context.Context, http2 bool, exclude []netip.AddrPort, deep bool) ([]warpscan.Result, string, error) {
+ 	network := s.currentNetwork()
+ 	ipv4, ipv6 := network.IPv4, network.IPv6
+ 	if s.options.UseIPv6 {
+@@ -226,29 +270,65 @@ func (s *masqueScanner) scanRound(ctx context.Context, http2 bool, exclude []net
+ 	if http2 {
+ 		defaults.CIDRs = warpscan.MASQUEHTTP2CIDRs
+ 	}
+-	results, err := warpscan.Scan(ctx, s.logger, warpscan.Request{
+-		Deep:     deep,
+-		Options:  s.options.Scanner,
+-		Defaults: defaults,
+-		IPv4:     ipv4,
+-		IPv6:     ipv6,
+-		Book:     s.book,
+-		Network:  network.Name + versionSuffix(http2),
+-		Exclude:  exclude,
+-		Probe:    s.probes[http2],
+-	})
++	networkName := network.Name + versionSuffix(http2)
++	results, noise, err := s.scanNoises(ctx, networkName, func(options *masqueScannerOptions, probe warpscan.Probe) ([]warpscan.Result, error) {
++		return warpscan.Scan(ctx, s.logger, warpscan.Request{
++			Deep:     deep,
++			Options:  options,
++			Defaults: defaults,
++			IPv4:     ipv4,
++			IPv6:     ipv6,
++			Book:     s.book,
++			Network:  networkName,
++			Exclude:  exclude,
++			Probe:    probe,
++		})
++	}, http2)
+ 	s.save()
+-	return results, err
++	return results, noise, err
+ }
+ 
+-// OnConnected counts a connect of the tunnel as an answer of its endpoint.
++// OnConnected counts a connect of the tunnel as an answer of its endpoint, and keeps it as the
++// last way of the HTTP version.
+ func (s *masqueScanner) OnConnected(endpoint net.Addr, http2 bool, elapsed time.Duration) {
+ 	if addrPort, ok := addrPortOf(endpoint); ok {
+-		s.book.Success(s.currentNetwork().Name+versionSuffix(http2), addrPort, elapsed, time.Now())
++		network := s.currentNetwork().Name
++		s.book.Success(network+versionSuffix(http2), addrPort, elapsed, time.Now())
++		s.store.RememberWay(wayKey(http2), edgescan.LastWay{Network: network, Target: edgescan.Target{AddrPort: addrPort}, Methods: map[string]string{lastWayNoise: s.noises.noise(http2)}})
+ 		s.save()
+ 	}
+ }
+ 
++// tryLastWay checks the last way of the HTTP version, once per outbound, before its first scan:
++// the endpoint when it answers, nil otherwise.
++func (s *masqueScanner) tryLastWay(http2 bool, exclude []netip.AddrPort) net.Addr {
++	s.access.Lock()
++	tried := s.lastTried[http2]
++	s.lastTried[http2] = true
++	s.access.Unlock()
++	if tried {
++		return nil
++	}
++	way, found := s.store.LastWay(wayKey(http2))
++	if !found || !way.Target.AddrPort.IsValid() || slices.Contains(exclude, way.Target.AddrPort) {
++		return nil
++	}
++	if s.options.UseIPv6 && !way.Target.AddrPort.Addr().Is6() {
++		return nil
++	}
++	rtt, err := s.probeLastWay(s.ctx, http2, way.Method(lastWayNoise), way.Target.AddrPort, func(probe warpscan.Probe) (time.Duration, error) {
++		return edgescan.TryLastWay(s.ctx, probe, way.Target.AddrPort)
++	})
++	if err != nil {
++		s.logger.InfoContext(s.ctx, "WARP scanner: the last way, ", way.Target.AddrPort, versionSuffix(http2), ", does not answer: ", err, "; searching")
++		return nil
++	}
++	s.status.Begin() // Found counts one scan out
++	s.status.Found(way.Target.AddrPort)
++	s.logger.InfoContext(s.ctx, "WARP scanner: the last way answers, ", way.Target.AddrPort, versionSuffix(http2), " (", rtt, ")")
++	return endpointAddr(way.Target.AddrPort, http2)
++}
++
+ // NextEndpoint looks for another endpoint than failed, and counts the failure once another one
+ // answers: when none does, the network is down, not the endpoint.
+ // The tunnel asks while it holds its lock, so it gets one round, and the search goes on in the
+@@ -265,14 +345,14 @@ func (s *masqueScanner) NextEndpoint(failed net.Addr, http2 bool) net.Addr {
+ 			exclude = append(exclude, addrPort)
+ 		}
+ 		s.status.Begin()
+-		results, err := s.scanRound(s.ctx, http2, exclude, false)
++		results, noise, err := s.scanRound(s.ctx, http2, exclude, false)
+ 		if err != nil {
+ 			s.status.NotFound()
+ 			s.logger.WarnContext(s.ctx, err, ", keeping ", failed, "; searching on")
+ 			s.searchInBackground(http2, exclude, false)
+ 			return nil
+ 		}
+-		next = s.use(results, http2)
++		next = s.use(results, http2, noise)
+ 	}
+ 	if ok {
+ 		s.book.Failure(s.currentNetwork().Name+versionSuffix(http2), addrPort, time.Now())
+diff --git a/protocol/masque/outbound.go b/protocol/masque/outbound.go
+index 80d08792ac7517f7c849d4669360ad8f07c21ea6..9ada780085cf3747df994f7a7d2a06d6f9ccdfdd 100644
+--- a/protocol/masque/outbound.go
++++ b/protocol/masque/outbound.go
+@@ -91,6 +91,9 @@ func newWARPOutbound(ctx context.Context, logger log.ContextLogger, tag string,
+ 	if _, err := tunnelMode(options); err != nil { // a wrong vhttp fails the config, not the start
+ 		return nil, err
+ 	}
++	if err := validateNoisePresets(options.Scanner); err != nil {
++		return nil, err
++	}
+ 	if profileKey == "" {
+ 		profileKey = options.UniqueIdentifier // H: unique_identifier, so renaming the outbound keeps the device
+ 	}
+@@ -231,6 +234,7 @@ func (w *Outbound) startTunnel(appConfig *Config) error {
+ 	}
+ 	if scanner != nil { // H: scores and failover
+ 		tunnel.SetFailover(scanner.OnConnected, scanner.NextEndpoint)
++		tunnel.SetTLSConfigFor(scanner.noises.TLSConfig)
+ 		w.tunnelAccess.Lock() // H
+ 		w.scanner = scanner
+ 		w.tunnelAccess.Unlock() // H
+diff --git a/protocol/psiphon/h_last_way.go b/protocol/psiphon/h_last_way.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4488290c023e6f42dd82f68dfb4993d1e40f69fa
+--- /dev/null
++++ b/protocol/psiphon/h_last_way.go
+@@ -0,0 +1,115 @@
++package psiphon
++
++import (
++	"slices"
++	"strings"
++	"time"
++
++	"github.com/sagernet/sing-box/hiddify/edgescan"
++)
++
++// As the first hop, Psiphon remembers the way through that worked last (see edgescan.LastWay):
++// the tunnel protocol of the tunnel that came up, the CDN edge it fronted through when the
++// protocol is a fronted one, and the network. The first attempt of a search tries it first:
++// the tunnel core starts at once, with that protocol first and a dial override for that edge,
++// for at most lastWayAttempt, while the scanner names the network and scans the edges in the
++// background. When the tunnel comes up, the outbound is ready, and the scan's scores serve the
++// next attempts. When it does not, the attempt ends and the search goes on as before, with the
++// scan that ran meanwhile. A working tunnel is not dropped for a better edge: the tunnel core
++// takes it at its next connect.
++
++const (
++	lastWayKey  = edgescan.KindPsiphon
++	wayProtocol = "protocol"
++	// lastWayAttempt is how long the tunnel core has to come up with the last way
++	lastWayAttempt = 30 * time.Second
++)
++
++// frontedProtocol reports whether protocol fronts through a CDN edge.
++func frontedProtocol(protocol string) bool {
++	return strings.Contains(protocol, "FRONTED")
++}
++
++// tryLastWay runs the first attempt of a search with the last way, and reports whether the tunnel
++// came up; false also when there is none, or it is not the first attempt of the search.
++func (h *Outbound) tryLastWay() bool {
++	if h.scanner == nil || h.scanner.store == nil || !h.lastWayPending {
++		return false
++	}
++	h.lastWayPending = false
++	restore, ok := h.useLastWay()
++	if !ok {
++		return false
++	}
++	h.scanner.beginAttempt()
++	go h.scanner.Scan() // names the network and scores the edges, for the tunnel and the next attempts
++	if err := h.psiphon.Start(); err == nil {
++		return true
++	} else if h.ctx.Err() == nil {
++		h.logger.Info(scannerName, ": the last way did not come up: ", err, "; searching")
++	}
++	h.psiphon.stop()
++	restore()
++	return false
++}
++
++// useLastWay sets the tunnel core up for the last way: its network, its protocol first, a dial
++// override for its edge, and at most lastWayAttempt. restore sets back what the attempt changed.
++func (h *Outbound) useLastWay() (restore func(), ok bool) {
++	way, found := h.scanner.store.LastWay(lastWayKey)
++	protocol := way.Method(wayProtocol)
++	config := h.psiphon.config
++	if !found || protocol == "" || (len(config.LimitTunnelProtocols) > 0 && !slices.Contains(config.LimitTunnelProtocols, protocol)) {
++		return nil, false
++	}
++	networkID, timeout := config.NetworkID, config.EstablishTunnelTimeoutSeconds
++	initial, initialCount := config.InitialLimitTunnelProtocols, config.InitialLimitTunnelProtocolsCandidateCount
++	overrides, builtInCDNScan := config.FrontedMeekDialOverrides, config.FrontedMeekCDNScanUseBuiltInSpec
++	restore = func() {
++		config.NetworkID, config.EstablishTunnelTimeoutSeconds = networkID, timeout
++		config.InitialLimitTunnelProtocols, config.InitialLimitTunnelProtocolsCandidateCount = initial, initialCount
++		config.FrontedMeekDialOverrides, config.FrontedMeekCDNScanUseBuiltInSpec = overrides, builtInCDNScan
++	}
++	if !h.fixedNetworkID && way.Network != "" {
++		config.NetworkID = way.Network
++	}
++	config.InitialLimitTunnelProtocols = []string{protocol}
++	config.InitialLimitTunnelProtocolsCandidateCount = preferredCandidates
++	config.FrontedMeekDialOverrides = nil
++	if frontedProtocol(protocol) && way.Target.AddrPort.IsValid() {
++		config.FrontedMeekDialOverrides = frontingOverrides([]edgescan.Result{{Target: way.Target}}, 1, h.scanner.setOf)
++	}
++	config.FrontedMeekCDNScanUseBuiltInSpec = len(config.FrontedMeekDialOverrides) == 0
++	if attempt := durationToSecondsPtr(lastWayAttempt); timeout == nil || *timeout <= 0 || *attempt < *timeout {
++		config.EstablishTunnelTimeoutSeconds = attempt
++	}
++	edge := "no edge"
++	if len(config.FrontedMeekDialOverrides) > 0 {
++		edge = way.Target.String()
++	}
++	h.logger.Info(scannerName, ": trying the last way first, ", protocol, " (", edge, "); scanning meanwhile")
++	return restore, true
++}
++
++// beginAttempt forgets the edge of the last attempt: the way kept when a tunnel comes up names
++// the edge of its own attempt.
++func (s *edgeScanner) beginAttempt() {
++	s.access.Lock()
++	s.lastEdge = edgescan.Target{}
++	s.access.Unlock()
++}
++
++// rememberWay keeps the way of a tunnel that came up with protocol.
++func (s *edgeScanner) rememberWay(protocol string) {
++	if s.store == nil {
++		return
++	}
++	s.access.Lock()
++	way := edgescan.LastWay{Network: s.network.Name, Methods: map[string]string{wayProtocol: protocol}}
++	if frontedProtocol(protocol) {
++		way.Target = s.lastEdge
++	}
++	s.access.Unlock()
++	s.store.RememberWay(lastWayKey, way)
++	s.save()
++}
+diff --git a/protocol/psiphon/h_last_way_test.go b/protocol/psiphon/h_last_way_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..267e61c8f5b78d36d363237da16efc0360341abe
+--- /dev/null
++++ b/protocol/psiphon/h_last_way_test.go
+@@ -0,0 +1,104 @@
++package psiphon
++
++import (
++	"context"
++	"net/netip"
++	"testing"
++
++	psiphon "github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon"
++	"github.com/sagernet/sing-box/hiddify/edgescan"
++	"github.com/sagernet/sing-box/log"
++
++	"github.com/stretchr/testify/require"
++)
++
++func hLastWayScanner(t *testing.T) *edgeScanner {
++	store := edgescan.OpenStore(nil, t.Name())
++	return &edgeScanner{
++		ctx:    context.Background(),
++		logger: log.NewNOPFactory().Logger(),
++		store:  store,
++		book:   store.Book(edgescan.KindPsiphon),
++		port:   cdnPort,
++	}
++}
++
++// The tunnel core's ActiveTunnel notice reaches the scanner: before, only Info notices did, so
++// the protocol of a tunnel that came up was never rated, nor kept.
++func TestH_PsiphonActiveTunnelReachesScanner(t *testing.T) {
++	p := &Psiphon{logger: log.NewNOPFactory().Logger()}
++	var seen []string
++	p.onInfo = func(event NoticeEvent) { seen = append(seen, event.Type) }
++	p.onNotice(NoticeEvent{Type: "ActiveTunnel", Data: map[string]interface{}{"protocol": "OSSH"}}, func() {})
++	p.onNotice(NoticeEvent{Type: "Info", Data: map[string]interface{}{"message": "x"}}, func() {})
++	p.onNotice(NoticeEvent{Type: "Alert", Data: map[string]interface{}{}}, func() {})
++	require.Equal(t, []string{"ActiveTunnel", "Info"}, seen)
++}
++
++// A tunnel that comes up is kept as the last way: its protocol, and for a fronted one the edge
++// the core connected over in that attempt.
++func TestH_PsiphonRemembersWay(t *testing.T) {
++	s := hLastWayScanner(t)
++	s.network.Name = "wifi/IR"
++	edge := edgescan.Target{AddrPort: netip.MustParseAddrPort("23.1.2.3:443"), ServerName: "a.example"}
++	s.onNotice(NoticeEvent{Type: "Info", Data: map[string]interface{}{"message": `cdn fronting scan found (ip: 23\.1\.2\.3, sni: a.example)`}})
++	s.onNotice(NoticeEvent{Type: "ActiveTunnel", Data: map[string]interface{}{"protocol": "FRONTED-MEEK-OSSH"}})
++	way, found := s.store.LastWay(lastWayKey)
++	require.True(t, found)
++	require.Equal(t, "FRONTED-MEEK-OSSH", way.Method(wayProtocol))
++	require.Equal(t, edge, way.Target)
++	require.Equal(t, "wifi/IR", way.Network)
++	score, _ := s.book.MethodScore("wifi/IR", protocolMethod("FRONTED-MEEK-OSSH"))
++	require.Positive(t, score, "the protocol is rated")
++
++	s.beginAttempt()
++	s.onNotice(NoticeEvent{Type: "ActiveTunnel", Data: map[string]interface{}{"protocol": "OSSH"}})
++	way, _ = s.store.LastWay(lastWayKey)
++	require.Equal(t, "OSSH", way.Method(wayProtocol))
++	require.False(t, way.Target.AddrPort.IsValid(), "no edge for a protocol that does not front")
++}
++
++// The first attempt of a search with a last way starts the tunnel core with it: its protocol
++// first, its edge, its network, for a short attempt; what it changed is set back after.
++func TestH_PsiphonUseLastWay(t *testing.T) {
++	s := hLastWayScanner(t)
++	h := &Outbound{logger: log.NewNOPFactory().Logger(), scanner: s, psiphon: &Psiphon{config: &psiphon.Config{}}}
++	config := h.psiphon.config
++	config.LimitTunnelProtocols = firstHopProtocols
++	config.NetworkID = "test"
++	config.EstablishTunnelTimeoutSeconds = durationToSecondsPtr(defaultEstablishTunnelTimeout)
++	config.FrontedMeekCDNScanUseBuiltInSpec = true
++	_, ok := h.useLastWay()
++	require.False(t, ok, "nothing worked yet")
++
++	edge := edgescan.Target{AddrPort: netip.MustParseAddrPort("151.101.1.1:443")} // fastly
++	s.store.RememberWay(lastWayKey, edgescan.LastWay{Network: "wifi/IR", Target: edge, Methods: map[string]string{wayProtocol: "FRONTED-MEEK-OSSH"}})
++	restore, ok := h.useLastWay()
++	require.True(t, ok)
++	require.Equal(t, "wifi/IR", config.NetworkID)
++	require.Equal(t, []string{"FRONTED-MEEK-OSSH"}, []string(config.InitialLimitTunnelProtocols))
++	require.Len(t, config.FrontedMeekDialOverrides, 1)
++	require.Equal(t, []string{"151.101.1.1"}, config.FrontedMeekDialOverrides[0].DialAddresses)
++	require.False(t, config.FrontedMeekCDNScanUseBuiltInSpec)
++	require.Equal(t, int(lastWayAttempt.Seconds()), *config.EstablishTunnelTimeoutSeconds)
++
++	restore()
++	require.Equal(t, "test", config.NetworkID)
++	require.Empty(t, config.InitialLimitTunnelProtocols)
++	require.Empty(t, config.FrontedMeekDialOverrides)
++	require.True(t, config.FrontedMeekCDNScanUseBuiltInSpec)
++	require.Equal(t, int(defaultEstablishTunnelTimeout.Seconds()), *config.EstablishTunnelTimeoutSeconds)
++
++	h.fixedNetworkID = true
++	s.store.RememberWay(lastWayKey, edgescan.LastWay{Network: "wifi/IR", Methods: map[string]string{wayProtocol: "OSSH"}})
++	_, ok = h.useLastWay()
++	require.True(t, ok)
++	require.Equal(t, "test", config.NetworkID, "network_id is kept")
++	require.Empty(t, config.FrontedMeekDialOverrides)
++	require.True(t, config.FrontedMeekCDNScanUseBuiltInSpec)
++
++	config.LimitTunnelProtocols = chainedProtocols
++	s.store.RememberWay(lastWayKey, edgescan.LastWay{Methods: map[string]string{wayProtocol: "FRONTED-MEEK-QUIC-OSSH"}})
++	_, ok = h.useLastWay()
++	require.False(t, ok, "a protocol the outbound no longer uses")
++}
+diff --git a/protocol/psiphon/h_scanner.go b/protocol/psiphon/h_scanner.go
+index 38639e29dec8d3c62e1ed5940fb02c9d242566cc..cc5c9afc2d3ad0e11ea7862a294399300440835d 100644
+--- a/protocol/psiphon/h_scanner.go
++++ b/protocol/psiphon/h_scanner.go
+@@ -69,6 +69,8 @@ type edgeScanner struct {
+ 	status  edgescan.Status
+ 	// seedSets are the sets of the seeds of the last scan, by address
+ 	seedSets map[netip.Addr]string
++	// lastEdge is the edge the tunnel core connected over in this attempt (see h_last_way.go)
++	lastEdge edgescan.Target
+ }
+ 
+ const (
+@@ -558,6 +560,7 @@ func (s *edgeScanner) onNotice(event NoticeEvent) {
+ 	}
+ 	s.access.Lock()
+ 	network := s.network.Name
++	s.lastEdge = target
+ 	s.access.Unlock()
+ 	if network == "" {
+ 		return
+@@ -573,10 +576,14 @@ func protocolMethod(name string) string { return "proto/" + name }
+ // protocolConnected gives the protocol of a tunnel that came up a point on the network.
+ func (s *edgeScanner) protocolConnected(event NoticeEvent) {
+ 	protocol, _ := event.Data["protocol"].(string)
++	if protocol == "" {
++		return
++	}
++	s.rememberWay(protocol)
+ 	s.access.Lock()
+ 	network := s.network.Name
+ 	s.access.Unlock()
+-	if protocol == "" || network == "" {
++	if network == "" {
+ 		return
+ 	}
+ 	s.book.MethodSuccess(network, protocolMethod(protocol), time.Now())
+diff --git a/protocol/psiphon/h_search.go b/protocol/psiphon/h_search.go
+index 509dacfc4f49f5a92362ce33fab0d20e9eb9c0f8..83fffc90a999c95d6a3e65a9bfbca67c9ccd8c3f 100644
+--- a/protocol/psiphon/h_search.go
++++ b/protocol/psiphon/h_search.go
+@@ -10,9 +10,10 @@ import (
+ )
+ 
+ // As the first hop (with the scanner), Psiphon searches for a way through for the scanner's
+-// search_timeout (3 minutes): edge scans and tunnel core attempts, one after the other. When no
+-// tunnel comes up within it, the outbound stops trying and offers a deep search
+-// (adapter.DeepSearcher), which the app starts when the user agrees: the tunnel core then tries
++// search_timeout (1 minute): edge scans and tunnel core attempts, one after the other. When no
++// tunnel comes up within it, the outbound offers a deep search (adapter.DeepSearcher) and goes on
++// trying as before, with the restart backoff; the app starts the deep search when the user
++// agrees, at once, ending the attempt that runs: the tunnel core then tries
+ // with no time limit in its aggressive mode, with more workers, and the scans with
+ // deep_concurrency. A search_timeout below zero, or above 3 minutes, is a deep search from the
+ // start. A new network starts a normal search again. Behind another proxy there is no search
+@@ -89,21 +90,12 @@ func (h *Outbound) searchExhausted(searchStart time.Time) bool {
+ 	return true
+ }
+ 
+-// waitSearch waits after a search gave up: for a deep search to be asked for, for another
+-// network, or for restartMax, after which a normal search runs again (the deep search stays
+-// offered), so a Psiphon that lost its tunnel to an outage comes back without the app; false
+-// when the outbound closes.
+-func (h *Outbound) waitSearch() bool {
+-	select {
+-	case <-h.ctx.Done():
+-		return false
+-	case <-h.reconnectCh:
+-		if !h.scanner.status.IsDeep() {
+-			h.scanner.status.Exhausted(false) // another network: a normal search
+-		}
+-		return true
+-	case <-time.After(restartMax):
+-		return true
++// searchWoken starts the search over when the loop is woken: by a deep search asked for, which
++// it runs, or by another network, where a normal search runs again and no deep search is offered
++// until it gives up too.
++func (h *Outbound) searchWoken() {
++	if h.scanner != nil && !h.scanner.status.IsDeep() {
++		h.scanner.status.Exhausted(false)
+ 	}
+ }
+ 
+@@ -122,6 +114,9 @@ func (h *Outbound) StartDeepSearch() error {
+ 		return nil // nothing gave up, or a deep search runs
+ 	}
+ 	h.logger.Info("psiphon: deep search")
++	if !h.psiphon.IsConnected() { // the attempt of the normal search ends now, not at its timeout
++		h.psiphon.stop()
++	}
+ 	h.requestReconnect()
+ 	return nil
+ }
+diff --git a/protocol/psiphon/h_search_test.go b/protocol/psiphon/h_search_test.go
+index 94a054ebd76c7328c0e8b17c965bc5acbb28b00b..73e3a2d59c5f33361613185ed698ad88a40ee82e 100644
+--- a/protocol/psiphon/h_search_test.go
++++ b/protocol/psiphon/h_search_test.go
+@@ -23,7 +23,8 @@ func TestH_PsiphonSearch(t *testing.T) {
+ 	require.NotNil(t, out.scanner, "the first hop scans")
+ 	require.Equal(t, edgescan.PlatformDefault(16, 48), scannerDefaults.Concurrency)
+ 
+-	start := time.Now().Add(-2*time.Minute - 50*time.Second)
++	require.Equal(t, time.Minute, edgescan.DefaultSearchTimeout)
++	start := time.Now().Add(-50 * time.Second)
+ 	out.limitSearch(start)
+ 	require.Equal(t, int(minAttempt/time.Second), *out.psiphon.config.EstablishTunnelTimeoutSeconds, "the attempt ends with the search")
+ 	require.False(t, out.psiphon.config.AggressiveEstablishment)
+@@ -35,7 +36,10 @@ func TestH_PsiphonSearch(t *testing.T) {
+ 
+ 	require.NoError(t, out.StartDeepSearch())
+ 	require.False(t, adapter.DeepSearchAvailable(out), "it runs")
+-	require.True(t, out.waitSearch(), "the deep search wakes the loop")
++	require.Len(t, out.reconnectCh, 1, "the deep search wakes the loop")
++	<-out.reconnectCh
++	out.searchWoken()
++	require.True(t, out.scanner.status.IsDeep(), "woken by the deep search, which it runs")
+ 	out.limitSearch(time.Now())
+ 	require.Equal(t, int(deepAttempt/time.Second), *out.psiphon.config.EstablishTunnelTimeoutSeconds, "no limit, in attempts that each scan first")
+ 	require.True(t, out.psiphon.config.AggressiveEstablishment)
+@@ -44,7 +48,7 @@ func TestH_PsiphonSearch(t *testing.T) {
+ 	out.searchFound()
+ 	require.False(t, out.scanner.status.IsDeep())
+ 	out.limitSearch(time.Now())
+-	require.InDelta(t, int(defaultEstablishTunnelTimeout/time.Second), *out.psiphon.config.EstablishTunnelTimeoutSeconds, 1)
++	require.InDelta(t, int(min(defaultEstablishTunnelTimeout, edgescan.DefaultSearchTimeout)/time.Second), *out.psiphon.config.EstablishTunnelTimeoutSeconds, 1, "a new search: an attempt is at most its time")
+ 	require.NoError(t, out.Close())
+ }
+ 
+@@ -132,8 +136,8 @@ func TestH_PsiphonDirectDetour(t *testing.T) {
+ 	require.False(t, scannerByDetour(proxy.ctx, proxy.options))
+ }
+ 
+-// After a search gave up, Psiphon tries again after restartMax by itself, the deep search still
+-// offered; a deep search is only started once a search gave up, and once.
++// After a search gave up, Psiphon goes on trying with its backoff, the deep search still offered;
++// another network takes the offer back, for a normal search there first; a deep search is only started once a search gave up, and once.
+ func TestH_PsiphonSearchKeepsTrying(t *testing.T) {
+ 	t.Parallel()
+ 	out := newTestOutbound(t, option.PsiphonOutboundOptions{DataDirectory: t.TempDir()})
+@@ -146,5 +150,12 @@ func TestH_PsiphonSearchKeepsTrying(t *testing.T) {
+ 	require.Len(t, out.reconnectCh, 1, "one wake")
+ 	out.searchFound()
+ 	require.Empty(t, out.reconnectCh, "a wake asked for before the tunnel came up is done")
++
++	require.True(t, out.searchExhausted(time.Now().Add(-edgescan.DefaultSearchTimeout)))
++	out.InterfaceUpdated(out.ctx)
++	require.Len(t, out.reconnectCh, 1, "another network wakes the loop")
++	<-out.reconnectCh
++	out.searchWoken()
++	require.False(t, adapter.DeepSearchAvailable(out), "a normal search runs on the new network")
+ 	require.NoError(t, out.Close())
+ }
+diff --git a/protocol/psiphon/h_tunnel_protocols.go b/protocol/psiphon/h_tunnel_protocols.go
+index 1eaf5258fe7f9cb001f140dcb724a229b2a6f317..1c60323544963db8f102ee62d29cf9a2f65f5627 100644
+--- a/protocol/psiphon/h_tunnel_protocols.go
++++ b/protocol/psiphon/h_tunnel_protocols.go
+@@ -104,6 +104,7 @@ func (h *Outbound) scanEdges() {
+ 	if h.scanner == nil {
+ 		return
+ 	}
++	h.scanner.beginAttempt()
+ 	network, results, err := h.scanner.Scan()
+ 	if !h.fixedNetworkID && network.Name != "" {
+ 		h.psiphon.config.NetworkID = network.Name
+diff --git a/protocol/psiphon/outbound.go b/protocol/psiphon/outbound.go
+index 1b31ebc3cccce02ef92c9a402b36fbca7e578196..75477ba3a7472b26b9beb85a19386df091dee867 100644
+--- a/protocol/psiphon/outbound.go
++++ b/protocol/psiphon/outbound.go
+@@ -73,6 +73,7 @@ type Outbound struct {
+ 	// establishTimeout is establish_tunnel_timeout, which a search shortens (see h_search.go)
+ 	establishTimeout time.Duration
+ 	options          option.PsiphonOutboundOptions // H: for the first hop by detour, see PreStart
++	lastWayPending   bool                          // H: the next attempt is the first of a search: it tries the last way (see h_last_way.go)
+ }
+ 
+ type tunnelOwner struct{ notify func() }
+@@ -419,6 +420,7 @@ const (
+ func (h *Outbound) run() {
+ 	backoff := restartMin
+ 	searchStart := time.Now() //H: see h_search.go
++	h.lastWayPending = true   //H
+ 	for {
+ 		// H: no network (no Wi-Fi, no mobile data, or paused): wait for one instead of trying,
+ 		// and the wait does not count toward the search
+@@ -435,31 +437,34 @@ func (h *Outbound) run() {
+ 			h.psiphon.Wait()
+ 			err = E.New("the controller stopped")
+ 			searchStart = time.Now() //H: the tunnel was lost: a new search
++			h.lastWayPending = true  //H
+ 		}
+ 		h.psiphon.stop()
+ 		h.psiphon.waitStopped()
+ 		if h.ctx.Err() != nil {
+ 			return
+ 		}
+-		if h.searchExhausted(searchStart) { //H: wait for a deep search or another network
+-			if !h.waitSearch() {
+-				return
+-			}
+-			searchStart, backoff = time.Now(), restartMin
+-			continue
+-		}
++		if h.searchExhausted(searchStart) { //H: a deep search is offered, and the normal search goes on
++			searchStart = time.Now() //H
++		} //H
+ 		h.logger.Warn("psiphon: ", err, ", starting again in ", backoff)
+ 		select {
+ 		case <-h.ctx.Done():
+ 			return
+ 		case <-time.After(backoff):
+ 		case <-h.reconnectCh: //H: a deep search asked for, or another network
++			h.searchWoken()                               //H
++			searchStart, backoff = time.Now(), restartMin //H
++			continue                                      //H
+ 		}
+ 		backoff = min(backoff*2, restartMax)
+ 	}
+ }
+ 
+ func (h *Outbound) connectOnce() error {
++	if h.tryLastWay() { //H
++		return nil //H
++	} //H
+ 	h.scanEdges()
+ 	return h.psiphon.Start()
+ }
+diff --git a/protocol/psiphon/psiphon.go b/protocol/psiphon/psiphon.go
+index bb6e03d00bd755e49d61f68a4687112e4e76168f..7d4c023f071606a520895daf172721134f934b93 100644
+--- a/protocol/psiphon/psiphon.go
++++ b/protocol/psiphon/psiphon.go
+@@ -314,7 +314,7 @@ func NewPsiphon(ctx context.Context, l logger.ContextLogger, config *psiphon.Con
+ // one check its own controller (hasTunnel).
+ func (p *Psiphon) onNotice(event NoticeEvent, connectedSignal func()) {
+ 	p.logger.Debug(fmt.Sprint("Notice ", event.Type, " data ", event.Data))
+-	if event.Type == "Info" && p.onInfo != nil {
++	if (event.Type == "Info" || event.Type == "ActiveTunnel") && p.onInfo != nil { //H: the scanner rates the protocol of a tunnel that came up
+ 		p.onInfo(event)
+ 	}
+ 	if event.Type != "Tunnels" {
+diff --git a/protocol/warp/endpoint_warp.go b/protocol/warp/endpoint_warp.go
+index c7ceae743a021b32965f1b8abb67996f9286a76b..b2d9253702c693c3206b4d37571fb57eae48ddf0 100644
+--- a/protocol/warp/endpoint_warp.go
++++ b/protocol/warp/endpoint_warp.go
+@@ -67,6 +67,7 @@ type WARPEndpoint struct {
+ 	mode          string        // H: the tunnel, see h_mode.go
+ 	active        atomic.Value  // H: in auto mode, the tunnel chosen
+ 	selecting     atomic.Bool   // H: auto mode races the tunnels
++	raceNext      atomic.Bool   // H: auto mode races at the next start, without the last tunnel (see h_last_way.go)
+ 	profiles      *warpProfiles // H: the devices, see h_profiles.go
+ 	profile       *warpProfile  // H: the device in use, guarded by mtx
+ 	recreated     sync.Map      // H: kinds registered anew for profile.recreate
+@@ -103,7 +104,7 @@ func NewWARPEndpoint(ctx context.Context, router adapter.Router, logger log.Cont
+ 	} //H
+ 	if options.Scanner != nil { //H
+ 		for _, name := range options.Scanner.NoisePresets { //H
+-			if _, found := warpscan.NoisePresetByName(name); !found { //H
++			if !warpscan.IsNoisePreset(name) { //H: WireGuard's or MASQUE's
+ 				return nil, E.New("warp: unknown noise preset: ", name) //H
+ 			} //H
+ 		} //H
+diff --git a/protocol/warp/h_deep_search.go b/protocol/warp/h_deep_search.go
+index fbc340f9ef25ee9c20807c37cb76905d47a80a0f..0697677a6e913f8af0825e71fbb03635db4fc983 100644
+--- a/protocol/warp/h_deep_search.go
++++ b/protocol/warp/h_deep_search.go
+@@ -17,8 +17,8 @@ import (
+ 	E "github.com/sagernet/sing/common/exceptions"
+ )
+ 
+-// A search for an endpoint goes on, round after round, for the scanner's search_timeout (3
+-// minutes): the first round usually finds one, and on a network that filters most of them the
++// A search for an endpoint goes on, round after round, for the scanner's search_timeout (1
++// minute): the first round usually finds one, and on a network that filters most of them the
+ // next rounds walk on through the ranges. When it finds nothing, the endpoint uses the profile's
+ // endpoint as before, and offers a deep search (adapter.DeepSearcher): no time limit and more
+ // workers, which the app starts when the user agrees. A search_timeout below zero, or above 3
+diff --git a/protocol/warp/h_failover.go b/protocol/warp/h_failover.go
+index 076c363b904a935b7eeee86db28092bd7914b156..66a07222a4c3ebbb79e5fe749d732784e53a6683 100644
+--- a/protocol/warp/h_failover.go
++++ b/protocol/warp/h_failover.go
+@@ -75,13 +75,18 @@ func (w *WARPEndpoint) connect(session *warpSession, config *C.WARPConfig) {
+ 	var (
+ 		current     netip.AddrPort
+ 		failover    *warpFailover
+-		deepPending bool // a deep search from the start goes on once the endpoint runs
++		deepPending bool          // a deep search from the start goes on once the endpoint runs
++		tookLastWay bool          // the start took the last way (see h_last_way.go)
++		lastWayRTT  time.Duration // its handshake time
++		searchFound bool
+ 	)
+ 	if w.scannerEnabled() {
+ 		w.mtx.Lock()
+ 		network := session.network // named by auto mode
+ 		w.mtx.Unlock()
+-		failover, err = w.newFailover(session.ctx, config, network)
++		way, hasWay := w.lastWay(w.activeMode())
++		// with a last way, the network is named after it is checked, not before
++		failover, err = w.newFailover(session.ctx, config, network, !hasWay)
+ 		if err != nil {
+ 			failover = nil
+ 			w.logger.WarnContext(w.ctx, "WARP scanner: ", err)
+@@ -89,14 +94,31 @@ func (w *WARPEndpoint) connect(session *warpSession, config *C.WARPConfig) {
+ 			if !w.publish(done, func() { w.failover, session.failover = failover, failover }) {
+ 				return
+ 			}
+-			results, err := w.searchWithin(session.ctx, failover, nil, true, false)
+-			deepPending = err != nil && edgescan.ConfiguredDeep(searchOptions(w.options.Scanner))
+-			if err != nil {
+-				w.logger.WarnContext(w.ctx, err, ", using the profile's endpoint")
+-			} else {
+-				current = results[0].AddrPort
+-				peerAddr, peerPort = current.Addr().String(), current.Port()
+-				w.logger.InfoContext(w.ctx, "WARP scanner: using ", current, " (score ", results[0].Score, ", ", results[0].RTT, ")")
++			if hasWay {
++				if rtt, answered := w.tryLastWay(session.ctx, failover, way); answered {
++					current, tookLastWay, lastWayRTT = way.Target.AddrPort, true, rtt
++					peerAddr, peerPort = current.Addr().String(), current.Port()
++				} else if session.ctx.Err() != nil {
++					return
++				} else if w.mode == modeAuto && session.lastTunnel {
++					// auto mode took the last tunnel without a race: race now
++					w.raceNext.Store(true)
++					w.restart("auto mode: the last way of " + w.activeMode() + " does not answer")
++					return
++				} else {
++					w.nameNetwork(session.ctx, failover)
++				}
++			}
++			if !tookLastWay {
++				results, err := w.searchWithin(session.ctx, failover, nil, true, false)
++				deepPending = err != nil && edgescan.ConfiguredDeep(searchOptions(w.options.Scanner))
++				if err != nil {
++					w.logger.WarnContext(w.ctx, err, ", using the profile's endpoint")
++				} else {
++					current, searchFound = results[0].AddrPort, true
++					peerAddr, peerPort = current.Addr().String(), current.Port()
++					w.logger.InfoContext(w.ctx, "WARP scanner: using ", current, " (score ", results[0].Score, ", ", results[0].RTT, ")")
++				}
+ 			}
+ 		}
+ 	}
+@@ -123,6 +145,11 @@ func (w *WARPEndpoint) connect(session *warpSession, config *C.WARPConfig) {
+ 		adapter.CloseLate(w.scope, inner) // the start ended meanwhile
+ 		return
+ 	}
++	if tookLastWay {
++		go w.searchBetter(session, failover, lastWayRTT)
++	} else if searchFound {
++		w.rememberWay(failover) // the endpoint the search found answered its handshake
++	}
+ 	if deepPending {
+ 		if err := w.StartDeepSearch(); err != nil {
+ 			w.logger.WarnContext(w.ctx, err)
+@@ -183,8 +210,8 @@ func (w *WARPEndpoint) newInner(config *C.WARPConfig, peerAddr string, peerPort
+ }
+ 
+ // newFailover sets up the scanner of a start; network is the network auto mode named for it, nil
+-// to name it here.
+-func (w *WARPEndpoint) newFailover(ctx context.Context, config *C.WARPConfig, network *warpscan.NetworkInfo) (*warpFailover, error) {
++// to name it here, unless detect is false: the start names it later (see nameNetwork).
++func (w *WARPEndpoint) newFailover(ctx context.Context, config *C.WARPConfig, network *warpscan.NetworkInfo, detect bool) (*warpFailover, error) {
+ 	probeDialer, err := dialer.NewWithOptions(dialer.Options{
+ 		Context:          w.ctx,
+ 		Options:          w.options.DialerOptions,
+@@ -217,7 +244,7 @@ func (w *WARPEndpoint) newFailover(ctx context.Context, config *C.WARPConfig, ne
+ 	}
+ 	if network != nil {
+ 		failover.network = *network
+-	} else {
++	} else if detect {
+ 		failover.detectNetwork(ctx)
+ 		detected := failover.currentNetwork()
+ 		w.ratedNetwork.Store(&detected)
+@@ -329,6 +356,9 @@ func (w *WARPEndpoint) noiseCandidates(failover *warpFailover, networkName strin
+ 	byMethod := map[string]string{warpscan.NoiseMethod(""): ""}
+ 	methods := []string{warpscan.NoiseMethod("")}
+ 	for _, preset := range presets {
++		if _, isWireGuard := warpscan.NoisePresetByName(preset); !isWireGuard {
++			continue // a MASQUE noise (a server name), for the MASQUE tunnel
++		}
+ 		method := warpscan.NoiseMethod(preset)
+ 		if _, seen := byMethod[method]; !seen {
+ 			byMethod[method] = preset
+@@ -562,11 +592,14 @@ func (w *WARPEndpoint) check(session *warpSession, networkChanged bool) {
+ 		return
+ 	}
+ 	network := failover.currentNetwork().Name
++	if network == "" { // a start that took the last way names it in the background
++		return
++	}
+ 	lastHandshake, tx := peerStatus(inner)
+ 	if !failover.recorded && lastHandshake.After(failover.connectedAt) {
+ 		failover.recorded = true
+ 		failover.book.Success(network, failover.current, 0, time.Now())
+-		w.saveScores(failover)
++		w.rememberWay(failover)
+ 	}
+ 	stuck := tx > failover.lastTx && (lastHandshake.IsZero() || time.Since(lastHandshake) > staleHandshake)
+ 	failover.lastTx = tx
+@@ -613,6 +646,7 @@ func (w *WARPEndpoint) check(session *warpSession, networkChanged bool) {
+ 	failover.connectedAt = time.Now()
+ 	failover.recorded = true // the scan counted its answer
+ 	failover.lastTx = 0
++	w.rememberWay(failover)
+ 	w.logger.InfoContext(w.ctx, "WARP: switched to ", best, " (score ", results[0].Score, ", ", results[0].RTT, ")")
+ }
+ 
+diff --git a/protocol/warp/h_last_way.go b/protocol/warp/h_last_way.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..fe0f7977dc1bfd702ea77d757e2cd55cd3347846
+--- /dev/null
++++ b/protocol/warp/h_last_way.go
+@@ -0,0 +1,202 @@
++package warp
++
++import (
++	"context"
++	"slices"
++	"time"
++
++	"github.com/sagernet/sing-box/hiddify/edgescan"
++	"github.com/sagernet/sing-box/hiddify/warpscan"
++)
++
++// With the scanner on, WARP remembers the way through that worked last (see edgescan.LastWay):
++// the endpoint and the noise of each tunnel, and in auto mode the tunnel. The next start tries it
++// first: auto mode takes the tunnel without racing, and the tunnel checks the endpoint with the
++// noise in two handshakes, before the network is named or anything is scanned. When it answers,
++// the endpoint connects at once, and is ready as soon as the handshake completes; the network is
++// named and one scan round runs after, in the background, and WARP moves to an endpoint that is
++// clearly better (see edgescan.Better). When it does not answer, the start searches as before, and
++// auto mode races the tunnels.
++
++// The keys of the ways in the store: one per tunnel (wayKey), and the tunnel of auto mode.
++const autoWayKey = "warp/auto"
++
++func wayKey(mode string) string { return "warp/" + mode }
++
++// The methods of a way.
++const (
++	wayNoise  = "noise"
++	wayTunnel = "tunnel"
++)
++
++// lastWay is the way through of mode that worked last, when the scanner can use it: its noise
++// is one the scanner may try.
++func (w *WARPEndpoint) lastWay(mode string) (edgescan.LastWay, bool) {
++	way, found := w.scanStore().LastWay(wayKey(mode))
++	if !found || !way.Target.AddrPort.IsValid() || !w.noiseAllowed(way.Method(wayNoise)) {
++		return edgescan.LastWay{}, false
++	}
++	return way, true
++}
++
++// noiseAllowed reports whether the scanner may use noise: the configured noise, or with
++// search_noise a preset of noise_presets.
++func (w *WARPEndpoint) noiseAllowed(noise string) bool {
++	if noise == "" {
++		return true
++	}
++	scanner := w.options.Scanner
++	if scanner == nil || !scanner.SearchNoise {
++		return false
++	}
++	if len(scanner.NoisePresets) > 0 {
++		return slices.Contains([]string(scanner.NoisePresets), noise)
++	}
++	_, found := warpscan.NoisePresetByName(noise)
++	return found
++}
++
++// lastTunnel is the tunnel auto mode connected with last, unless it failed to connect on this
++// network, or the race was asked for (see raceNext); empty for none.
++func (w *WARPEndpoint) lastTunnel() string {
++	if w.raceNext.Swap(false) {
++		return ""
++	}
++	way, found := w.scanStore().LastWay(autoWayKey)
++	if !found {
++		return ""
++	}
++	tunnel := way.Method(wayTunnel)
++	switch tunnel {
++	case modeWireGuard, modeAWG:
++	case modeMASQUE:
++		if !w.masqueLinkState.included() {
++			return ""
++		}
++	default:
++		return ""
++	}
++	if w.modeFailed(tunnel) {
++		return ""
++	}
++	return tunnel
++}
++
++// rememberTunnel keeps mode as the tunnel auto mode connects with.
++func (w *WARPEndpoint) rememberTunnel(mode string) {
++	if w.mode != modeAuto || !w.scannerEnabled() {
++		return
++	}
++	store := w.scanStore()
++	store.RememberWay(autoWayKey, edgescan.LastWay{Network: w.tunnelNetwork(), Methods: map[string]string{wayTunnel: mode}})
++	if err := store.Save(); err != nil {
++		w.logger.WarnContext(w.ctx, "WARP scanner: save the last way: ", err)
++	}
++}
++
++// rememberWay keeps the endpoint and the noise in use as the way through of the tunnel.
++func (w *WARPEndpoint) rememberWay(failover *warpFailover) {
++	if !failover.current.IsValid() {
++		return
++	}
++	mode := w.activeMode()
++	if mode == "" || mode == modeMASQUE {
++		return
++	}
++	way := edgescan.LastWay{
++		Network: failover.currentNetwork().Name,
++		Target:  edgescan.Target{AddrPort: failover.current},
++		Methods: map[string]string{wayNoise: failover.currentNoise()},
++	}
++	if failover.store != nil {
++		failover.store.RememberWay(wayKey(mode), way)
++	}
++	w.saveScores(failover)
++}
++
++// tryLastWay checks the last way of the tunnel; on an answer it is put in use: the noise, for
++// the inner endpoint the start creates. It returns the handshake time.
++func (w *WARPEndpoint) tryLastWay(ctx context.Context, failover *warpFailover, way edgescan.LastWay) (time.Duration, bool) {
++	noise := way.Method(wayNoise)
++	probe, err := w.probe(failover, noise)
++	if err != nil {
++		return 0, false
++	}
++	rtt, err := edgescan.TryLastWay(ctx, probe, way.Target.AddrPort)
++	if err != nil {
++		w.logger.InfoContext(w.ctx, "WARP scanner: the last way, ", way.Target.AddrPort, " with noise ", noiseName(noise), ", does not answer: ", err, "; searching")
++		return 0, false
++	}
++	failover.noiseAccess.Lock()
++	failover.noise = noise
++	failover.noiseAccess.Unlock()
++	w.logger.InfoContext(w.ctx, "WARP scanner: the last way answers, ", way.Target.AddrPort, " with noise ", noiseName(noise), " (", rtt, "); connecting, and looking for a better one")
++	return rtt, true
++}
++
++// nameNetwork names the network of failover when the start did not (it took the last way).
++func (w *WARPEndpoint) nameNetwork(ctx context.Context, failover *warpFailover) {
++	if failover.currentNetwork().Name != "" {
++		return
++	}
++	failover.detectNetwork(ctx)
++	detected := failover.currentNetwork()
++	w.ratedNetwork.Store(&detected)
++}
++
++// searchBetter runs after a start that connected with the last way, which answered in rtt: it
++// names the network, counts the answer there, and runs one scan round; WARP moves to an endpoint
++// it found when it is clearly better (see edgescan.Better). The endpoint stays ready meanwhile:
++// the round does not show as a search.
++func (w *WARPEndpoint) searchBetter(session *warpSession, failover *warpFailover, rtt time.Duration) {
++	w.nameNetwork(session.ctx, failover)
++	if session.ctx.Err() != nil {
++		return
++	}
++	failover.access.Lock() // no check meanwhile, and the check after it sees the endpoint in use
++	defer failover.access.Unlock()
++	network := failover.currentNetwork().Name
++	current := failover.current
++	if !current.IsValid() {
++		return
++	}
++	failover.book.Success(network, current, rtt, time.Now()) // it answered at the start
++	w.saveScores(failover)
++	if _, reachable := edgescan.WaitReachable(session.ctx, w.logger); !reachable {
++		return
++	}
++	results, noise, err := w.scanWith(session.ctx, failover, nil, false)
++	if err != nil {
++		if session.ctx.Err() == nil {
++			w.logger.DebugContext(w.ctx, "WARP scanner: no better endpoint: ", err)
++		}
++		return
++	}
++	score, _ := failover.book.Score(network, current)
++	for _, result := range results {
++		if result.AddrPort == current && result.RTT > 0 {
++			rtt = result.RTT // fresher than the start's
++		}
++	}
++	best := results[0]
++	if !edgescan.Better(best, current, score, rtt) {
++		w.logger.DebugContext(w.ctx, "WARP scanner: ", current, " stays (score ", score, ", ", rtt, "; best found ", best.AddrPort, ", score ", best.Score, ", ", best.RTT, ")")
++		return
++	}
++	previousNoise := failover.currentNoise()
++	w.useNoise(failover, noise) // the replacement starts with the noise it answered with
++	replaced, err := w.replaceInner(session.done, failover.config, best.AddrPort.Addr().String(), best.AddrPort.Port())
++	if err != nil || !replaced {
++		w.useNoise(failover, previousNoise) // the endpoint in use keeps its noise
++		if err != nil {
++			w.logger.ErrorContext(w.ctx, err)
++		}
++		return
++	}
++	failover.current = best.AddrPort
++	failover.connectedAt = time.Now()
++	failover.recorded = true // the scan counted its answer
++	failover.lastTx = 0
++	w.rememberWay(failover)
++	w.logger.InfoContext(w.ctx, "WARP scanner: moved to a better endpoint, ", best.AddrPort, " (score ", best.Score, ", ", best.RTT, "; was ", current, ", score ", score, ", ", rtt, ")")
++}
+diff --git a/protocol/warp/h_last_way_test.go b/protocol/warp/h_last_way_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7fbed535880f0c9674d84c46f5245f558b09801c
+--- /dev/null
++++ b/protocol/warp/h_last_way_test.go
+@@ -0,0 +1,101 @@
++package warp
++
++import (
++	"context"
++	"net/netip"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/hiddify/edgescan"
++	"github.com/sagernet/sing-box/hiddify/warpscan"
++	"github.com/sagernet/sing-box/option"
++	E "github.com/sagernet/sing/common/exceptions"
++	"github.com/sagernet/sing/service"
++
++	"github.com/stretchr/testify/require"
++)
++
++// The endpoint and noise that worked are kept as the tunnel's last way, and the next start takes
++// them after one check, without naming the network or scanning; a way that does not answer
++// leaves the start to search.
++func TestH_WARPLastWay(t *testing.T) {
++	cache := &hFakeCacheFile{store: map[string]*adapter.SavedBinary{}}
++	ep := hNewWARP(t, service.ContextWith[adapter.CacheFile](hTestContext(t), cache), option.WARPEndpointOptions{
++		WARPConfig: hWARPConfig(t, hWARPConfigJSON),
++		Scanner:    &option.WARPScannerOptions{Enabled: true, SearchNoise: true},
++	})
++	_, found := ep.lastWay(modeWireGuard)
++	require.False(t, found, "nothing worked yet")
++
++	endpoint := netip.MustParseAddrPort("162.159.192.7:2408")
++	store := ep.scanStore()
++	failover := &warpFailover{config: ep.options.WARPConfig, store: store, book: store.Book(edgescan.KindWARP), logger: hLogger(), probes: map[string]warpscan.Probe{}}
++	failover.network = warpscan.NetworkInfo{Name: "wifi/IR"}
++	failover.current = endpoint
++	failover.noise = "sip"
++	ep.rememberWay(failover)
++	require.Contains(t, cache.saves, edgescan.SharedKey, "saved in the cache file")
++
++	way, found := ep.lastWay(modeWireGuard)
++	require.True(t, found)
++	require.Equal(t, endpoint, way.Target.AddrPort)
++	require.Equal(t, "sip", way.Method(wayNoise))
++	_, found = ep.lastWay(modeAWG)
++	require.False(t, found, "a way per tunnel")
++
++	// the next start: a fresh failover, no network named yet
++	next := &warpFailover{config: ep.options.WARPConfig, store: store, book: store.Book(edgescan.KindWARP), logger: hLogger(), probes: map[string]warpscan.Probe{}}
++	var probed []netip.AddrPort
++	next.probes["sip"] = func(ctx context.Context, addrPort netip.AddrPort) (time.Duration, error) {
++		probed = append(probed, addrPort)
++		return 20 * time.Millisecond, nil
++	}
++	rtt, answered := ep.tryLastWay(hTestContext(t), next, way)
++	require.True(t, answered)
++	require.Equal(t, 20*time.Millisecond, rtt)
++	require.Equal(t, []netip.AddrPort{endpoint}, probed, "one handshake, with the way's endpoint")
++	require.Equal(t, "sip", next.currentNoise(), "the inner endpoint starts with the way's noise")
++
++	next.noise = ""
++	attempts := 0
++	next.probes["sip"] = func(ctx context.Context, addrPort netip.AddrPort) (time.Duration, error) {
++		attempts++
++		return 0, E.New("no answer")
++	}
++	_, answered = ep.tryLastWay(hTestContext(t), next, way)
++	require.False(t, answered)
++	require.Equal(t, edgescan.LastWayAttempts, attempts)
++	require.Equal(t, "", next.currentNoise(), "a way that does not answer is not put in use")
++
++	// a noise the scanner may no longer use is no way
++	ep.options.Scanner.SearchNoise = false
++	_, found = ep.lastWay(modeWireGuard)
++	require.False(t, found)
++	ep.options.Scanner.SearchNoise = true
++	ep.options.Scanner.NoisePresets = []string{"dns-google"}
++	_, found = ep.lastWay(modeWireGuard)
++	require.False(t, found)
++}
++
++// Auto mode keeps the tunnel that connected and takes it at the next start without a race,
++// unless it failed to connect, or the race was asked for.
++func TestH_WARPLastTunnel(t *testing.T) {
++	cache := &hFakeCacheFile{store: map[string]*adapter.SavedBinary{}}
++	ep := hNewWARP(t, service.ContextWith[adapter.CacheFile](hTestContext(t), cache), option.WARPEndpointOptions{
++		Mode:    modeAuto,
++		Scanner: &option.WARPScannerOptions{Enabled: true},
++	})
++	require.Empty(t, ep.lastTunnel())
++	ep.rememberTunnel(modeAWG)
++	require.Equal(t, modeAWG, ep.lastTunnel())
++
++	ep.raceNext.Store(true)
++	require.Empty(t, ep.lastTunnel(), "the last way did not answer: race")
++	require.Equal(t, modeAWG, ep.lastTunnel(), "once")
++
++	ep.failedModes.Store(modeAWG, struct{}{})
++	require.Empty(t, ep.lastTunnel(), "it did not connect on this network")
++	ep.clearFailedModes()
++	require.Equal(t, modeAWG, ep.lastTunnel())
++}
+diff --git a/protocol/warp/h_mode.go b/protocol/warp/h_mode.go
+index daeb5d7b6e7f12a45b8b99af9f52d3633b9613c7..25745796dfeb4c78581d97a1eb0dca25b15b0ccd 100644
+--- a/protocol/warp/h_mode.go
++++ b/protocol/warp/h_mode.go
+@@ -107,6 +107,9 @@ type warpSession struct {
+ 	// network is the network auto mode named for its tunnel ratings, which the scanner of the
+ 	// start takes over; guarded by w.mtx
+ 	network *warpscan.NetworkInfo
++	// lastTunnel: auto mode took the tunnel it connected with last, without a race (see
++	// h_last_way.go); guarded by w.mtx
++	lastTunnel bool
+ }
+ 
+ // end ends the session; w.mtx is held.
+@@ -247,6 +250,7 @@ func (w *WARPEndpoint) confirmAuto(done <-chan struct{}, mode string) {
+ 	}
+ 	if adapter.IsReady(w) {
+ 		w.tunnelConnected(mode)
++		w.rememberTunnel(mode)
+ 		return
+ 	}
+ 	if !w.detourReady() { // nothing gets through a detour that is down: no tunnel is to blame
+@@ -469,6 +473,18 @@ func (w *WARPEndpoint) chooseMode(session *warpSession) string {
+ 	if !w.waitDetour(done) { // the network and the race go through it
+ 		return ""
+ 	}
++	if w.scannerEnabled() {
++		if tunnel := w.lastTunnel(); tunnel != "" {
++			// the tunnel connected last: its start checks its last way, and races when that does
++			// not answer; the network is named meanwhile, for the ratings
++			if !w.publish(done, func() { session.lastTunnel = true }) {
++				return ""
++			}
++			go w.detectNetwork(session.ctx)
++			w.logger.InfoContext(w.ctx, "WARP auto mode: using ", tunnel, ", the tunnel that connected last")
++			return tunnel
++		}
++	}
+ 	detected := w.detectNetwork(session.ctx)
+ 	race := w.raceModes(done)
+ 	select {
+diff --git a/route/rule/h_rule_item_ipv6_unavailable.go b/route/rule/h_rule_item_ipv6_unavailable.go
+index ac855fdbe432607feae43d83bbe6502f58712cd0..613705e53e8de7fb462a464e0459072d55819a40 100644
+--- a/route/rule/h_rule_item_ipv6_unavailable.go
++++ b/route/rule/h_rule_item_ipv6_unavailable.go
+@@ -9,17 +9,27 @@ import (
+ 
+ var _ RuleItem = (*IPv6UnavailableItem)(nil)
+ 
+-// IPv6UnavailableItem matches a connection to an IPv6 destination while the monitoring knows the
+-// named outbound (a group: the member it leads to) does not carry IPv6, as its connections
+-// showed (route option ipv6_fallback). With a reject action, such a connection is refused at
+-// once, before its handshake, and the client falls back to IPv4, instead of being accepted by a
+-// proxy that then closes it, which a browser shows as a dead site. An outbound not observed yet
+-// never matches: its first IPv6 connections are the ones that teach, carried over IPv4 when
+-// needed. Without the monitoring it never matches.
++// IPv6UnavailableItem matches a connection to an IPv6 destination that goes through the named
++// outbound (a group: the member it leads to) while the monitoring knows that outbound does not
++// carry IPv6, as its connections showed (route option ipv6_fallback). With a reject action, such
++// a connection is refused at once, before its handshake, and the client falls back to IPv4,
++// instead of being accepted by a proxy that then closes it, which a browser shows as a dead
++// site. An outbound not observed yet never matches: its first IPv6 connections are the ones that
++// teach, carried over IPv4 when needed. Without the monitoring it never matches.
++//
++// "Goes through" is judged by the route rules on what is known of the connection where the item
++// is matched, before its handshake: its address, port, process and any domain the DNS or fake IP
++// mapping already gave it, not a sniffed one. A connection the rules send elsewhere (direct, a
++// LAN bypass, another outbound) never matches: refusing it would cut IPv6 the device has
++// natively, and an app that dials addresses from its own DNS (hiddify-app #2641) never falls
++// back. A connection a sniffed domain later sends through the outbound is carried over IPv4 by
++// ipv6_fallback instead.
+ type IPv6UnavailableItem struct {
+ 	ctx        context.Context
+ 	outbound   string
+ 	capability adapter.IPv6Capability
++	router     adapter.Router
++	outbounds  adapter.OutboundManager
+ }
+ 
+ func NewIPv6UnavailableItem(ctx context.Context, outbound string) *IPv6UnavailableItem {
+@@ -27,10 +37,14 @@ func NewIPv6UnavailableItem(ctx context.Context, outbound string) *IPv6Unavailab
+ }
+ 
+ func (r *IPv6UnavailableItem) Match(metadata *adapter.InboundContext) bool {
++	if metadata.IPv6RouteLookahead {
++		// a route rule holding this item, met while looking ahead: it cannot say yet
++		return false
++	}
+ 	if !(metadata.IPVersion == 6 || metadata.Destination.IsIP() && metadata.Destination.IsIPv6()) {
+ 		return false
+ 	}
+-	// the monitoring registers after the rules are made
++	// the monitoring and the router register after the rules are made
+ 	if r.capability == nil {
+ 		r.capability = service.FromContext[adapter.IPv6Capability](r.ctx)
+ 		if r.capability == nil {
+@@ -38,7 +52,47 @@ func (r *IPv6UnavailableItem) Match(metadata *adapter.InboundContext) bool {
+ 		}
+ 	}
+ 	supported, known := r.capability.OutboundIPv6(r.outbound)
+-	return known && !supported
++	if !known || supported {
++		return false
++	}
++	return r.routedVia(metadata)
++}
++
++// routedVia says whether the route rules send the connection through the named outbound: the
++// first rule with a route or bypass action that matches it decides, else the final outbound.
++// Rules with other actions are passed over: a sniff has nothing to read before the handshake, and
++// a reject or a DNS hijack before this item's own rule would have ended the match already.
++func (r *IPv6UnavailableItem) routedVia(metadata *adapter.InboundContext) bool {
++	if r.router == nil {
++		r.router = service.FromContext[adapter.Router](r.ctx)
++		r.outbounds = service.FromContext[adapter.OutboundManager](r.ctx)
++		if r.router == nil {
++			// no router to ask (a bare rule): the named outbound is the one it judges
++			return true
++		}
++	}
++	lookahead := *metadata
++	lookahead.IPv6RouteLookahead = true
++	for _, rule := range r.router.Rules() {
++		var outbound string
++		switch action := rule.Action().(type) {
++		case *RuleActionRoute:
++			outbound = action.Outbound
++		case *RuleActionBypass:
++			outbound = action.Outbound
++		default:
++			continue
++		}
++		lookahead.ResetRuleCache()
++		if rule.Match(&lookahead) {
++			return outbound == r.outbound
++		}
++	}
++	if r.outbounds == nil {
++		return true
++	}
++	final := r.outbounds.Default()
++	return final != nil && final.Tag() == r.outbound
+ }
+ 
+ func (r *IPv6UnavailableItem) String() string {
+diff --git a/route/rule/h_rule_item_ipv6_unavailable_test.go b/route/rule/h_rule_item_ipv6_unavailable_test.go
+index 6d3f32b8ad2f79e2c5f3fc0c8b78ad5bd152cfb0..d0efd92f63c1ae545958b3b94dee436252afbb93 100644
+--- a/route/rule/h_rule_item_ipv6_unavailable_test.go
++++ b/route/rule/h_rule_item_ipv6_unavailable_test.go
+@@ -5,6 +5,9 @@ import (
+ 	"testing"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	"github.com/sagernet/sing/service"
+ 
+@@ -40,3 +43,78 @@ func TestH_IPv6UnavailableItem(t *testing.T) {
+ 	require.False(t, NewIPv6UnavailableItem(ctx, "unknown").Match(v6), "not observed yet: let through, its connections teach")
+ 	require.False(t, NewIPv6UnavailableItem(service.ContextWithDefaultRegistry(context.Background()), "without6").Match(v6), "no monitoring: never matches")
+ }
++
++type hRulesRouter struct {
++	adapter.Router
++	rules []adapter.Rule
++}
++
++func (r *hRulesRouter) Rules() []adapter.Rule { return r.rules }
++
++type hFinalOutbounds struct {
++	adapter.OutboundManager
++	final adapter.Outbound
++}
++
++func (m *hFinalOutbounds) Default() adapter.Outbound { return m.final }
++
++type hTaggedOutbound struct {
++	adapter.Outbound
++	tag string
++}
++
++func (o *hTaggedOutbound) Tag() string { return o.tag }
++
++func hRouteRule(t *testing.T, ctx context.Context, raw option.RawDefaultRule, action string, outbound string) adapter.Rule {
++	t.Helper()
++	rule, err := NewRule(ctx, log.NewNOPFactory().NewLogger("router"), option.Rule{
++		Type: C.RuleTypeDefault,
++		DefaultOptions: option.DefaultRule{
++			RawDefaultRule: raw,
++			RuleAction: option.RuleAction{
++				Action:        action,
++				RouteOptions:  option.RouteActionOptions{Outbound: outbound},
++				BypassOptions: option.RouteActionOptions{Outbound: outbound},
++			},
++		},
++	}, false)
++	require.NoError(t, err)
++	return rule
++}
++
++// hiddify-app #2641: the reject rule sits before the sniff and every routing rule, and matched
++// every IPv6 connection while the main proxy lacked IPv6, even one the rules send direct, so a
++// domestic service's native IPv6 was refused. It matches only what the rules route through the
++// named outbound: the final outbound or a rule naming it, never a direct or bypass rule.
++func TestH_IPv6UnavailableItemOnlyRoutedVia(t *testing.T) {
++	t.Parallel()
++	ctx := service.ContextWithDefaultRegistry(context.Background())
++	service.MustRegister[adapter.IPv6Capability](ctx, hIPv6Capability{"select": false, "direct": true})
++	router := &hRulesRouter{}
++	service.MustRegister[adapter.Router](ctx, router)
++	service.MustRegister[adapter.OutboundManager](ctx, &hFinalOutbounds{final: &hTaggedOutbound{tag: "select"}})
++
++	reject := hRouteRule(t, ctx, option.RawDefaultRule{IPVersion: 6, IPv6UnavailableVia: "select"}, C.RuleActionTypeReject, "")
++	router.rules = []adapter.Rule{
++		reject,
++		hRouteRule(t, ctx, option.RawDefaultRule{}, C.RuleActionTypeSniff, ""),
++		hRouteRule(t, ctx, option.RawDefaultRule{Port: []uint16{8443}}, C.RuleActionTypeRoute, "direct"),
++		hRouteRule(t, ctx, option.RawDefaultRule{Port: []uint16{8444}}, C.RuleActionTypeBypass, ""),
++		hRouteRule(t, ctx, option.RawDefaultRule{Port: []uint16{8445}}, C.RuleActionTypeRoute, "select"),
++		// a route rule holding the item itself is passed over while looking ahead, not recursed into
++		hRouteRule(t, ctx, option.RawDefaultRule{Port: []uint16{8446}, IPv6UnavailableVia: "select"}, C.RuleActionTypeRoute, "direct"),
++	}
++	v6 := func(port uint16) *adapter.InboundContext {
++		return &adapter.InboundContext{IPVersion: 6, Destination: M.ParseSocksaddrHostPort("2001:db8::1", port)}
++	}
++
++	require.True(t, reject.Match(v6(443)), "the final outbound is the one without IPv6")
++	require.True(t, reject.Match(v6(8445)), "a rule routes it through the one without IPv6")
++	require.False(t, reject.Match(v6(8443)), "a rule routes it direct")
++	require.False(t, reject.Match(v6(8444)), "a rule bypasses it")
++	require.True(t, reject.Match(v6(8446)), "the self-referencing rule says nothing, the final decides")
++	require.False(t, reject.Match(&adapter.InboundContext{IPVersion: 4, Destination: M.ParseSocksaddr("192.0.2.1:443")}))
++
++	direct := NewIPv6UnavailableItem(ctx, "direct")
++	require.False(t, direct.Match(v6(8443)), "direct carries IPv6")
++}
+diff --git a/transport/masque/h_connect.go b/transport/masque/h_connect.go
+index a4c8f8fa486f66db85f5a59d180e2cfb4ecaf9a5..cd640a9a149923ab683f5b752ac3d50d4d423b10 100644
+--- a/transport/masque/h_connect.go
++++ b/transport/masque/h_connect.go
+@@ -9,6 +9,7 @@ import (
+ 
+ 	"github.com/sagernet/quic-go/http3"
+ 	E "github.com/sagernet/sing/common/exceptions"
++	"github.com/sagernet/sing/common/tls"
+ 
+ 	connectip "github.com/Diniboy1123/connect-ip-go"
+ )
+@@ -74,12 +75,17 @@ func (e *Tunnel) connectLeg(ctx context.Context, http2 bool) (*connection, net.A
+ 	if http2 && e.options.H2Endpoint != nil {
+ 		endpoint = e.options.H2Endpoint
+ 	}
++	tlsConfigFor := e.options.TLSConfigFor
++	tlsConfig := e.options.TLSConfig
+ 	e.endpointAccess.Unlock()
++	if tlsConfigFor != nil {
++		tlsConfig = tlsConfigFor(http2)
++	}
+ 	connectURI := e.options.ConnectURI
+ 	if connectURI == "" {
+ 		connectURI = DefaultConnectURI
+ 	}
+-	udpConn, tr, ipConn, rsp, err := connectTunnel(ctx, e.options.Dialer, e.options.TLSConfig,
++	udpConn, tr, ipConn, rsp, err := connectTunnel(ctx, e.options.Dialer, tlsConfig,
+ 		DefaultQuicConfig(e.options.UDPKeepalivePeriod, e.options.UDPInitialPacketSize),
+ 		connectURI, endpoint, http2)
+ 	conn := &connection{udpConn, tr, ipConn, http2}
+@@ -286,3 +292,10 @@ func (e *Tunnel) SetFailover(onConnected func(endpoint net.Addr, http2 bool, ela
+ 	e.options.OnConnected = onConnected
+ 	e.options.NextEndpoint = nextEndpoint
+ }
++
++// SetTLSConfigFor sets the callback before tunnel startup.
++func (e *Tunnel) SetTLSConfigFor(tlsConfigFor func(http2 bool) tls.Config) {
++	e.endpointAccess.Lock()
++	defer e.endpointAccess.Unlock()
++	e.options.TLSConfigFor = tlsConfigFor
++}
+diff --git a/transport/masque/options.go b/transport/masque/options.go
+index 993307569b57e80753b55a3b475160d1c4b34d8d..9e07e6d4e46bc35018a2d07448273eb848f4ba16 100644
+--- a/transport/masque/options.go
++++ b/transport/masque/options.go
+@@ -30,6 +30,9 @@ type TunnelOptions struct {
+ 	OnConnected func(endpoint net.Addr, http2 bool, elapsed time.Duration)
+ 	// NextEndpoint is asked for another endpoint after failed connects; nil keeps the endpoint.
+ 	NextEndpoint func(failed net.Addr, http2 bool) net.Addr
++	// TLSConfigFor is the TLS of the next connect of the HTTP version (the scanner's noise, a
++	// server name); nil is TLSConfig. //H
++	TLSConfigFor func(http2 bool) tls.Config //H
+ 	// OnRejected reports a connect the server refused because of the device (IsRejected). //H
+ 	OnRejected func(err error) // H
+ 	// ConnectURI is the URI template of the CONNECT-IP request; DefaultConnectURI when empty.
