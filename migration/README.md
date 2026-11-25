@@ -1059,3 +1059,17 @@ require all seven PASS markers. The OOM API and memory-limit correction
 are not a claim of integrated native iOS OOM handling, and the missing
 sing buffer changes remain deferred. Seven selected commits, 14 deferred;
 new candidate pending CI. Stable 0.0.4 unchanged.
+
+### Independently select scanner status event notification
+
+Run 45553598514 passed all seven targeted regressions and Linux CLI
+compilation; the ordinary build and checkpoint verification also passed.
+Select 687224f94's three Go files, verifying the old, parent and target
+blobs. The preceding edit to adapter/h_deep_search.go is solely the
+1-minute timeout comment; preserve the existing 3-minute policy rather
+than implicitly porting 97a97ce9e. Retain the fork notes with a separate
+candidate annotation. Require TestH_StatusDeepSearchNotifies plus the
+previous seven tests. This provides event delivery to subscribers, not
+an integrated Hiddify client subscription. Eight selected upstream
+commits, 13 deferred; two missing gitlinks still return GitHub 422.
+New CI pending, no stable pin or VERSION change.

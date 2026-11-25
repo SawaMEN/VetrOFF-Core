@@ -40,6 +40,22 @@ INDEPENDENT = {
                 None, "1be5ca9ea0198c6627483b6505f25fdf5daad1d6"),
         }),
 }
+NOTIFY_FIX = "687224f9455aebfe4eb8a98d1a2162dae18416b4"
+NOTIFY_PARENT = "97a97ce9e6596a560e806957ec2f89735c34e16b"
+NOTIFY_BLOBS = {
+    "adapter/h_deep_search.go": (
+        "c90114adf4c29717c2f7c7e0916c7fbab826e9b4",
+        "ec04eba3874113742d981ecc7240d75058bb02a2",
+        "1de8563bb02a9e1e671a3713767f3c4741602c3a"),
+    "hiddify/edgescan/status.go": (
+        "0bc7abd4cf79cde8cb4cdda30334bbd391f23257",
+        "0bc7abd4cf79cde8cb4cdda30334bbd391f23257",
+        "73394b34447701c2813fde30c0412115dec40a5a"),
+    "hiddify/edgescan/h_status_test.go": (
+        "1a28319d3d9bbc9188739a239b3944278f714490",
+        "1a28319d3d9bbc9188739a239b3944278f714490",
+        "31783fb255ee9402e46707bab1dc572e8b2aad31"),
+}
 BASELINE = "f76b0611b09245e2f636692487b774c03a18d6c2"
 GO = {
     "adapter/experimental.go": "bb7137499b2b85b29a84f506089d2e654658e6b6",
@@ -179,11 +195,39 @@ def main(work, report):
                 ours, old = (git(repo, "show", ref + ":" + path) for ref in (baseline, OLD))
                 require((source / path).read_bytes() == ours, f"source drift: {path}")
                 files[path] = merge_go(ours, old, new, path)
+    # Select the event notification API without importing the preceding
+    # timeout-policy change. Keep the existing 3-minute comment accurate.
+    git(repo, "fetch", "--no-tags", "--no-recurse-submodules",
+        "--depth=32", "origin", NOTIFY_FIX)
+    require(git(repo, "rev-parse", NOTIFY_FIX + "^").decode().strip() == NOTIFY_PARENT,
+            "notification parent drift")
+    require(set(git(repo, "diff", "--name-only", NOTIFY_PARENT, NOTIFY_FIX).decode().splitlines())
+            == set(NOTIFY_BLOBS) | {"docs/hiddify/app_considerations.md"},
+            "unexpected notification change paths")
+    require(not set(NOTIFY_BLOBS) & set(files), "overlapping notification changes")
+    for path, oids in NOTIFY_BLOBS.items():
+        for ref, oid in zip((OLD, NOTIFY_PARENT, NOTIFY_FIX), oids):
+            require(git(repo, "rev-parse", ref + ":" + path).decode().strip() == oid,
+                    f"notification blob drift: {path}")
+        ours, old, parent, new = (git(repo, "show", ref + ":" + path)
+                                  for ref in (baseline, OLD, NOTIFY_PARENT, NOTIFY_FIX))
+        require((source / path).read_bytes() == ours, f"notification source drift: {path}")
+        if path == "adapter/h_deep_search.go":
+            before = b"search_timeout, 1 minute by"
+            after = b"search_timeout, 3 minutes by"
+            require(parent.count(before) == new.count(before) == 1,
+                    "notification timeout comment drift")
+            require(parent.replace(before, after) == old,
+                    "unexpected preceding runtime changes")
+            new = new.replace(before, after)
+        else:
+            require(parent == old, f"preceding changes in {path}")
+        files[path] = merge_go(ours, old, new, path)
     # Do not overwrite fork-specific docs. Record the upstream notes separately.
     path = "docs/hiddify/app_considerations.md"
     ours = git(repo, "show", baseline + ":" + path)
     require((source / path).read_bytes() == ours, "source docs drift")
-    files[path] = ours.rstrip() + b"\n\n## Partial upstream update (test candidate)\n\nSee https://github.com/hiddify/hiddify-sing-box/tree/d43f078901de7091b9ea438dbf6a19af97209526 for the four upstream commits and changelogs. Also select the independent IPv6 routing fix d09fbdab2. Also select libbox memory-limit handling 543c23eaf and Psiphon notice delivery 7c5ebbaef. Native iOS service integration and the sing buffer changes are not included. The full v5 update is not included.\n"
+    files[path] = ours.rstrip() + b"\n\n## Partial upstream update (test candidate)\n\nSee https://github.com/hiddify/hiddify-sing-box/tree/d43f078901de7091b9ea438dbf6a19af97209526 for the four upstream commits and changelogs. Also select the independent IPv6 routing fix d09fbdab2. Also select libbox memory-limit handling 543c23eaf and Psiphon notice delivery 7c5ebbaef. Native iOS service integration and the sing buffer changes are not included. The notification API from 687224f94 is selected with the existing timeout policy; client subscription integration is not included. The full v5 update is not included.\n"
     for path, imported in DUPLICATES.items():
         ours = git(repo, "show", baseline + ":" + path)
         require((source / path).read_bytes() == ours, f"test source drift: {path}")
@@ -196,13 +240,13 @@ def main(work, report):
     (report / "partial-update.patch").write_bytes(git(repo, "diff", "--binary", "--full-index", baseline, tree))
     (report / "partial-update.json").write_text(json.dumps({
         "baseline": baseline, "candidate_tree": tree, "target": TARGET,
-        "upstream_commits": 7, "deferred_upstream_commits": 14,
-        "additional_upstream_commits": [IPV6_FIX, *INDEPENDENT],
+        "upstream_commits": 8, "deferred_upstream_commits": 13,
+        "additional_upstream_commits": [IPV6_FIX, *INDEPENDENT, NOTIFY_FIX],
         "changed_paths": sorted(files), "duplicate_imports_fixed": sorted(DUPLICATES),
         "full_update": False,
         "stable_promotion": False,
     }, indent=2) + "\n")
-    print("Partial update staged: seven selected upstream commits, 14 deferred; no dependency pin changes")
+    print("Partial update staged: eight selected upstream commits, 13 deferred; no dependency pin changes")
 
 
 if __name__ == "__main__":
