@@ -1,0 +1,203 @@
+name: Consumer compatibility of VetrOFF-Core
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/consumer-compatibility.yml'
+      - 'scripts/audit-panel-consumer.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: vetroff-consumer-compatibility
+  cancel-in-progress: false
+env:
+  GOTOOLCHAIN: local
+  GOWORK: 'off'
+jobs:
+  panel:
+    name: 3x-ui server build and contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: SawaMEN/3x-ui
+          ref: 7186c696b756c81e63715aa6b7dc30ea02d14f7c
+          path: consumers/panel
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Prepare exact candidate and audit panel source and dependency requirements
+        run: |
+          set -euo pipefail
+          bash scripts/prepare.sh
+          python3 scripts/audit-panel-consumer.py .build/hiddify-core consumers/panel consumer-results/panel-contract.json
+      - name: Panel protocol regressions and tagged candidate build
+        run: |
+          set -euo pipefail
+          out="$GITHUB_WORKSPACE/consumer-results"
+          tags=$(python3 -c 'import json; print(",".join(json.load(open("consumers/panel/deploy/hiddify/hiddify-core-target.json"))["panel_build"]["tags"]))')
+          version=$(cat VERSION)
+          cd .build/hiddify-core
+          CGO_ENABLED=0 GOTOOLCHAIN=local go test -mod=readonly -ldflags "-checklinkname=0" -tags "$tags" github.com/sagernet/sing-box/transport/v2rayhttpupgrade github.com/sagernet/sing-box/transport/trojan -run '^TestXUIPanel' -count=1 -timeout=30s
+          CGO_ENABLED=0 GOTOOLCHAIN=local go test -mod=readonly -ldflags "-checklinkname=0" -tags "$tags" github.com/sagernet/sing-box/experimental/clashapi/trafficontrol -run '^TestXUIPanelAuthenticatedUserIsConnectionMetadata$' -count=1
+          CGO_ENABLED=0 GOTOOLCHAIN=local go test -mod=readonly -ldflags "-checklinkname=0" -tags "$tags" github.com/sagernet/sing-box -run '^TestXUIPanelInboundFinalMask' -count=1 -timeout=60s
+          CGO_ENABLED=0 GOTOOLCHAIN=local go test -mod=readonly -ldflags "-checklinkname=0" -tags "$tags" github.com/sagernet/sing-box/transport/v2rayxdrive -count=1 -timeout=90s
+          CGO_ENABLED=0 GOTOOLCHAIN=local go test -mod=readonly -ldflags "-checklinkname=0" -tags "$tags" github.com/sagernet/sing-box/protocol/snell -run '^TestSnellV[56]' -count=1 -timeout=60s
+          CGO_ENABLED=0 GOTOOLCHAIN=local go test -mod=readonly -ldflags "-checklinkname=0" -tags "$tags" github.com/sagernet/sing-box/option -run '^TestXUIPanelHTTP1RoundTrip$' -count=1
+          CGO_ENABLED=0 GOTOOLCHAIN=local go test -mod=readonly -ldflags "-checklinkname=0" -tags "$tags" github.com/sagernet/sing-box/route/rule -run '^TestXUIPanelSniffOverrideAction$' -count=1
+          CGO_ENABLED=0 GOTOOLCHAIN=local go test -mod=readonly -ldflags "-checklinkname=0" -tags "$tags" github.com/sagernet/sing-box/common/tls github.com/sagernet/sing-box/protocol/vless github.com/sagernet/sing-vmess/vless -run '^TestXUIPanel(Reality|Preconnect|Vision|Reverse|Encryption|ExplicitCipher|BrowserFingerprint)' -count=1 -timeout=60s
+          CGO_ENABLED=0 GOTOOLCHAIN=local go test -mod=readonly -ldflags "-checklinkname=0" -tags "$tags" github.com/metacubex/utls -run '^TestChrome155(CapturedClientHello|DefaultFingerprintRoundTrip|PresetOwnership)$' -count=1 -timeout=90s
+          CGO_ENABLED=0 GOTOOLCHAIN=local go test -mod=readonly -ldflags "-checklinkname=0" -tags "$tags" github.com/sagernet/sing-box/transport/v2raykcp github.com/sagernet/sing-box/transport/v2rayxhttp github.com/sagernet/sing-box/protocol/group -run '^TestXUIPanel' -count=1 -timeout=90s
+          CGO_ENABLED=0 go test -mod=readonly -ldflags '-checklinkname=0' -tags "$tags" github.com/sagernet/sing-box/internal/xuispeed github.com/sagernet/sing-box/transport/masque github.com/sagernet/sing-box/protocol/masque -run '^Test(Broker|InvalidBroker)' -count=1 -timeout=90s
+          CGO_ENABLED=0 go build -mod=readonly -trimpath -buildvcs=false -tags "$tags" -ldflags "-s -w -checklinkname=0 -X github.com/hiddify/hiddify-core/v2/hcommon/constants.Version=$version" -o "$out/vetroff-panel-linux-amd64" ./cmd/main
+          make BINDIR="$out" fetch-libcronet-linux_amd64.so
+          cd "$out"
+          ./vetroff-panel-linux-amd64 version | tee panel-version.txt
+          printf '%s\n' '{"experimental":{"v2ray_api":{"listen":"127.0.0.1:0","stats":{"enabled":true,"users":["build-check"]}}}}' > check.json
+          ./vetroff-panel-linux-amd64 check -c check.json
+          if ./vetroff-panel-linux-amd64 check >/dev/null 2>&1; then exit 1; fi
+          sha256sum vetroff-panel-linux-amd64 libcronet.so > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: panel-consumer-candidate
+          path: consumer-results/
+          if-no-files-found: warn
+  android:
+    name: Android ARM64 SDK and APK compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: SawaMEN/hiddify-app
+          ref: 159bb746be8d759b85217eaebf480f62336062de
+          path: consumers/app
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '17'
+      - name: Install matching Android build tools
+        run: |
+          set -euo pipefail
+          sdkmanager "ndk;30.0.16248370" "platforms;android-24" "platforms;android-37.0" "build-tools;37.0.0" "cmake;3.22.1"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> "$GITHUB_ENV"
+      - name: Build AAR and root companion from the exact patched sources
+        run: |
+          set -euo pipefail
+          bash scripts/prepare.sh
+          version=$(cat VERSION)
+          cd .build/hiddify-core
+          go test -mod=readonly -count=1 -timeout=8m -tags "$(make -s print-NATIVE_TEST_TAGS NAIVE=0)" -ldflags '-checklinkname=0' ./platform/mobile
+          make android-arm64 CODE_VERSION="-X github.com/hiddify/hiddify-core/v2/hcommon/constants.Version=$version"
+          go run -mod=readonly ./cmd/internal/build_root
+          test -s bin/hiddify-core.aar
+          test -s bin/libhiddify-root.so
+          out="$GITHUB_WORKSPACE/consumer-results"
+          mkdir -p "$out"
+          cp bin/hiddify-core.aar bin/libhiddify-root.so "$out/"
+          cp "$GITHUB_WORKSPACE/.build/prepared-sources.lock" "$out/"
+          (cd "$out" && sha256sum hiddify-core.aar libhiddify-root.so > SHA256SUMS)
+      - name: Build isolated Android client with candidate SDK
+        env:
+          CHANNEL: dev
+        run: |
+          set -euo pipefail
+          out="$GITHUB_WORKSPACE/consumer-results"
+          python3 - "$out" <<'PY'
+          import pathlib, struct, sys, zipfile
+          d = pathlib.Path(sys.argv[1])
+          with zipfile.ZipFile(d / "hiddify-core.aar") as aar:
+              assert aar.testzip() is None
+              assert any(p.startswith("jni/arm64-v8a/") and p.endswith(".so") for p in aar.namelist())
+          elf = (d / "libhiddify-root.so").read_bytes()[:20]
+          assert elf[:6] == b"\x7fELF\x02\x01" and struct.unpack_from("<HH", elf, 16) == (3, 183)
+          PY
+          cd consumers/app
+          mkdir -p android/app/libs android/app/src/main/jniLibs/arm64-v8a
+          cp "$out/hiddify-core.aar" android/app/libs/
+          cp "$out/libhiddify-root.so" android/app/src/main/jniLibs/arm64-v8a/
+          # Do not invoke android-libs: it would download the legacy SDK.
+          (cd android && ./gradlew :app:assembleDebug --console=plain)
+          apk=$(find build/app/outputs/apk/debug -name '*.apk' -type f | head -n 1)
+          test -n "$apk"
+          cp "$apk" "$out/VetrOFF-Core-candidate-debug.apk"
+          python3 - "$out/VetrOFF-Core-candidate-debug.apk" "$out/libhiddify-root.so" <<'PY'
+          import pathlib, sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as apk:
+              assert apk.read("lib/arm64-v8a/libhiddify-root.so") == pathlib.Path(sys.argv[2]).read_bytes()
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-consumer-candidate
+          path: consumer-results/
+          if-no-files-found: warn
+  macos:
+    name: macOS ARM64 native framework and Swift client
+    runs-on: macos-15
+    timeout-minutes: 85
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: SawaMEN/hiddify-app
+          ref: 159bb746be8d759b85217eaebf480f62336062de
+          path: consumers/app
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Bind native macOS framework
+        run: |
+          set -euo pipefail
+          bash scripts/prepare.sh
+          out="$GITHUB_WORKSPACE/consumer-results"
+          mkdir -p "$out"
+          cd .build/hiddify-core
+          tags=$(make -s print-TAGS)
+          mac_tags=$(make -s print-MACOS_ADD_TAGS)
+          test -n "$tags" && test -n "$mac_tags"
+          CGO_ENABLED=1 go test -mod=readonly -timeout=8m -ldflags '-checklinkname=0' -tags "$(make -s print-NATIVE_TEST_TAGS NAIVE=0)" ./platform/mobile -run 'TestPacketTunnel' -count=1
+          make lib_install
+          "$(go env GOPATH)/bin/gomobile" bind -v -target=macos/arm64 -libname=HiddifyCore -tags="$tags,$mac_tags" -trimpath -ldflags='-s -w -checklinkname=0' -macosversion=14.0 -o "$out/HiddifyCore.xcframework" github.com/sagernet/sing-box/experimental/libbox ./platform/mobile
+          cp "$GITHUB_WORKSPACE/.build/prepared-sources.lock" "$out/"
+      - name: Verify Swift ABI and Network Extension linking
+        run: |
+          set -euo pipefail
+          out="$GITHUB_WORKSPACE/consumer-results"
+          cd consumers/app
+          fw=$(find "$out/HiddifyCore.xcframework" -type d -name HiddifyCore.framework | head -n 1)
+          test -f "$fw/HiddifyCore"
+          xcrun lipo -archs "$fw/HiddifyCore" | grep -w arm64
+          xcrun swiftc -target arm64-apple-macos14.0 -F "$(dirname "$fw")" -framework HiddifyCore -framework AppKit -framework CoreText -framework UniformTypeIdentifiers -framework SystemConfiguration -framework Network -framework CoreServices -framework ApplicationServices -framework Carbon -framework Security -lresolv -lbsm -o "$RUNNER_TEMP/vetroff-core-smoke" macos/Integration/CoreSmoke.swift
+          "$RUNNER_TEMP/vetroff-core-smoke"
+          brew install xcodegen
+          mkdir -p macos/Core
+          ln -s "$out/HiddifyCore.xcframework" macos/Core/HiddifyCore.xcframework
+          bash macos/scripts/generate-xcode-project.sh
+          xcodebuild -project macos/VetrOFF.xcodeproj -scheme VetrOFF -configuration Debug -destination 'generic/platform=macOS' ARCHS=arm64 ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO build
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-consumer-candidate
+          path: consumer-results/
+          if-no-files-found: warn
