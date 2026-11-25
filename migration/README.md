@@ -1093,3 +1093,18 @@ The three deferred runtime commits are 8e6b7ae4 (Soar pin), a1eeb1aa
 an older dependency for a claimed full update: it is explicitly reduced.
 Keep the previous partial candidate and stable 0.0.4 untouched. No
 publication or promotion until new CI has been verified.
+
+### Fix WARP capability guard in broad candidate
+
+Run 45554607883 reproduced the reduced tree and passed 21 of 26 local
+regressions. The remaining packages could not compile because the new
+WARP last-tunnel method refers to upstream masqueIncluded, which the
+fork replaced with a build-tagged masqueLinkState.included() method.
+Verify both existing true/false implementations and the existing fork
+call site, then adapt exactly one guard in h_last_way.go. Keep the
+upstream last-mode behavior and all dependency pins. Add a separate
+WARP last-tunnel test with the with_masque build tag removed. The
+26-test integration gate and five-platform matrix remain mandatory.
+The narrower eight-test candidate 45554291073 passed; stable builds
+45554290625 and 45554607805 and migration verification passed. The
+new broad candidate remains pending CI; no publication.

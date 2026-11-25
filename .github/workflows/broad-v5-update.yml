@@ -46,6 +46,11 @@ jobs:
           for test in TestH_HotReloadLogLevel TestH_BalancerKeepsConnectionsThroughATentativeMiss TestH_MonitoringMissOfACachedMemberIsSeenByTheGroups TestH_IPv6UnavailableItem TestH_IPv6UnavailableItemOnlyRoutedVia TestH_SetMemoryLimitKeepsTheOOMKillersLimit TestH_PsiphonActiveTunnelReachesScanner TestH_StatusDeepSearchNotifies TestH_StoreLastWay TestH_TryLastWay TestH_Better TestH_Search TestH_SearchLimit TestH_StatusDeepSearch TestH_BalancerInterruptsOnlyDeadMember TestH_HotReloadInbounds TestH_MASQUELastWay TestH_MASQUESearchNoise TestH_MASQUENoiseCandidates TestH_PsiphonRemembersWay TestH_PsiphonUseLastWay TestH_PsiphonSearch TestH_PsiphonDirectDetour TestH_PsiphonSearchKeepsTrying TestH_WARPLastWay TestH_WARPLastTunnel; do
             grep -Fq -- "--- PASS: $test " "$report/regressions.log"
           done
+          # Compile the WARP package without MASQUE as well: the last-mode
+          # guard must use the correct implementation in both build variants.
+          stub_tags=$(printf '%s' "$tags" | tr ', ' '\n\n' | grep -vx 'with_masque' | paste -sd, -)
+          go test -mod=readonly -count=1 -timeout=5m -tags "$stub_tags" -ldflags '-checklinkname=0' -run '^TestH_WARPLastTunnel$' -v github.com/sagernet/sing-box/protocol/warp | tee "$report/warp-stub.log"
+          grep -Fq -- '--- PASS: TestH_WARPLastTunnel ' "$report/warp-stub.log"
           go test -mod=readonly -count=1 -timeout=8m -tags "$tags" -ldflags '-checklinkname=0' ./v2/config ./v2/config/paneluri ./v2/hcore ./v2/hcore/adminbgservice github.com/hiddify/ray2sing/ray2sing github.com/hiddify/ray2sing/ray2sing_test | tee "$report/core-regressions.log"
           test "$(git -C hiddify-sing-box write-tree)" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["candidate_tree"])' "$report/broad-v5.json")"
       - uses: actions/upload-artifact@v4

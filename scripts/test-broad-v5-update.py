@@ -102,6 +102,22 @@ Abort integration, Sing buffer updates, native iOS OOM service
 integration, and Core/client subscription integration are not included.
 See the exact upstream changelog for deferred work, not current behavior.
 """
+    # The fork exposes MASQUE availability through the build-tagged
+    # masqueLinkState method, rather than the upstream package constant.
+    warp = "protocol/warp/h_last_way.go"
+    text = git(repo, "show", full + ":" + warp)
+    require(text.count(b"if !masqueIncluded {") == 1, "WARP last tunnel guard drift")
+    for path, expected in (
+        ("protocol/warp/endpoint_warp_masque.go", b"func (*masqueLinkState) included() bool { return true }"),
+        ("protocol/warp/endpoint_warp_masque_stub.go", b"func (*masqueLinkState) included() bool { return false }"),
+    ):
+        require(expected in git(repo, "show", full + ":" + path),
+                f"fork MASQUE build guard missing: {path}")
+    require(b"w.masqueLinkState.included()" in git(repo, "show", full + ":protocol/warp/h_mode.go"),
+            "fork MASQUE runtime guard missing")
+    files[warp] = subprocess.check_output(
+        ["gofmt"], input=text.replace(b"if !masqueIncluded {",
+                                    b"if !w.masqueLinkState.included() {", 1))
     partial = load("partial", "test-partial-v5-update.py")
     for path, imported in partial.DUPLICATES.items():
         require(path not in manifest, f"unexpected overlap: {path}")
@@ -125,6 +141,7 @@ See the exact upstream changelog for deferred work, not current behavior.
         "upstream_documentation_commits": 8,
         "upstream_code_paths": sorted(selected),
         "changed_paths": sorted(delta),
+        "fork_compatibility_adaptations": [warp],
         "deferred_paths": sorted(excluded),
         "nested_gitlinks": original_links,
         "patch_sha256": digest(patch),
