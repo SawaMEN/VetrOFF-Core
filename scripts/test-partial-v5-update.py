@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test the first four upstream commits while the full v5 update is blocked."""
+"""Test independently reviewed upstream changes while the full v5 update is blocked."""
 import importlib.util
 import json
 import re
@@ -19,6 +19,26 @@ IPV6_BLOBS = {
                                                    "613705e53e8de7fb462a464e0459072d55819a40"),
     "route/rule/h_rule_item_ipv6_unavailable_test.go": ("6d3f32b8ad2f79e2c5f3fc0c8b78ad5bd152cfb0",
                                                         "d0efd92f63c1ae545958b3b94dee436252afbb93"),
+}
+INDEPENDENT = {
+    "543c23eaf3b4ae61186eaaecc63cacc4c492efc9": (
+        "0b37d9432dfa7c6c990344381bd5124a83b604ef", {
+            "experimental/libbox/export.go": (
+                "d516bb79526d4b7851eb43a9d73541842262622f",
+                "a2faf65f77b7e9fcf4cc9d49653b5331c465e440"),
+            "experimental/libbox/h_oom.go": (
+                None, "d503ccc41455b663ccde73a64a0ee98c119da932"),
+            "experimental/libbox/h_oom_test.go": (
+                None, "a5d9d5fc57a36fd97f9e6d87e62954f794eda5ec"),
+        }),
+    "7c5ebbaefbf5064868f813ae4352943fb8717af3": (
+        "9092bf553f51f291c3859bd7916ae7fc3dac799f", {
+            "protocol/psiphon/psiphon.go": (
+                "3119778e48125997b0eab0bc7973634bc27237e7",
+                "37b8cc48fe97a945aaba0d52dafcf166dc7c7598"),
+            "protocol/psiphon/h_last_way_test.go": (
+                None, "1be5ca9ea0198c6627483b6505f25fdf5daad1d6"),
+        }),
 }
 BASELINE = "f76b0611b09245e2f636692487b774c03a18d6c2"
 GO = {
@@ -132,11 +152,38 @@ def main(work, report):
             files[path] = format_go(text.encode())
         else:
             files[path] = merge_go(ours, old, new, path)
+    # Verify individual upstream edits without including the intervening
+    # unavailable submodule updates or replacing unrelated fork files.
+    for commit, (parent, blobs) in INDEPENDENT.items():
+        git(repo, "fetch", "--no-tags", "--no-recurse-submodules",
+            "--depth=32", "origin", commit)
+        require(git(repo, "rev-parse", commit + "^").decode().strip() == parent,
+                f"parent drift: {commit}")
+        require(set(git(repo, "diff", "--name-only", parent, commit).decode().splitlines())
+                == set(blobs), f"unexpected change paths: {commit}")
+        require(not set(blobs) & set(files), f"overlapping changes: {commit}")
+        for path, (before, after) in blobs.items():
+            require(git(repo, "rev-parse", commit + ":" + path).decode().strip() == after,
+                    f"target blob drift: {path}")
+            new = git(repo, "show", commit + ":" + path)
+            if before is None:
+                for ref in (OLD, parent, baseline):
+                    require(not git(repo, "ls-tree", ref, "--", path),
+                            f"unexpected existing file: {ref}:{path}")
+                require(not (source / path).exists(), f"working file exists: {path}")
+                files[path] = format_go(new)
+            else:
+                for ref in (OLD, parent):
+                    require(git(repo, "rev-parse", ref + ":" + path).decode().strip() == before,
+                            f"pre-change blob drift: {path}")
+                ours, old = (git(repo, "show", ref + ":" + path) for ref in (baseline, OLD))
+                require((source / path).read_bytes() == ours, f"source drift: {path}")
+                files[path] = merge_go(ours, old, new, path)
     # Do not overwrite fork-specific docs. Record the upstream notes separately.
     path = "docs/hiddify/app_considerations.md"
     ours = git(repo, "show", baseline + ":" + path)
     require((source / path).read_bytes() == ours, "source docs drift")
-    files[path] = ours.rstrip() + b"\n\n## Partial upstream update (test candidate)\n\nSee https://github.com/hiddify/hiddify-sing-box/tree/d43f078901de7091b9ea438dbf6a19af97209526 for the four upstream commits and changelogs. Also select the independent IPv6 routing fix d09fbdab2. The full v5 update is not included.\n"
+    files[path] = ours.rstrip() + b"\n\n## Partial upstream update (test candidate)\n\nSee https://github.com/hiddify/hiddify-sing-box/tree/d43f078901de7091b9ea438dbf6a19af97209526 for the four upstream commits and changelogs. Also select the independent IPv6 routing fix d09fbdab2. Also select libbox memory-limit handling 543c23eaf and Psiphon notice delivery 7c5ebbaef. Native iOS service integration and the sing buffer changes are not included. The full v5 update is not included.\n"
     for path, imported in DUPLICATES.items():
         ours = git(repo, "show", baseline + ":" + path)
         require((source / path).read_bytes() == ours, f"test source drift: {path}")
@@ -144,17 +191,18 @@ def main(work, report):
     stage = load_module("stage", "stage-final-conflicts.py")
     tree = stage.stage(repo, baseline, files, {})
     for path, content in files.items():
+        (source / path).parent.mkdir(parents=True, exist_ok=True)
         (source / path).write_bytes(content)
     (report / "partial-update.patch").write_bytes(git(repo, "diff", "--binary", "--full-index", baseline, tree))
     (report / "partial-update.json").write_text(json.dumps({
         "baseline": baseline, "candidate_tree": tree, "target": TARGET,
-        "upstream_commits": 5, "deferred_upstream_commits": 16,
-        "additional_upstream_commit": IPV6_FIX,
+        "upstream_commits": 7, "deferred_upstream_commits": 14,
+        "additional_upstream_commits": [IPV6_FIX, *INDEPENDENT],
         "changed_paths": sorted(files), "duplicate_imports_fixed": sorted(DUPLICATES),
         "full_update": False,
         "stable_promotion": False,
     }, indent=2) + "\n")
-    print("Partial update staged: five selected upstream commits, 16 deferred; no dependency pin changes")
+    print("Partial update staged: seven selected upstream commits, 14 deferred; no dependency pin changes")
 
 
 if __name__ == "__main__":

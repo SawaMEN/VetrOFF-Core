@@ -1045,3 +1045,17 @@ the exact target blobs at runtime. Preserve fork inbound metadata and
 merge the route implementation and tests. Require both IPv6 regression
 PASS markers in addition to the previous three. Five selected commits,
 16 deferred; no changed dependency pins and no release. CI pending.
+
+### Extend the partial candidate with independent memory and notice fixes
+
+Run 45552294033 passed all five required regression markers and the
+Linux CLI build. The normal five-platform stable build 45552294247 and
+checkpoint verification also succeeded. Select libbox 543c23eaf and
+Psiphon 7c5ebbaef independently: verify each changed file's upstream
+parent and old baseline identity, exact target blobs, and the absence
+of the three newly added files. Merge only these five paths without
+altering dependency pins. Add the two upstream regression tests and
+require all seven PASS markers. The OOM API and memory-limit correction
+are not a claim of integrated native iOS OOM handling, and the missing
+sing buffer changes remain deferred. Seven selected commits, 14 deferred;
+new candidate pending CI. Stable 0.0.4 unchanged.
