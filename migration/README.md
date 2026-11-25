@@ -1073,3 +1073,23 @@ previous seven tests. This provides event delivery to subscribers, not
 an integrated Hiddify client subscription. Eight selected upstream
 commits, 13 deferred; two missing gitlinks still return GitHub 422.
 New CI pending, no stable pin or VERSION change.
+
+### Broad candidate batch: all available runtime groups
+
+The upstream comparison has 21 commits (13 runtime/dependency commits
+and eight documentation commits), 63 changed paths. Prepare a separate
+broad candidate from the four-conflict-reviewed full source merge.
+Lock all 63 upstream target objects. Select 46 Go paths across ten
+runtime commits, preserve all 13 original documentation paths except a
+candidate-only annotation, restore the two original nested gitlinks and
+both Soar Abort-dependent files. Fix the four known duplicate test
+imports. Verify the complete nested pin map is unchanged, verify the
+reduced tree and patch SHA-256, and require 26 exact local regression
+PASS markers plus ordinary Core/ray2sing compatibility tests before
+building the same verified patch on all five desktop platforms.
+Live network tests and native iOS/client integration are not asserted.
+The three deferred runtime commits are 8e6b7ae4 (Soar pin), a1eeb1aa
+(Soar Abort integration) and 0b37d943 (Sing pin). This does not substitute
+an older dependency for a claimed full update: it is explicitly reduced.
+Keep the previous partial candidate and stable 0.0.4 untouched. No
+publication or promotion until new CI has been verified.
