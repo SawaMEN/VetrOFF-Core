@@ -10,6 +10,9 @@ import importlib.util
 ROOT = Path(__file__).resolve().parent
 BASELINE = "f76b0611b09245e2f636692487b774c03a18d6c2"
 TARGET = "1267fe6aac8d11f3a562e8feecad11d11f48f965"
+CORE_BASELINE = "e4823f0dda24d906354b09c6a919d366424216e7"
+CORE_TEST = "v2/hcore/hotreload_test.go"
+CORE_TEST_BLOB = "fae53d4ba78ab40679b3858db49c886011c3fc27"
 LOCKED = {
     "replace/sing": "b40ea077780dbc1babef7d035d4b0fea8d9ad6f2",
     "replace/soar": "e18587bc9fb62f326124d1f3eb0ceb31708bd077",
@@ -58,6 +61,62 @@ def links(repo, tree):
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def core_test_update(work, report):
+    require(git(work, "write-tree").decode().strip() == CORE_BASELINE, "Core baseline drift")
+    require(oid(work, CORE_BASELINE, CORE_TEST) == CORE_TEST_BLOB, "Core test blob drift")
+    old = git(work, "show", CORE_BASELINE + ":" + CORE_TEST)
+    require((work / CORE_TEST).read_bytes() == old, "Core test worktree drift")
+    start = b"\t// something that cannot be hot reloaded changes (the log level): refused, core unchanged\n"
+    end = b"\t// the TUN inbound changes (here: TUN is turned on): refused so the app restarts instead\n"
+    require(old.count(start) == old.count(end) == 1, "Core hot reload anchor drift")
+    first, last = old.index(start), old.index(end)
+    require(first < last, "Core test block order drift")
+    replacement = b'''	// A log-level-only reload must preserve the service and all outbounds.
+	_, err = ChangeHiddifySettings(&ChangeHiddifySettingsRequest{HiddifySettingsJson: hotReloadSettings(t, newMixedPort, "error")}, false)
+	require.NoError(t, err)
+	proxyB = runningOutbound(t, "proxy-b")
+	proxyC := runningOutbound(t, "proxy-c")
+	response, err = HotReload(static.BaseContext, &StartRequest{
+		ConfigContent: profile(socks("proxy-a", 1080), socks("proxy-b", 2081), socks("proxy-c", 1082)),
+	})
+	require.NoError(t, err)
+	require.Equal(t, MessageType_EMPTY, response.MessageType)
+	require.Same(t, instance, runningTestService(t).Instance(), "log level does not restart Core")
+	require.Same(t, proxyA, runningOutbound(t, "proxy-a"))
+	require.Same(t, proxyB, runningOutbound(t, "proxy-b"))
+	require.Same(t, proxyC, runningOutbound(t, "proxy-c"))
+	require.True(t, listening(newMixedPort), "the listener remains open")
+	require.Equal(t, "error", log.FormatLevel(instance.Box().LogFactory().Level()))
+
+	// Log level and an outbound removal can also be applied together.
+	_, err = ChangeHiddifySettings(&ChangeHiddifySettingsRequest{HiddifySettingsJson: hotReloadSettings(t, newMixedPort, "warn")}, false)
+	require.NoError(t, err)
+	response, err = HotReload(static.BaseContext, &StartRequest{
+		ConfigContent: profile(socks("proxy-a", 1080), socks("proxy-b", 2081)),
+	})
+	require.NoError(t, err)
+	require.Equal(t, MessageType_EMPTY, response.MessageType)
+	require.Same(t, instance, runningTestService(t).Instance())
+	require.Same(t, proxyA, runningOutbound(t, "proxy-a"))
+	require.Same(t, proxyB, runningOutbound(t, "proxy-b"))
+	require.Nil(t, runningOutbound(t, "proxy-c"))
+	require.Equal(t, "warn", log.FormatLevel(instance.Box().LogFactory().Level()))
+
+'''
+    new = old[:first] + replacement + old[last:]
+    anchor = b'\t"github.com/sagernet/sing-box/daemon"\n'
+    require(new.count(anchor) == 1, "Core import anchor drift")
+    new = new.replace(anchor, anchor + b'\t"github.com/sagernet/sing-box/log"\n', 1)
+    new = subprocess.check_output(["gofmt"], input=new)
+    stage = load("stage_core", "stage-final-conflicts.py")
+    tree = stage.stage(work, CORE_BASELINE, {CORE_TEST: new}, {})
+    require(changed(work, CORE_BASELINE, tree) == {CORE_TEST}, "Core candidate scope drift")
+    patch = report / "broad-core.patch"
+    patch.write_bytes(git(work, "diff", "--binary", "--full-index", CORE_BASELINE, tree))
+    return {"core_baseline": CORE_BASELINE, "core_candidate_tree": tree,
+            "core_patch_sha256": digest(patch), "core_changed_paths": [CORE_TEST]}
 
 
 def prepare(work, report):
@@ -147,6 +206,7 @@ See the exact upstream changelog for deferred work, not current behavior.
         "patch_sha256": digest(patch),
         "full_update": False, "stable_promotion": False,
     }
+    metadata.update(core_test_update(work, report))
     (report / "broad-v5.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
     apply(work, report)
     print(json.dumps(metadata, indent=2))
@@ -168,7 +228,16 @@ def apply(work, report):
     require(links(repo, tree) == metadata["nested_gitlinks"], "candidate gitlink drift")
     require(changed(repo, BASELINE, tree) == set(metadata["changed_paths"]),
             "candidate file scope drift")
-    print(f"Broad candidate verified: {tree}")
+    core_patch = report / "broad-core.patch"
+    require(metadata["core_baseline"] == CORE_BASELINE and
+            metadata["core_changed_paths"] == [CORE_TEST], "Core metadata drift")
+    require(digest(core_patch) == metadata["core_patch_sha256"], "Core patch hash mismatch")
+    require(git(work, "write-tree").decode().strip() == CORE_BASELINE, "Core build baseline drift")
+    git(work, "apply", "--index", "--binary", "--whitespace=nowarn", str(core_patch.resolve()))
+    core_tree = git(work, "write-tree").decode().strip()
+    require(core_tree == metadata["core_candidate_tree"], "Core candidate tree mismatch")
+    require(changed(work, CORE_BASELINE, core_tree) == {CORE_TEST}, "Core changed path mismatch")
+    print(f"Broad candidate verified: {tree}; Core: {core_tree}")
 
 
 if __name__ == "__main__":

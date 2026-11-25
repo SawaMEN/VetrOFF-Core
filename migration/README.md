@@ -1108,3 +1108,16 @@ WARP last-tunnel test with the with_masque build tag removed. The
 The narrower eight-test candidate 45554291073 passed; stable builds
 45554290625 and 45554607805 and migration verification passed. The
 new broad candidate remains pending CI; no publication.
+
+### Adapt the Core hot-reload regression to the new contract
+
+Run 45555457769 passed all 26 sing-box regression markers and the WARP
+no-MASQUE test. The ordinary Core suite failed only TestHotReload at
+line 149 because it still required log-level reload to return an error.
+The broad candidate now carries a second, separately hashed Core patch
+against the exact 0.0.4 Core tree and locked test blob. Assert that a
+log-only reload updates the actual logger and preserves the service,
+listener and every outbound; assert a combined log/outbound change
+removes only the requested outbound. Retain the TUN rejection test.
+Verify both candidate trees in each platform job. No production Core
+source or stable patches change; the new complete CI gate is pending.
