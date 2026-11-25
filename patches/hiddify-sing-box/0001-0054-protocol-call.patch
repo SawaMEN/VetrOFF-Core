@@ -1,0 +1,13 @@
+diff --git a/protocol/call/h_retry_test.go b/protocol/call/h_retry_test.go
+index 988fa86be5382933e1f8a5c3aa47e01ba5e2685f..a6da145453cd71d74236d5c4019b37c2d7a09809 100644
+--- a/protocol/call/h_retry_test.go
++++ b/protocol/call/h_retry_test.go
+@@ -76,7 +76,7 @@ func TestH_InboundCallConfigHasTheHandlers(t *testing.T) {
+ // a wbstream mode that does not exist fails at load, not on every retry
+ func TestH_CallModeCheckedAtLoad(t *testing.T) {
+ 	_, err := NewOutbound(context.Background(), nil, log.NewNOPFactory().Logger(), "call", option.CallOutboundOptions{
+-		JoinLink: "x", CallCommonOptions: option.CallCommonOptions{Platform: "wbstream", Mode: "audio"},
++		JoinLink: "x", Platform: "wbstream", Mode: "audio",
+ 	})
+ 	require.ErrorContains(t, err, "unknown wbstream mode")
+ }

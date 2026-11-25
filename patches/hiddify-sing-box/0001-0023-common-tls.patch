@@ -275,7 +275,7 @@ index 0000000000000000000000000000000000000000..b86dd97ab351827cf58446c8e5119d8d
 +	}
 +}
 diff --git a/common/tls/ech.go b/common/tls/ech.go
-index 5c7109b89e5145fcd3835f9a57026ace1b1a7699..fb8dfa19e6dc657fcf897268f114bcb593442227 100644
+index 4c2890c6a9b8bf5fe3254fa6d5ec9331138508c3..fb8dfa19e6dc657fcf897268f114bcb593442227 100644
 --- a/common/tls/ech.go
 +++ b/common/tls/ech.go
 @@ -136,7 +136,7 @@ func (s *ECHClientConfig) fetchAndHandshake(ctx context.Context, conn net.Conn)
@@ -291,7 +291,7 @@ index 5c7109b89e5145fcd3835f9a57026ace1b1a7699..fb8dfa19e6dc657fcf897268f114bcb5
  			},
  		},
  	}
--	response, err := s.dnsRouter.Exchange(ctx, message, adapter.DNSQueryOptions{})
+-	response, err := s.dnsRouter.Exchange(ctx, message, echQueryOptions()) //H
 +	response, err := s.dnsRouter.Exchange(ctx, message, echQueryOptions()) // H
  	if err != nil {
  		return E.Cause(err, "fetch ECH config list")
@@ -300,153 +300,39 @@ index 5c7109b89e5145fcd3835f9a57026ace1b1a7699..fb8dfa19e6dc657fcf897268f114bcb5
  					if err != nil {
  						return E.Cause(err, "decode ECH config")
  					}
--					s.lastTTL = time.Duration(rr.Header().Ttl) * time.Second
+-					s.lastTTL = echConfigTTL(rr.Header().Ttl) //H
 +					s.lastTTL = echConfigTTL(rr.Header().Ttl) // H
  					s.lastUpdate = time.Now()
  					s.SetECHConfigList(echConfigList)
  					break match
-@@ -200,6 +200,7 @@ func (s *ECHClientConfig) Clone() Config {
+@@ -200,7 +200,7 @@ func (s *ECHClientConfig) Clone() Config {
  		dnsRouter:        s.dnsRouter,
  		queryServerName:  s.queryServerName,
  		lastUpdate:       s.lastUpdate,
+-		lastTTL:          s.lastTTL, //H the DNS cache is bypassed: a clone keeps the config until it expires
 +		lastTTL:          s.lastTTL, // H the DNS cache is bypassed: a clone keeps the config until it expires
  	}
  }
  
-diff --git a/common/tls/h_ech_resolver.go b/common/tls/h_ech_resolver.go
-new file mode 100644
-index 0000000000000000000000000000000000000000..220ef4446bf6ef8ffb253b8b47a10d1953a704fe
---- /dev/null
-+++ b/common/tls/h_ech_resolver.go
-@@ -0,0 +1,24 @@
-+package tls
-+
-+import (
-+	"time"
-+
-+	"github.com/sagernet/sing-box/adapter"
-+)
-+
-+// echConfigMaxAge is the longest an ECH config fetched by DNS is used before it is fetched again.
-+// Servers rotate their ECH keys (Cloudflare every hour or two), and a DNS config may stretch every
-+// TTL (Hiddify rewrites them to a day), so a config kept by the record's TTL went stale and every
-+// handshake with it failed until the cache expired (hiddify-app#2539).
-+const echConfigMaxAge = 10 * time.Minute
-+
-+// echQueryOptions is the query of an ECH config: through the DNS resolvers by the DNS rules, as
-+// any query, but never answered from the DNS cache, so the answer is the server's current one.
-+func echQueryOptions() adapter.DNSQueryOptions {
-+	return adapter.DNSQueryOptions{DisableCache: true}
-+}
-+
-+// echConfigTTL is how long a fetched ECH config is kept: the record's TTL, at most echConfigMaxAge.
-+func echConfigTTL(ttl uint32) time.Duration {
-+	return min(time.Duration(ttl)*time.Second, echConfigMaxAge)
-+}
 diff --git a/common/tls/h_ech_resolver_test.go b/common/tls/h_ech_resolver_test.go
-new file mode 100644
-index 0000000000000000000000000000000000000000..81233c91d3ca976db5a24779a60da2e7db9d2105
---- /dev/null
+index 70e96c34b84ced841d9bc27690b7966108a7aea5..81233c91d3ca976db5a24779a60da2e7db9d2105 100644
+--- a/common/tls/h_ech_resolver_test.go
 +++ b/common/tls/h_ech_resolver_test.go
-@@ -0,0 +1,98 @@
-+package tls
-+
-+import (
-+	"context"
-+	"testing"
-+	"time"
-+
-+	"github.com/sagernet/sing-box/adapter"
-+	"github.com/sagernet/sing-box/option"
-+	"github.com/sagernet/sing/service"
-+
-+	mDNS "github.com/miekg/dns"
-+	"github.com/stretchr/testify/require"
-+)
-+
-+type hECHTestConfig struct {
-+	ECHCapableConfig
-+	echConfigList []byte
-+}
-+
-+func (c *hECHTestConfig) ServerName() string           { return "example.org" }
-+func (c *hECHTestConfig) ECHConfigList() []byte        { return c.echConfigList }
-+func (c *hECHTestConfig) SetECHConfigList(list []byte) { c.echConfigList = list }
-+func (c *hECHTestConfig) Clone() Config                { return &hECHTestConfig{echConfigList: c.echConfigList} }
-+
-+// hECHTestRouter answers HTTPS queries with an ECH config and the TTL a DNS rule may rewrite it to.
-+type hECHTestRouter struct {
-+	adapter.DNSRouter
-+	ttl     uint32
-+	queries int
-+	name    string
-+	options adapter.DNSQueryOptions
-+}
-+
-+func (r *hECHTestRouter) Exchange(ctx context.Context, message *mDNS.Msg, options adapter.DNSQueryOptions) (*mDNS.Msg, error) {
-+	r.queries++
-+	r.name = message.Question[0].Name
-+	r.options = options
+@@ -36,11 +36,11 @@ func (r *hECHTestRouter) Exchange(ctx context.Context, message *mDNS.Msg, option
+ 	r.queries++
+ 	r.name = message.Question[0].Name
+ 	r.options = options
+-	record := &mDNS.HTTPS{SVCB: mDNS.SVCB{
 +	record := &mDNS.HTTPS{
-+		Hdr:   mDNS.RR_Header{Name: r.name, Rrtype: mDNS.TypeHTTPS, Class: mDNS.ClassINET, Ttl: r.ttl},
-+		Value: []mDNS.SVCBKeyValue{&mDNS.SVCBECHConfig{ECH: []byte("ech-config-list")}},
+ 		Hdr:   mDNS.RR_Header{Name: r.name, Rrtype: mDNS.TypeHTTPS, Class: mDNS.ClassINET, Ttl: r.ttl},
+ 		Value: []mDNS.SVCBKeyValue{&mDNS.SVCBECHConfig{ECH: []byte("ech-config-list")}},
+-	}}
+-	return &mDNS.Msg{MsgHdr: mDNS.MsgHdr{Response: true, Rcode: mDNS.RcodeSuccess}, Answer: []mDNS.RR{record}}, nil
 +	}
 +	return &mDNS.Msg{Response: true, Rcode: mDNS.RcodeSuccess, Answer: []mDNS.RR{record}}, nil
-+}
-+
-+func hECHTestClient(t *testing.T, ttl uint32) (*hECHTestRouter, *ECHClientConfig) {
-+	t.Helper()
-+	router := &hECHTestRouter{ttl: ttl}
-+	ctx := service.ContextWith[adapter.DNSRouter](context.Background(), router)
-+	config, err := parseECHClientConfig(ctx, &hECHTestConfig{}, option.OutboundTLSOptions{
-+		ECH: &option.OutboundECHOptions{Enabled: true, QueryServerName: "cloudflare-ech.com"},
-+	})
-+	require.NoError(t, err)
-+	client := config.(*ECHClientConfig)
-+	require.NoError(t, client.FetchConfig(context.Background()))
-+	require.Equal(t, "cloudflare-ech.com.", router.name)
-+	require.Equal(t, "ech-config-list", string(client.ECHConfigList()))
-+	return router, client
-+}
-+
-+// The ECH config is fetched through the DNS resolvers by the rules (no transport is forced), and
-+// never from the DNS cache, whose TTLs a config may stretch to a day (hiddify-app#2539).
-+func TestH_ECHFetchSkipsDNSCache(t *testing.T) {
-+	router, _ := hECHTestClient(t, 300)
-+	require.Nil(t, router.options.Transport)
-+	require.True(t, router.options.DisableCache)
-+}
-+
-+// A fetched ECH config is kept for the record's TTL, at most 10 minutes, then fetched again.
-+func TestH_ECHConfigKeptAtMostTenMinutes(t *testing.T) {
-+	for _, test := range []struct {
-+		ttl  uint32
-+		kept time.Duration
-+	}{
-+		{ttl: 86400, kept: 10 * time.Minute},
-+		{ttl: 601, kept: 10 * time.Minute},
-+		{ttl: 300, kept: 5 * time.Minute},
-+	} {
-+		router, client := hECHTestClient(t, test.ttl)
-+		require.Equal(t, test.kept, client.lastTTL, test.ttl)
-+
-+		require.NoError(t, client.FetchConfig(context.Background()))
-+		require.Equal(t, 1, router.queries, "a fresh config is not fetched again")
-+
-+		client.lastUpdate = time.Now().Add(-test.kept - time.Second)
-+		require.NoError(t, client.FetchConfig(context.Background()))
-+		require.Equal(t, 2, router.queries, "an expired config is fetched again")
-+	}
-+}
-+
-+// A clone keeps the fetched config until it expires, instead of a DNS query per connection.
-+func TestH_ECHCloneKeepsConfig(t *testing.T) {
-+	router, client := hECHTestClient(t, 86400)
-+	clone := client.Clone().(*ECHClientConfig)
-+	require.NoError(t, clone.FetchConfig(context.Background()))
-+	require.Equal(t, 1, router.queries)
-+	require.Equal(t, 10*time.Minute, clone.lastTTL)
-+}
+ }
+ 
+ func hECHTestClient(t *testing.T, ttl uint32) (*hECHTestRouter, *ECHClientConfig) {
 diff --git a/common/tls/h_masque_pin_test.go b/common/tls/h_masque_pin_test.go
 index 6ba76417d8597f9db170f1113e696e13a44816ff..d2ff7d39f205e1a6d8f726db81ab4002bf9ae9db 100644
 --- a/common/tls/h_masque_pin_test.go
@@ -460,168 +346,38 @@ index 6ba76417d8597f9db170f1113e696e13a44816ff..d2ff7d39f205e1a6d8f726db81ab4002
  )
  
 diff --git a/common/tls/h_utls_fingerprint_test.go b/common/tls/h_utls_fingerprint_test.go
-index dc2a93a1b40be1de2fe9128c93cd1d1abea34eca..6e3bc6f61896307f35fa78aa7886627e22ed782b 100644
+index 106053cb7cca34ca0ecf6be6bd101d298c0441e5..6e3bc6f61896307f35fa78aa7886627e22ed782b 100644
 --- a/common/tls/h_utls_fingerprint_test.go
 +++ b/common/tls/h_utls_fingerprint_test.go
-@@ -9,12 +9,12 @@ import (
+@@ -9,9 +9,9 @@ import (
  	"github.com/stretchr/testify/require"
  )
  
 -// github.com/metacubex/utls is replaced by Leadaxe/utls-lx, which has the Firefox 148 and
 -// Safari 26.3 ClientHellos with the hybrid key share that Xray v26.9.8+ REALITY servers require.
--// chrome stays at Chrome 133.
+-// chrome is Chrome 155, as Xray from v26.11.9.
 +// The native uTLS copy exposes verified browser ClientHello snapshots under
 +// stable fingerprint names. Chrome 155 replaced Chrome 133 rather than adding
 +// another selectable fingerprint; the other snapshots are Firefox 148 and Safari 26.3.
  func TestH_UTLSFingerprintVersions(t *testing.T) {
  	for name, want := range map[string]utls.ClientHelloID{
--		"chrome":  utls.HelloChrome_133,
-+		"chrome":  utls.HelloChrome_155,
- 		"firefox": utls.HelloFirefox_148,
- 		"safari":  utls.HelloSafari_26_3,
- 	} {
-diff --git a/common/tls/h_utls_hello_id.go b/common/tls/h_utls_hello_id.go
-new file mode 100644
-index 0000000000000000000000000000000000000000..3e4c63e0c4e7b55dc8678c80e0f046bcdb360947
---- /dev/null
-+++ b/common/tls/h_utls_hello_id.go
-@@ -0,0 +1,13 @@
-+//go:build with_utls
-+
-+package tls
-+
-+// UTLSHelloID returns the client and version of the uTLS fingerprint of config, for code that
-+// hands the fingerprint to another TLS stack (Xray's in XDRIVE); ok is false without uTLS.
-+func UTLSHelloID(config Config) (client string, version string, ok bool) {
-+	utlsConfig, isUTLS := config.(*UTLSClientConfig)
-+	if !isUTLS {
-+		return "", "", false
-+	}
-+	return utlsConfig.id.Client, utlsConfig.id.Version, true
-+}
-diff --git a/common/tls/h_utls_hello_id_stub.go b/common/tls/h_utls_hello_id_stub.go
-new file mode 100644
-index 0000000000000000000000000000000000000000..64f5b8a9d727c38f8da521926291537de95707cd
---- /dev/null
-+++ b/common/tls/h_utls_hello_id_stub.go
-@@ -0,0 +1,8 @@
-+//go:build !with_utls
-+
-+package tls
-+
-+// UTLSHelloID returns ok false: this build has no uTLS.
-+func UTLSHelloID(config Config) (client string, version string, ok bool) {
-+	return "", "", false
-+}
+ 		"chrome":  utls.HelloChrome_155,
 diff --git a/common/tls/h_utls_xray_names.go b/common/tls/h_utls_xray_names.go
-new file mode 100644
-index 0000000000000000000000000000000000000000..0755cefbb731e38299cf48b86b0489597c7b2823
---- /dev/null
+index 2ca6a71f642d671bb9566e49f7fd5e15ef026bc4..9616ac61503fe0c3887a05178a103388fe60409d 100644
+--- a/common/tls/h_utls_xray_names.go
 +++ b/common/tls/h_utls_xray_names.go
-@@ -0,0 +1,72 @@
-+//go:build with_utls
-+
-+package tls
-+
-+import (
-+	"strings"
-+
-+	utls "github.com/metacubex/utls"
-+)
-+
-+// xrayFingerprints are Xray's fingerprint names for a fixed uTLS ClientHello (its
-+// ModernFingerprints and OtherFingerprints), so an Xray link's fp= value works here too. The
-+// short names (chrome, firefox, ...) are sing-box's own and are read before these. //H
-+var xrayFingerprints = map[string]utls.ClientHelloID{
-+	"hellofirefox_120":                 utls.HelloFirefox_120,
-+	"hellofirefox_148":                 utls.HelloFirefox_148,
-+	"hellochrome_120":                  utls.HelloChrome_120,
-+	"hellochrome_131":                  utls.HelloChrome_131,
-+	"hellochrome_133":                  utls.HelloChrome_133,
-+	"helloios_13":                      utls.HelloIOS_13,
-+	"helloios_14":                      utls.HelloIOS_14,
-+	"helloedge_106":                    utls.HelloEdge_106,
-+	"hellosafari_26_3":                 utls.HelloSafari_26_3,
-+	"hello360_11_0":                    utls.Hello360_11_0,
-+	"helloqq_11_1":                     utls.HelloQQ_11_1,
-+	"hellogolang":                      utls.HelloGolang,
-+	"hellorandomized":                  utls.HelloRandomized,
-+	"hellorandomizedalpn":              utls.HelloRandomizedALPN,
-+	"hellorandomizednoalpn":            utls.HelloRandomizedNoALPN,
-+	"hellofirefox_auto":                utls.HelloFirefox_Auto,
-+	"hellofirefox_55":                  utls.HelloFirefox_55,
-+	"hellofirefox_56":                  utls.HelloFirefox_56,
-+	"hellofirefox_63":                  utls.HelloFirefox_63,
-+	"hellofirefox_65":                  utls.HelloFirefox_65,
-+	"hellofirefox_99":                  utls.HelloFirefox_99,
-+	"hellofirefox_102":                 utls.HelloFirefox_102,
-+	"hellofirefox_105":                 utls.HelloFirefox_105,
-+	"hellochrome_auto":                 utls.HelloChrome_Auto,
-+	"hellochrome_58":                   utls.HelloChrome_58,
-+	"hellochrome_62":                   utls.HelloChrome_62,
-+	"hellochrome_70":                   utls.HelloChrome_70,
-+	"hellochrome_72":                   utls.HelloChrome_72,
-+	"hellochrome_83":                   utls.HelloChrome_83,
-+	"hellochrome_87":                   utls.HelloChrome_87,
-+	"hellochrome_96":                   utls.HelloChrome_96,
-+	"hellochrome_100":                  utls.HelloChrome_100,
-+	"hellochrome_102":                  utls.HelloChrome_102,
-+	"hellochrome_106_shuffle":          utls.HelloChrome_106_Shuffle,
-+	"helloios_auto":                    utls.HelloIOS_Auto,
-+	"helloios_11_1":                    utls.HelloIOS_11_1,
-+	"helloios_12_1":                    utls.HelloIOS_12_1,
-+	"helloandroid_11_okhttp":           utls.HelloAndroid_11_OkHttp,
-+	"helloedge_85":                     utls.HelloEdge_85,
-+	"helloedge_auto":                   utls.HelloEdge_Auto,
-+	"hellosafari_16_0":                 utls.HelloSafari_16_0,
-+	"hellosafari_auto":                 utls.HelloSafari_Auto,
-+	"hello360_auto":                    utls.Hello360_Auto,
-+	"hello360_7_5":                     utls.Hello360_7_5,
-+	"helloqq_auto":                     utls.HelloQQ_Auto,
-+	"hellochrome_100_psk":              utls.HelloChrome_100_PSK,
-+	"hellochrome_112_psk_shuf":         utls.HelloChrome_112_PSK_Shuf,
-+	"hellochrome_114_padding_psk_shuf": utls.HelloChrome_114_Padding_PSK_Shuf,
-+	"hellochrome_115_pq":               utls.HelloChrome_115_PQ,
-+	"hellochrome_115_pq_psk":           utls.HelloChrome_115_PQ_PSK,
-+	"hellochrome_120_pq":               utls.HelloChrome_120_PQ,
-+}
-+
-+// xrayFingerprint is the ClientHello of an Xray fingerprint name, in any case. //H
-+func xrayFingerprint(name string) (utls.ClientHelloID, bool) {
-+	id, ok := xrayFingerprints[strings.ToLower(name)]
-+	return id, ok
-+}
-diff --git a/common/tls/h_utls_xray_names_test.go b/common/tls/h_utls_xray_names_test.go
-new file mode 100644
-index 0000000000000000000000000000000000000000..b0f802247b98643ec025213e864d08e69c07aaf9
---- /dev/null
-+++ b/common/tls/h_utls_xray_names_test.go
-@@ -0,0 +1,25 @@
-+//go:build with_utls
-+
-+package tls
-+
-+import (
-+	"testing"
-+
-+	utls "github.com/metacubex/utls"
-+	"github.com/stretchr/testify/require"
-+)
-+
-+// An Xray link's fp=hellochrome_120 used to fail the outbound with "unknown uTLS fingerprint".
-+func TestH_UTLSXrayFingerprintNames(t *testing.T) {
-+	id, err := uTLSClientHelloID("hellochrome_120")
-+	require.NoError(t, err)
-+	require.Equal(t, utls.HelloChrome_120, id)
-+	id, err = uTLSClientHelloID("HelloFirefox_148")
-+	require.NoError(t, err)
-+	require.Equal(t, utls.HelloFirefox_148, id)
-+	id, err = uTLSClientHelloID("chrome")
-+	require.NoError(t, err)
-+	require.Equal(t, utls.HelloChrome_Auto, id, "sing-box's own names first")
-+	_, err = uTLSClientHelloID("hellochrome_999")
-+	require.Error(t, err)
-+}
+@@ -8,10 +8,7 @@ import (
+ 	utls "github.com/metacubex/utls"
+ )
+ 
+-// hChromeFingerprint is the ClientHello of the "chrome" fingerprint: Chrome 155, as Xray from
+-// v26.11.9, whose uTLS made it HelloChrome_Auto because TSPU does not target it yet
+-// (XTLS/Xray-core#7259). The uTLS fork used here still has Chrome 133 as HelloChrome_Auto; its
+-// Chrome 155 ClientHello is the same as upstream uTLS's.
++// hChromeFingerprint is the canonical Chrome snapshot of native uTLS.
+ var hChromeFingerprint = utls.HelloChrome_155
+ 
+ // xrayFingerprints are Xray's fingerprint names for a fixed uTLS ClientHello (its
 diff --git a/common/tls/masque_client.go b/common/tls/masque_client.go
 index 24e6df87b906d040f001475ad7da2062dede5886..595320a179587e6b3fd9bb4d7384b0b77fe0c598 100644
 --- a/common/tls/masque_client.go
@@ -658,7 +414,7 @@ index 24e6df87b906d040f001475ad7da2062dede5886..595320a179587e6b3fd9bb4d7384b0b7
  		// so the ClientHello carries the encrypted config list.
  		echConfig, err := parseECHClientConfig(ctx, config.(ECHCapableConfig), option.OutboundTLSOptions{ECH: options.ECH})
 diff --git a/common/tls/reality_client.go b/common/tls/reality_client.go
-index 5fe0949be2cccfed45d7a65cf0f1f004afc821ca..be24834b13cbc6d5223972c99882e72f29db34cd 100644
+index 195cf59d3779d9e5d53433ee4a2f077c65fec004..71b2b8340a516f8107ba8f67191cc643b9a8bc33 100644
 --- a/common/tls/reality_client.go
 +++ b/common/tls/reality_client.go
 @@ -28,7 +28,7 @@ import (
@@ -678,7 +434,7 @@ index 5fe0949be2cccfed45d7a65cf0f1f004afc821ca..be24834b13cbc6d5223972c99882e72f
  	utls "github.com/metacubex/utls"
  	"golang.org/x/crypto/hkdf"
  	"golang.org/x/net/http2"
-@@ -46,11 +47,12 @@ import (
+@@ -46,13 +47,14 @@ import (
  var _ ConfigCompat = (*RealityClientConfig)(nil)
  
  type RealityClientConfig struct {
@@ -686,17 +442,21 @@ index 5fe0949be2cccfed45d7a65cf0f1f004afc821ca..be24834b13cbc6d5223972c99882e72f
 -	uClient   *UTLSClientConfig
 -	publicKey []byte
 -	shortID   [8]byte
--	classical bool //H: key_share "classical", no X25519MLKEM768
+-	classical bool                 //H: key_share "classical", no X25519MLKEM768
+-	auto      *realityKeyShareAuto //H: key_share "auto": classical, tested once, when hybrid handshakes get no answer
+-	logger    logger.ContextLogger //H
 +	ctx           context.Context
 +	uClient       *UTLSClientConfig
 +	publicKey     []byte
 +	shortID       [8]byte
 +	classical     bool // H: key_share "classical", no X25519MLKEM768
 +	mldsa65Verify *mldsa65.PublicKey
++	auto          *realityKeyShareAuto
++	logger        logger.ContextLogger
  }
  
  func NewRealityClient(ctx context.Context, logger logger.ContextLogger, serverAddress string, options option.OutboundTLSOptions) (Config, error) {
-@@ -80,9 +82,9 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
+@@ -82,9 +84,9 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
  	if len(publicKey) != 32 {
  		return nil, E.New("invalid public_key")
  	}
@@ -709,36 +469,31 @@ index 5fe0949be2cccfed45d7a65cf0f1f004afc821ca..be24834b13cbc6d5223972c99882e72f
  	var shortID [8]byte
  	decodedLen, err := hex.Decode(shortID[:], []byte(options.Reality.ShortID))
  	if err != nil {
-@@ -92,7 +94,7 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
- 		return nil, E.New("invalid short_id")
- 	}
- 
--	var classical bool //H: key_share
-+	var classical bool // H: key_share
- 	switch options.Reality.KeyShare {
- 	case "", "hybrid":
- 	case "classical":
-@@ -100,7 +102,11 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
+@@ -105,7 +107,11 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
  	default:
- 		return nil, E.New("unknown reality key_share: ", options.Reality.KeyShare, ` (expected "hybrid" or "classical")`)
+ 		return nil, E.New("unknown reality key_share: ", options.Reality.KeyShare, ` (expected "hybrid", "classical" or "auto")`) //H
  	}
--	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID, classical} //H
+-	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID, classical, auto, logger} //H
 +	verify, err := parseRealityMLDSAPublicKey(options.Reality.Mldsa65Verify)
 +	if err != nil {
 +		return nil, err
 +	}
-+	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID, classical, verify} // H
++	var config Config = &RealityClientConfig{ctx: ctx, uClient: uClient.(*UTLSClientConfig), publicKey: publicKey, shortID: shortID, classical: classical, mldsa65Verify: verify, auto: auto, logger: logger} // H
  	if options.KernelRx || options.KernelTx {
  		if !C.IsLinux {
  			return nil, E.New("kTLS is only supported on Linux")
-@@ -150,11 +156,12 @@ func (e *RealityClientConfig) Client(conn net.Conn) (Conn, error) {
+@@ -155,7 +161,7 @@ func (e *RealityClientConfig) Client(conn net.Conn) (Conn, error) {
  // H: realityClientVersion is the Xray version reported to REALITY servers. Servers compare it
  // with their minClientVer (Xray v26.7 applied 26.3.27 when unset), so it follows Xray's latest
  // release instead of sing-box's old 1.8.1, which those servers reject.
 -var realityClientVersion = [3]byte{26, 10, 17}
 +var realityClientVersion = [3]byte{26, 11, 9}
  
- func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn) (aTLS.Conn, error) {
+ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn) (aTLS.Conn, error) { //H
+ 	if e.auto == nil { //H
+@@ -169,7 +175,8 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
+ 
+ func (e *RealityClientConfig) clientHandshake(ctx context.Context, conn net.Conn, classical bool) (aTLS.Conn, error) { //H
  	verifier := &realityVerifier{
 -		serverName: e.uClient.ServerName(),
 +		serverName:    e.uClient.ServerName(),
@@ -746,12 +501,12 @@ index 5fe0949be2cccfed45d7a65cf0f1f004afc821ca..be24834b13cbc6d5223972c99882e72f
  	}
  	uConfig := e.uClient.config.Clone()
  	uConfig.InsecureSkipVerify = true
-@@ -163,13 +170,13 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
+@@ -178,13 +185,13 @@ func (e *RealityClientConfig) clientHandshake(ctx context.Context, conn net.Conn
  	// H: the fingerprint is changed to pass both older and v26.10+ Xray servers (see
  	// realityClientHelloSpec). The auth key comes from the X25519 share (KeyShareKeys.Ecdhe),
  	// which REALITY servers check first, as Xray's own client does.
--	spec, err := realityClientHelloSpec(e.uClient.id, uConfig, e.classical) //H
-+	spec, err := realityClientHelloSpec(e.uClient.id, uConfig, e.classical) // H
+-	spec, err := realityClientHelloSpec(e.uClient.id, uConfig, classical) //H
++	spec, err := realityClientHelloSpec(e.uClient.id, uConfig, classical) // H
  	if err != nil {
  		return nil, err
  	}
@@ -764,7 +519,7 @@ index 5fe0949be2cccfed45d7a65cf0f1f004afc821ca..be24834b13cbc6d5223972c99882e72f
  	uConn := utls.UClient(conn, uConfig, utls.HelloCustom)
  	verifier.UConn = uConn
  	err = uConn.ApplyPreset(spec)
-@@ -202,8 +209,8 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
+@@ -217,8 +224,8 @@ func (e *RealityClientConfig) clientHandshake(ctx context.Context, conn net.Conn
  	}
  	binary.BigEndian.PutUint64(hello.SessionId, uint64(nowTime.Unix()))
  
@@ -775,20 +530,33 @@ index 5fe0949be2cccfed45d7a65cf0f1f004afc821ca..be24834b13cbc6d5223972c99882e72f
  	copy(hello.SessionId[8:], e.shortID[:])
  	if debug.Enabled {
  		fmt.Printf("REALITY hello.sessionId[:16]: %v\n", hello.SessionId[:16])
-@@ -296,24 +303,62 @@ func (e *RealityClientConfig) Clone() Config {
+@@ -267,7 +274,7 @@ func (e *RealityClientConfig) clientHandshake(ctx context.Context, conn net.Conn
+ 
+ 	if !verifier.verified {
+ 		go realityClientFallback(e.ctx, uConn, e.uClient.ServerName(), e.uClient.id)
+-		return nil, errRealityVerificationFailed //H
++		return nil, errRealityVerificationFailed
+ 	}
+ 
+ 	return &realityClientConnWrapper{uConn}, nil
+@@ -311,26 +318,64 @@ func (e *RealityClientConfig) Clone() Config {
  		e.uClient.Clone().(*UTLSClientConfig),
  		e.publicKey,
  		e.shortID,
 -		e.classical, //H
+-		e.auto,      //H: shared, so the clones learn together
+-		e.logger,    //H
 +		e.classical, // H
 +		e.mldsa65Verify,
++		e.auto,
++		e.logger,
 +	}
 +}
 +
 +func parseRealityMLDSAPublicKey(value string) (*mldsa65.PublicKey, error) {
 +	if value == "" {
 +		return nil, nil
- 	}
++	}
 +	data, err := base64.RawURLEncoding.DecodeString(value)
 +	if err != nil || len(data) != mldsa65.PublicKeySize {
 +		return nil, E.New("invalid mldsa65_verify")
@@ -796,7 +564,7 @@ index 5fe0949be2cccfed45d7a65cf0f1f004afc821ca..be24834b13cbc6d5223972c99882e72f
 +	key, err := mldsa65.Scheme().UnmarshalBinaryPublicKey(data)
 +	if err != nil {
 +		return nil, E.New("invalid mldsa65_verify")
-+	}
+ 	}
 +	verify, ok := key.(*mldsa65.PublicKey)
 +	if !ok {
 +		return nil, E.New("invalid mldsa65_verify key type")
@@ -1145,7 +913,7 @@ index bc156d2780b3fccb9f83dd44a42100917c4fda95..befbfe9550a5185b00de2750cdd38bcf
  	}
  	for _, curveID := range options.CurvePreferences {
 diff --git a/common/tls/utls_client.go b/common/tls/utls_client.go
-index 94f31726853dcafdb4e4af9d0165865920b9a730..b71ae6c8ccd658dabbae5a418fdc5a09e919f039 100644
+index b5a51672ada4128acb7d9ffe2addb8295372d2ab..7e83b9a591cd00aef7f641b5c09c9aa8e9f425c8 100644
 --- a/common/tls/utls_client.go
 +++ b/common/tls/utls_client.go
 @@ -12,7 +12,7 @@ import (
@@ -1166,46 +934,7 @@ index 94f31726853dcafdb4e4af9d0165865920b9a730..b71ae6c8ccd658dabbae5a418fdc5a09
  }
  
  func (c *UTLSClientConfig) ServerName() string {
-@@ -91,22 +91,22 @@ func (c *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
- 	if err != nil {
- 		return nil, err
- 	}
--	config := c.config.Clone()                      //H
--	if c.tricks != nil && config.ServerName != "" { //H
--		config.ServerName = c.tricks.serverName(config.ServerName) //H
--	} //H
--	id := c.id                               //H
--	if c.tricks != nil && c.tricks.padding { //H: the spec is applied to a custom hello
--		id = utls.HelloCustom //H
--	} //H
--	uConn := utls.UClient(conn, config, id)  //H
--	if c.tricks != nil && c.tricks.padding { //H
--		err = applyTLSTricksPadding(uConn, c.id, c.tricks) //H
--		if err != nil {                                    //H
--			return nil, err //H
--		} //H
--	} //H
--	return &utlsALPNWrapper{utlsConnWrapper{uConn}, c.config.NextProtos}, nil //H
-+	config := c.config.Clone()                      // H
-+	if c.tricks != nil && config.ServerName != "" { // H
-+		config.ServerName = c.tricks.serverName(config.ServerName) // H
-+	} // H
-+	id := c.id                               // H
-+	if c.tricks != nil && c.tricks.padding { // H: the spec is applied to a custom hello
-+		id = utls.HelloCustom // H
-+	} // H
-+	uConn := utls.UClient(conn, config, id)  // H
-+	if c.tricks != nil && c.tricks.padding { // H
-+		err = applyTLSTricksPadding(uConn, c.id, c.tricks) // H
-+		if err != nil {                                    // H
-+			return nil, err // H
-+		} // H
-+	} // H
-+	return &utlsALPNWrapper{utlsConnWrapper{uConn}, c.config.NextProtos}, nil // H
- }
- 
- func (c *UTLSClientConfig) SetSessionIDGenerator(generator func(clientHello []byte, sessionID []byte) error) {
-@@ -127,7 +127,7 @@ func (c *UTLSClientConfig) Clone() Config {
+@@ -120,7 +120,7 @@ func (c *UTLSClientConfig) Clone() Config {
  		recordFragment:        c.recordFragment,
  		spoof:                 c.spoof,
  		spoofMethod:           c.spoofMethod,
@@ -1214,7 +943,16 @@ index 94f31726853dcafdb4e4af9d0165865920b9a730..b71ae6c8ccd658dabbae5a418fdc5a09
  	}
  	cloned.SetServerName(cloned.serverName)
  	return cloned
-@@ -253,15 +253,13 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
+@@ -154,7 +154,7 @@ func (c *utlsConnWrapper) ConnectionState() tls.ConnectionState {
+ 		SignedCertificateTimestamps: state.SignedCertificateTimestamps,
+ 		OCSPResponse:                state.OCSPResponse,
+ 		TLSUnique:                   state.TLSUnique,
+-		ECHAccepted:                 state.ECHAccepted, //H
++		ECHAccepted:                 state.ECHAccepted,
+ 	}
+ }
+ 
+@@ -247,15 +247,13 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
  		tlsConfig.MaxVersion = maxVersion
  	}
  	if options.CipherSuites != nil {
@@ -1237,7 +975,7 @@ index 94f31726853dcafdb4e4af9d0165865920b9a730..b71ae6c8ccd658dabbae5a418fdc5a09
  		}
  	}
  	var certificate []byte
-@@ -324,15 +322,15 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
+@@ -318,15 +316,15 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
  	if err != nil {
  		return nil, err
  	}
@@ -1262,7 +1000,7 @@ index 94f31726853dcafdb4e4af9d0165865920b9a730..b71ae6c8ccd658dabbae5a418fdc5a09
  	var config Config = &UTLSClientConfig{
  		ctx:                   ctx,
  		config:                &tlsConfig,
-@@ -346,7 +344,7 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
+@@ -340,14 +338,14 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
  		recordFragment:        options.RecordFragment,
  		spoof:                 spoof,
  		spoofMethod:           spoofMethod,
@@ -1271,14 +1009,23 @@ index 94f31726853dcafdb4e4af9d0165865920b9a730..b71ae6c8ccd658dabbae5a418fdc5a09
  	}
  	config.SetServerName(serverName)
  	if options.ECH != nil && options.ECH.Enabled {
-@@ -378,12 +376,12 @@ var (
+ 		if options.Reality != nil && options.Reality.Enabled {
+ 			return nil, E.New("Reality is conflict with ECH")
+ 		}
+-		config.(*UTLSClientConfig).id = hECHClientHelloID(logger, options.UTLS.Fingerprint, id) //H
++		config.(*UTLSClientConfig).id = hECHClientHelloID(logger, options.UTLS.Fingerprint, id)
+ 		config, err = parseECHClientConfig(ctx, config.(ECHCapableConfig), options)
+ 		if err != nil {
+ 			return nil, err
+@@ -373,12 +371,12 @@ var (
  )
  
  func init() {
 +	// Only include independently captured, current-enough browser templates.
 +	// The legacy Edge/iOS defaults predate hybrid X25519+ML-KEM support.
  	modernFingerprints := []utls.ClientHelloID{
- 		utls.HelloChrome_Auto,
+-		hChromeFingerprint, //H: Chrome 155, as Xray
++		utls.HelloChrome_Auto,
  		utls.HelloFirefox_Auto,
 -		utls.HelloEdge_Auto,
  		utls.HelloSafari_Auto,
@@ -1286,20 +1033,21 @@ index 94f31726853dcafdb4e4af9d0165865920b9a730..b71ae6c8ccd658dabbae5a418fdc5a09
  	}
  	randomFingerprint = modernFingerprints[rand.Intn(len(modernFingerprints))]
  
-@@ -397,15 +395,17 @@ func init() {
+@@ -392,15 +390,17 @@ func init() {
  
  func uTLSClientHelloID(name string) (utls.ClientHelloID, error) {
  	switch name {
 -	case "chrome_psk", "chrome_psk_shuffle", "chrome_padding_psk_shuffle", "chrome_pq", "chrome_pq_psk":
 -		fallthrough
 -	case "chrome", "":
+-		return hChromeFingerprint, nil //H: Chrome 155, as Xray
+-	case "firefox":
 +	// Existing configurations may contain historical names. They all
 +	// resolve to the canonical new profile; no old ClientHello is emitted.
 +	case "chrome", "", "chrome_psk", "chrome_psk_shuffle",
 +		"chrome_padding_psk_shuffle", "chrome_pq", "chrome_pq_psk",
 +		"chrome_155", "hellochrome_155", "chrome_133", "hellochrome_133":
- 		return utls.HelloChrome_Auto, nil
--	case "firefox":
++		return utls.HelloChrome_Auto, nil
 +	case "firefox", "firefox_148", "hellofirefox_148":
  		return utls.HelloFirefox_Auto, nil
  	case "edge":
@@ -1309,13 +1057,16 @@ index 94f31726853dcafdb4e4af9d0165865920b9a730..b71ae6c8ccd658dabbae5a418fdc5a09
  		return utls.HelloSafari_Auto, nil
  	case "360":
  		return utls.Hello360_Auto, nil
-@@ -419,7 +419,12 @@ func uTLSClientHelloID(name string) (utls.ClientHelloID, error) {
+@@ -414,10 +414,12 @@ func uTLSClientHelloID(name string) (utls.ClientHelloID, error) {
  		return randomFingerprint, nil
  	case "randomized":
  		return randomizedFingerprint, nil
 +	case "randomizednoalpn":
 +		return utls.HelloRandomizedNoALPN, nil
  	default:
+-		if id, ok := xrayFingerprint(name); ok { //H: Xray's names, hellochrome_120 and the like
+-			return id, nil //H
+-		} //H
 +		if id, ok := xrayFingerprint(name); ok { // H: Xray's names, hellochrome_120 and the like
 +			return id, nil // H
 +		} // H

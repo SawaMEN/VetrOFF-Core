@@ -1,0 +1,101 @@
+diff --git a/protocol/ssh/h_ssh_test.go b/protocol/ssh/h_ssh_test.go
+index fcef4532910fcde76818eaec20260e0dc91a32a4..bfb71521487bd9e6890716789096b59422b83f9b 100644
+--- a/protocol/ssh/h_ssh_test.go
++++ b/protocol/ssh/h_ssh_test.go
+@@ -164,7 +164,7 @@ func startInbound(t *testing.T, mutate func(*option.SSHInboundOptions)) *sshFixt
+ 	require.NoError(t, err)
+ 	f.inbound = in.(*Inbound)
+ 	require.NoError(t, htest.Start(f.inbound, adapter.StartStateStart))
+-	t.Cleanup(func() { f.inbound.Close() })
++	t.Cleanup(func() { _ = htest.Close(f.inbound) })
+ 	f.addr = net.JoinHostPort("127.0.0.1", strconv.Itoa(int(f.port)))
+ 	return f
+ }
+@@ -575,7 +575,9 @@ func TestH_SSHInboundHostKeyAlgorithms(t *testing.T) {
+ 
+ // forwarded connections honor deadlines
+ func TestH_SSHInboundChannelDeadline(t *testing.T) {
+-	conn := deadline.NewConn(&channelConn{Channel: hBlockingChannel{}})
++	done := make(chan struct{})
++	defer close(done)
++	conn := deadline.NewConn(&channelConn{Channel: hBlockingChannel{done: done}})
+ 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(50*time.Millisecond)))
+ 	start := time.Now()
+ 	_, err := conn.Read(make([]byte, 1))
+@@ -583,9 +585,12 @@ func TestH_SSHInboundChannelDeadline(t *testing.T) {
+ 	require.Less(t, time.Since(start), 2*time.Second)
+ }
+ 
+-type hBlockingChannel struct{ ssh.Channel }
++type hBlockingChannel struct {
++	ssh.Channel
++	done <-chan struct{}
++}
+ 
+-func (hBlockingChannel) Read([]byte) (int, error) { select {} }
++func (c hBlockingChannel) Read([]byte) (int, error) { <-c.done; return 0, io.EOF }
+ 
+ // a network without udp turns UDP over TCP off
+ func TestH_SSHInboundNetwork(t *testing.T) {
+diff --git a/protocol/ssh/inbound.go b/protocol/ssh/inbound.go
+index c3211f89c72ef2101172f05a02e254fcf613d50c..2ff13ff6fc16329b6b29f48e86aa197adba6821e 100644
+--- a/protocol/ssh/inbound.go
++++ b/protocol/ssh/inbound.go
+@@ -147,9 +147,6 @@ func NewInbound(
+ 
+ // Start listener
+ func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+-	if stage == adapter.StartStateInitialize {
+-		scope.Add(h.Close) // H: closed with the box
+-	}
+ 	if stage != adapter.StartStateStart {
+ 		return nil
+ 	}
+@@ -158,6 +155,7 @@ func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 		return err
+ 	}
+ 
++	scope.Add(h.Close)
+ 	return nil
+ }
+ 
+diff --git a/protocol/ssh/outbound.go b/protocol/ssh/outbound.go
+index 67f91080ee719c9607feddc26a08306f4f2955c7..71718243ad6cbc165d03c06c7775a1a207b00250 100644
+--- a/protocol/ssh/outbound.go
++++ b/protocol/ssh/outbound.go
+@@ -397,13 +397,7 @@ func (s *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 	if stage != adapter.StartStateInitialize {
+ 		return nil
+ 	}
+-	scope.Add(func() error {
+-		s.closeOnce.Do(func() { close(s.done) })
+-		s.clientAccess.Lock()
+-		clientConn := s.clientConn
+-		s.clientAccess.Unlock()
+-		return common.Close(clientConn)
+-	})
++	scope.Add(s.Close)
+ 	return nil
+ }
+ 
+@@ -491,3 +485,20 @@ func (s *Outbound) StatusError() error { //H
+ 	} //H
+ 	return nil //H
+ } //H
++
++func (s *Outbound) Close() error {
++	s.closeOnce.Do(func() { close(s.done) })
++	s.clientAccess.Lock()
++	clientConn := s.clientConn
++	s.client = nil
++	s.clientConn = nil
++	s.ready.Store(false)
++	s.clientAccess.Unlock()
++	return common.Close(clientConn)
++}
++
++func (s *Outbound) IsReady() bool {
++	return s.ready.Load()
++}
++
++func (s *Outbound) DisplayType() string { return C.ProxyDisplayName(s.Type()) }

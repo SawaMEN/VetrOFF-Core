@@ -1,0 +1,118 @@
+diff --git a/internal/client/async_runtime.go b/internal/client/async_runtime.go
+index d76d229d2da8078ecc06c710add22b7056ab9708..85395e1901ab3e883c42235abe8904b18246b258 100644
+--- a/internal/client/async_runtime.go
++++ b/internal/client/async_runtime.go
+@@ -238,7 +238,7 @@ func (c *Client) resetSessionState(resetSessionCookie bool) {
+ 	if c == nil {
+ 		return
+ 	}
+-	c.sessionReady = false
++	c.sessionReady.Store(false)
+ 	c.sessionID = 0
+ 	if resetSessionCookie {
+ 		c.sessionCookie = 0
+diff --git a/internal/client/async_runtime_test.go b/internal/client/async_runtime_test.go
+index 4dd4817ff50edc928290ce809c54f070f193f18d..ec2851d9519124235e6b266d59017477b1ff2da5 100644
+--- a/internal/client/async_runtime_test.go
++++ b/internal/client/async_runtime_test.go
+@@ -50,7 +50,7 @@ func TestResetRuntimeBindings(t *testing.T) {
+ 	c := createTestClient(t)
+ 	c.last_stream_id = 10
+ 	c.sessionID = 1
+-	c.sessionReady = true
++	c.sessionReady.Store(true)
+ 	c.socksRateLimit.RecordFailure("10.0.0.1")
+ 	oldLimiter := c.socksRateLimit
+ 
+@@ -64,7 +64,7 @@ func TestResetRuntimeBindings(t *testing.T) {
+ 		t.Errorf("expected sessionID 0, got %d", c.sessionID)
+ 	}
+ 
+-	if c.sessionReady {
++	if c.sessionReady.Load() {
+ 		t.Error("expected sessionReady false")
+ 	}
+ 
+diff --git a/internal/client/client.go b/internal/client/client.go
+index 0ef11475c7996e721bc004cc58d46f4a9bd5ff95..ee5883e713242c5784376a11f44b90b0c408eb56 100644
+--- a/internal/client/client.go
++++ b/internal/client/client.go
+@@ -76,7 +76,7 @@ type Client struct {
+ 	sessionID             uint8
+ 	sessionCookie         uint8
+ 	responseMode          uint8
+-	sessionReady          bool
++	sessionReady          atomic.Bool
+ 	initStateMu           sync.Mutex
+ 	sessionInitReady      bool
+ 	sessionInitBase64     bool
+@@ -404,7 +404,7 @@ func (c *Client) Run(ctx context.Context) error {
+ 				c.ShortPrintBanner()
+ 			}
+ 
+-			if !c.sessionReady {
++			if !c.sessionReady.Load() {
+ 				retries := c.cfg.MTUTestRetries
+ 				if retries < 1 {
+ 					retries = 3
+diff --git a/internal/client/client_utils.go b/internal/client/client_utils.go
+index 1f848e3a21c7920b65fdccc59f6f769ed005543a..6ddc4f4bed41b4936ba0d51ef7bc33c743e421a1 100644
+--- a/internal/client/client_utils.go
++++ b/internal/client/client_utils.go
+@@ -165,7 +165,7 @@ func (c *Client) SessionReady() bool {
+ 	if c == nil {
+ 		return false
+ 	}
+-	return c.sessionReady
++	return c.sessionReady.Load()
+ }
+ 
+ func (c *Client) SessionID() uint8 {
+diff --git a/internal/client/session.go b/internal/client/session.go
+index 292f6c341d2fb4cb607105652f646ceebf0c710b..f1a3f8ed16c5b6875a3b570aa60d1ba253b4d822 100644
+--- a/internal/client/session.go
++++ b/internal/client/session.go
+@@ -162,7 +162,7 @@ func (c *Client) applySessionInitPacket(packet VpnProto.Packet, initPayload []by
+ 		c.initStateMu.Lock()
+ 		defer c.initStateMu.Unlock()
+ 
+-		if c.sessionReady {
++		if c.sessionReady.Load() {
+ 			return nil
+ 		}
+ 
+@@ -173,11 +173,11 @@ func (c *Client) applySessionInitPacket(packet VpnProto.Packet, initPayload []by
+ 		if sessionAccept.HasClientPolicySync {
+ 			c.applySessionClientPolicy(sessionAccept.ClientPolicy)
+ 		}
+-		c.sessionReady = true
+ 		c.applySessionCompressionPolicy()
+ 		c.clearSessionInitBusyUntil()
+ 		c.resetSessionInitStateLocked()
+ 		c.clearSessionResetPending()
++		c.sessionReady.Store(true)
+ 		return nil
+ 	default:
+ 		return ErrSessionInitFailed
+diff --git a/internal/client/session_init_test.go b/internal/client/session_init_test.go
+index b6008f971430181c465bbf29734c0d05aa46300e..61c25a4afcec19bfb7649e2dffa194b86669536d 100644
+--- a/internal/client/session_init_test.go
++++ b/internal/client/session_init_test.go
+@@ -96,7 +96,7 @@ func TestApplySessionInitPacketAppliesServerClientPolicy(t *testing.T) {
+ 		t.Fatalf("applySessionInitPacket returned error: %v", err)
+ 	}
+ 
+-	if !c.sessionReady {
++	if !c.sessionReady.Load() {
+ 		t.Fatal("expected session to become ready")
+ 	}
+ 	if c.sessionID != 7 || c.sessionCookie != 9 {
+@@ -185,7 +185,7 @@ func TestApplySessionInitPacketAcceptsLegacySessionAcceptPayload(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatalf("legacy session accept should still work, got error: %v", err)
+ 	}
+-	if !c.sessionReady {
++	if !c.sessionReady.Load() {
+ 		t.Fatal("expected legacy session accept to mark session ready")
+ 	}
+ }

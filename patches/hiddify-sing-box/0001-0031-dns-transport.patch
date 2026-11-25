@@ -405,30 +405,190 @@ index 173e4db1dff387cd3a0009482c30c653c76125b5..d22bdcacb8b94c18324ca87db3d044e9
  	for _, mode := range []string{C.DNSGroupModeStable, C.DNSGroupModeFastest} {
  		group := hModeGroup(t, mode, a, b)
 diff --git a/dns/transport/h_group_sequential.go b/dns/transport/h_group_sequential.go
-index c4fce524eccff02a8686ebd3ac78c38ab481d9e7..e0efc7438418e6478a7f6fd5b9cf00dc6d8329d7 100644
+index 089562c88c1e0cbe81ed9be8235ae8a2e1134c61..7405ed24c2ccfcdf4e0b93dba222e666eb14a493 100644
 --- a/dns/transport/h_group_sequential.go
 +++ b/dns/transport/h_group_sequential.go
-@@ -93,9 +93,9 @@ func (s *groupSequential) budget(ctx context.Context, left int) time.Duration {
+@@ -2,6 +2,7 @@ package transport
+ 
+ import (
+ 	"context"
++	"sync"
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+@@ -19,46 +20,85 @@ import (
+ // shared among the servers still to ask.
+ const defaultSequentialMemberFloor = 2 * time.Second
+ 
+-// groupSequential keeps what the sequential mode learnt: a score per server (a rating.Score),
+-// which orders the servers, highest first. A server that answers gains a point and is at least 1 after it, so one
+-// answer puts a server that kept failing ahead of every server that did not answer; a server
+-// that failed loses a point, but only when another server answered that query, as a query no
+-// server answers says more about the network than about the servers, and only when its detour
+-// was ready, as a server cannot answer through an outbound that is not. Each server also gets a
+-// bounded share of the query's time, so one that hangs cannot spend the whole of it: before, a
+-// TCP server whose port was black-holed took the full DNS timeout and the query failed without
++// groupSequential keeps what the sequential mode learnt: a server that failed is asked after the
++// others for error_ttl, so a dead first server does not open every query, and each server gets
++// a bounded share of the query's time, so one that hangs cannot spend the whole of it: before,
++// a TCP server whose port was black-holed took the full DNS timeout and the query failed without
+ // the servers behind it ever being asked.
+ type groupSequential struct {
++	errorTTL      time.Duration
++	legacyTTL     bool
++	scores        rating.Table[string]
+ 	memberTimeout time.Duration
+ 
+-	scores rating.Table[string]
++	access      sync.Mutex
++	failedUntil map[string]time.Time
+ }
+ 
+ func newGroupSequential(options option.GroupDNSServerOptions) *groupSequential {
+-	return &groupSequential{
++	sequential := &groupSequential{
++		errorTTL:      time.Duration(options.ErrorTTL),
++		legacyTTL:     options.ErrorTTL > 0,
+ 		memberTimeout: time.Duration(options.MemberTimeout),
++		failedUntil:   make(map[string]time.Time),
+ 	}
++	if sequential.errorTTL <= 0 {
++		sequential.errorTTL = defaultGroupErrorTTL
++	}
++	return sequential
+ }
+ 
+ func (s *groupSequential) reset() {
+ 	s.scores.Reset()
++	s.access.Lock()
++	defer s.access.Unlock()
++	clear(s.failedUntil)
+ }
+ 
+-// order is the servers to ask, in order: the highest score first, servers with the same score as
+-// listed, so every server is still asked when the ones before it fail. The order is not drawn at
+-// random (rating.Order): each server asked in vain delays the answer.
++// order is the servers to ask, in order: the ones that did not fail recently first, as listed,
++// then the ones that did, as listed, so every server is still asked when the healthy ones fail.
+ func (s *groupSequential) order(tags []string) []string {
+-	return s.scores.Sort(tags)
++	if !s.legacyTTL {
++		return s.scores.Sort(tags)
++	}
++	s.access.Lock()
++	defer s.access.Unlock()
++	now := time.Now()
++	ordered := make([]string, 0, len(tags))
++	var failed []string
++	for _, tag := range tags {
++		if now.Before(s.failedUntil[tag]) {
++			failed = append(failed, tag)
++		} else {
++			ordered = append(ordered, tag)
++		}
++	}
++	return append(ordered, failed...)
+ }
+ 
+-// record scores a query: answered is the server whose answer was used, "" when none answered;
+-// failed are the servers that failed before it. Servers that answered without an address do not
+-// move.
+-func (s *groupSequential) record(answered string, failed []string) {
+-	if answered == "" {
++func (s *groupSequential) record(tag string, outcome groupOutcome) {
++	if !s.legacyTTL {
+ 		return
+ 	}
+-	s.scores.Settle(answered, failed)
++	s.access.Lock()
++	defer s.access.Unlock()
++	switch outcome {
++	case groupAccepted:
++		delete(s.failedUntil, tag)
++	case groupFailed:
++		s.failedUntil[tag] = time.Now().Add(s.errorTTL)
++	}
++}
++
++// settle applies the current upstream rating only when some server answered.
++func (s *groupSequential) settle(answered string, failed []string) {
++	if !s.legacyTTL && answered != "" {
++		s.scores.Settle(answered, failed)
++	}
++}
++
++func (s *groupSequential) score(tag string) int {
++	return int(s.scores.Score(tag))
+ }
+ 
+ // detourReady reports whether the outbounds and endpoints a server goes through are ready, and
+@@ -100,13 +140,20 @@ func outboundReady(outboundManager adapter.OutboundManager, tag string, network
+ 	if !loaded {
+ 		return true
+ 	}
+-	status, _ := adapter.PathStatus(adapter.GroupPath(outbound, network))
+-	return status == adapter.StatusReady
+-}
+-
+-// score is a server's current score, for tests and the log. //H
+-func (s *groupSequential) score(tag string) int {
+-	return int(s.scores.Score(tag))
++	for depth := 0; depth <= 16; depth++ {
++		if adapter.OutboundStatus(outbound) != adapter.StatusReady {
++			return false
++		}
++		group, ok := outbound.(adapter.OutboundGroup)
++		if !ok {
++			return true
++		}
++		outbound = group.Selected(network)
++		if outbound == nil {
++			return true
++		}
++	}
++	return false // a cycle or excessively deep group cannot be considered ready
+ }
+ 
+ // budget is how long the next server is waited for, with left servers still to ask: member_timeout
+@@ -125,9 +172,13 @@ func (s *groupSequential) budget(ctx context.Context, left int) time.Duration {
  
  func (t *GroupTransport) exchangeSequential(ctx context.Context, transportManager adapter.DNSTransportManager, message *mDNS.Msg, callback func(response *mDNS.Msg, err error)) {
  	collector := groupCollector{transport: t}
--	order := t.sequential.order(t.serverTags)
-+	order := t.sequentialState.order(t.serverTags)
++	if ctx.Err() != nil {
++		t.finishCanceled(ctx, &collector, callback)
++		return
++	}
+ 	// a server whose detour is not ready is not asked: it would only fail, or hang for its share
+ 	var order []string
+-	for _, tag := range t.sequential.order(t.serverTags) {
++	for _, tag := range t.sequentialState.order(t.serverTags) {
+ 		if t.detourReady(transportManager, tag) {
+ 			order = append(order, tag)
+ 		}
+@@ -138,7 +189,7 @@ func (t *GroupTransport) exchangeSequential(ctx context.Context, transportManage
+ 	}
+ 	var failed []string
  	for i, tag := range order {
 -		memberContext, cancel := context.WithTimeout(ctx, t.sequential.budget(ctx, len(order)-i))
 +		memberContext, cancel := context.WithTimeout(ctx, t.sequentialState.budget(ctx, len(order)-i))
  		result := t.exchangeOne(memberContext, transportManager, tag, message)
  		cancel()
  		if result.err != nil && ctx.Err() != nil {
-@@ -106,7 +106,7 @@ func (t *GroupTransport) exchangeSequential(ctx context.Context, transportManage
- 			result.err = E.Cause(result.err, "waiting for ", tag)
- 		}
+@@ -151,11 +202,13 @@ func (t *GroupTransport) exchangeSequential(ctx context.Context, transportManage
  		response, outcome := collector.classify(ctx, result, false)
--		t.sequential.record(tag, outcome)
-+		t.sequentialState.record(tag, outcome)
- 		if outcome == groupAccepted {
+ 		switch outcome {
+ 		case groupAccepted:
+-			t.sequential.record(tag, failed)
++			t.sequentialState.record(tag, groupAccepted)
++			t.sequentialState.settle(tag, failed)
  			callback(response, nil)
  			return
+ 		case groupFailed:
+ 			if t.detourReady(transportManager, tag) { // it may have gone down during the query
++				t.sequentialState.record(tag, groupFailed)
+ 				failed = append(failed, tag)
+ 			}
+ 		}
 diff --git a/dns/transport/h_group_sequential_compat_test.go b/dns/transport/h_group_sequential_compat_test.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..000f557b69fad79ea85823461cfd1d9f81267659
@@ -488,7 +648,7 @@ index 0000000000000000000000000000000000000000..000f557b69fad79ea85823461cfd1d9f
 +	}
 +}
 diff --git a/dns/transport/h_group_test.go b/dns/transport/h_group_test.go
-index ca7d588a2655c4e32e367f2332e44289c10d3125..1a8fe434d1b595a7ec35c40ec093115ad0003e2c 100644
+index ef300efa9fef48a66115455d38b7bbf79d665ad2..d77347b80bb029eddd95218e78eacee82b6c6d8a 100644
 --- a/dns/transport/h_group_test.go
 +++ b/dns/transport/h_group_test.go
 @@ -3,7 +3,6 @@ package transport
@@ -499,7 +659,7 @@ index ca7d588a2655c4e32e367f2332e44289c10d3125..1a8fe434d1b595a7ec35c40ec093115a
  	"net"
  	"net/netip"
  	"sync/atomic"
-@@ -140,13 +139,13 @@ func hAnswerIPs(response *mDNS.Msg) []string {
+@@ -193,13 +192,13 @@ func hAnswerIPs(response *mDNS.Msg) []string {
  	return result
  }
  
@@ -517,7 +677,7 @@ index ca7d588a2655c4e32e367f2332e44289c10d3125..1a8fe434d1b595a7ec35c40ec093115a
  
  	_, err := NewGroup(hGroupContext(member), log.NewNOPFactory().Logger(), "group", option.GroupDNSServerOptions{Servers: []string{"a"}, Mode: "random"})
  	require.ErrorContains(t, err, "unknown group mode: random")
-@@ -177,7 +176,7 @@ func TestH_GroupMultiAlias(t *testing.T) {
+@@ -230,7 +229,7 @@ func TestH_GroupMultiAlias(t *testing.T) {
  		group := transport.(*GroupTransport)
  		require.Equal(t, C.DNSTypeMulti, group.Type())
  		require.Equal(t, "legacy", group.Tag())
@@ -526,7 +686,7 @@ index ca7d588a2655c4e32e367f2332e44289c10d3125..1a8fe434d1b595a7ec35c40ec093115a
  		require.Equal(t, []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}, group.ignoreRanges)
  	}
  	_, err := NewMulti(hGroupContext(member), log.NewNOPFactory().Logger(), "legacy", option.MultiDNSServerOptions{})
-@@ -191,12 +190,12 @@ func TestH_GroupStartValidation(t *testing.T) {
+@@ -244,12 +243,12 @@ func TestH_GroupStartValidation(t *testing.T) {
  	fakeIP := &hGroupMember{tag: "fake", typ: C.DNSTypeFakeIP}
  	members := []*hGroupMember{plain, nestedGroup, nestedMulti, fakeIP}
  
@@ -545,7 +705,7 @@ index ca7d588a2655c4e32e367f2332e44289c10d3125..1a8fe434d1b595a7ec35c40ec093115a
  }
  
  func TestH_GroupSequentialStopsAtFirstAnswer(t *testing.T) {
-@@ -211,7 +210,7 @@ func TestH_GroupSequentialStopsAtFirstAnswer(t *testing.T) {
+@@ -264,7 +263,7 @@ func TestH_GroupSequentialStopsAtFirstAnswer(t *testing.T) {
  }
  
  func TestH_GroupSequentialFallsThroughErrors(t *testing.T) {
@@ -554,7 +714,7 @@ index ca7d588a2655c4e32e367f2332e44289c10d3125..1a8fe434d1b595a7ec35c40ec093115a
  	second := hMember("second", hReply("2.2.2.2"))
  	group := hNewGroup(t, option.GroupDNSServerOptions{Mode: C.DNSGroupModeSequential}, first, second)
  	response, err := hExchange(t, group)
-@@ -222,7 +221,7 @@ func TestH_GroupSequentialFallsThroughErrors(t *testing.T) {
+@@ -275,7 +274,7 @@ func TestH_GroupSequentialFallsThroughErrors(t *testing.T) {
  func TestH_GroupSequentialReturnsLastError(t *testing.T) {
  	lastErr := errors.New("last failed")
  	group := hNewGroup(t, option.GroupDNSServerOptions{Mode: C.DNSGroupModeSequential},
@@ -563,7 +723,7 @@ index ca7d588a2655c4e32e367f2332e44289c10d3125..1a8fe434d1b595a7ec35c40ec093115a
  	_, err := hExchange(t, group)
  	require.ErrorIs(t, err, lastErr)
  }
-@@ -239,7 +238,7 @@ func TestH_GroupSequentialSkipsIgnoredRanges(t *testing.T) {
+@@ -292,7 +291,7 @@ func TestH_GroupSequentialSkipsIgnoredRanges(t *testing.T) {
  
  func TestH_GroupSequentialEmptyResponseIsFallback(t *testing.T) {
  	empty := hMember("empty", hReply())
@@ -572,7 +732,7 @@ index ca7d588a2655c4e32e367f2332e44289c10d3125..1a8fe434d1b595a7ec35c40ec093115a
  	group := hNewGroup(t, option.GroupDNSServerOptions{Mode: C.DNSGroupModeSequential}, empty, failed)
  	response, err := hExchange(t, group)
  	require.NoError(t, err)
-@@ -273,11 +272,13 @@ func TestH_GroupSequentialHonorsCancellation(t *testing.T) {
+@@ -326,11 +325,13 @@ func TestH_GroupSequentialHonorsCancellation(t *testing.T) {
  	silent := hMember("silent", hHang)
  	next := hMember("next", hReply("5.5.5.5"))
  	group := hNewGroup(t, option.GroupDNSServerOptions{Mode: C.DNSGroupModeSequential}, silent, next)
@@ -589,7 +749,7 @@ index ca7d588a2655c4e32e367f2332e44289c10d3125..1a8fe434d1b595a7ec35c40ec093115a
  }
  
  func TestH_GroupNilResponseIsError(t *testing.T) {
-@@ -325,7 +326,7 @@ func TestH_GroupParallelEmptyResponseLosesToAnswer(t *testing.T) {
+@@ -378,7 +379,7 @@ func TestH_GroupParallelEmptyResponseLosesToAnswer(t *testing.T) {
  }
  
  func TestH_GroupParallelAllEmptyReturnsFallback(t *testing.T) {
@@ -598,7 +758,7 @@ index ca7d588a2655c4e32e367f2332e44289c10d3125..1a8fe434d1b595a7ec35c40ec093115a
  	response, err := hExchange(t, group)
  	require.NoError(t, err)
  	require.NotNil(t, response)
-@@ -344,9 +345,9 @@ func TestH_GroupParallelFallbackOnDeadline(t *testing.T) {
+@@ -397,9 +398,9 @@ func TestH_GroupParallelFallbackOnDeadline(t *testing.T) {
  func TestH_GroupParallelAllErrorsReturnsFirst(t *testing.T) {
  	lateErr := errors.New("late failure")
  	group := hNewGroup(t, option.GroupDNSServerOptions{},
@@ -610,67 +770,98 @@ index ca7d588a2655c4e32e367f2332e44289c10d3125..1a8fe434d1b595a7ec35c40ec093115a
  }
  
  func TestH_GroupParallelAllIgnored(t *testing.T) {
-@@ -391,60 +392,3 @@ func TestH_GroupIsIgnored(t *testing.T) {
- 	require.False(t, group.isIgnored(net.ParseIP("2001:db9::1")))
- 	require.True(t, group.isIgnored(nil), "invalid address is ignored")
- }
--
--// A server that failed is asked after the others for error_ttl, so a dead first server does not
--// open every query; once it answers again it is back in its place.
--func TestH_GroupSequentialAsksRecentFailuresLast(t *testing.T) {
+@@ -448,7 +449,7 @@ func TestH_GroupIsIgnored(t *testing.T) {
+ // A server that failed loses a point when another server answers, so the one that answers is
+ // asked first from then on; a server keeps its listed place while the scores are equal.
+ func TestH_GroupSequentialScoresOrderTheServers(t *testing.T) {
 -	first := hMember("first", hFail(hErrMember))
--	second := hMember("second", hReply("2.2.2.2"))
--	group := hNewGroup(t, option.GroupDNSServerOptions{Mode: C.DNSGroupModeSequential, ErrorTTL: badoption.Duration(time.Minute)}, first, second)
--	for i := 0; i < 3; i++ {
--		response, err := hExchange(t, group)
--		require.NoError(t, err)
--		require.Equal(t, []string{"2.2.2.2"}, hAnswerIPs(response))
--	}
--	require.EqualValues(t, 1, first.calls.Load(), "the failed server is not asked first again within error_ttl")
--	require.EqualValues(t, 3, second.calls.Load())
--
--	// every server failed recently: all of them are still asked, in their order
--	second.exchange = hFail(hErrMember)
--	_, err := hExchange(t, group)
--	require.Error(t, err)
--	require.EqualValues(t, 2, first.calls.Load())
--
--	// the network changed: the record is forgotten and the first server is first again
--	second.exchange = hReply("2.2.2.2")
--	group.Reset()
--	_, err = hExchange(t, group)
--	require.NoError(t, err)
--	require.EqualValues(t, 3, first.calls.Load())
--}
--
--// A server that hangs gets a share of the query's time, not all of it: the servers behind it are
--// still asked and one of them answers within the query's deadline.
--func TestH_GroupSequentialBoundsAHangingServer(t *testing.T) {
--	silent := hMember("silent", hHang)
--	next := hMember("next", hReply("5.5.5.5"))
--	group := hNewGroup(t, option.GroupDNSServerOptions{Mode: C.DNSGroupModeSequential, MemberTimeout: badoption.Duration(100 * time.Millisecond)}, silent, next)
--	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
--	defer cancel()
--	start := time.Now()
--	response, err := group.Exchange(ctx, new(mDNS.Msg).SetQuestion("example.com.", mDNS.TypeA))
--	require.NoError(t, err)
--	require.Equal(t, []string{"5.5.5.5"}, hAnswerIPs(response))
--	require.Less(t, time.Since(start), 600*time.Millisecond, "the hanging server was given up on after member_timeout")
--	require.EqualValues(t, 1, next.calls.Load())
--}
--
--// Without member_timeout the time left is shared, with a floor: a short deadline gives the first
--// server all of it, as before.
--func TestH_GroupSequentialSharesTheDeadline(t *testing.T) {
--	sequential := newGroupSequential(option.GroupDNSServerOptions{Mode: C.DNSGroupModeSequential})
--	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Second)
--	defer cancel()
--	require.InDelta(t, 3*time.Second, sequential.budget(ctx, 3), float64(100*time.Millisecond))
--	require.InDelta(t, defaultSequentialMemberFloor, sequential.budget(ctx, 9), float64(100*time.Millisecond))
--	short, cancelShort := context.WithTimeout(context.Background(), 50*time.Millisecond)
--	defer cancelShort()
--	require.LessOrEqual(t, sequential.budget(short, 2), 50*time.Millisecond)
--}
++	first := hMember("first", hFail(errHMember))
+ 	second := hMember("second", hReply("2.2.2.2"))
+ 	group := hNewGroup(t, option.GroupDNSServerOptions{Mode: C.DNSGroupModeSequential}, first, second)
+ 	for i := 0; i < 3; i++ {
+@@ -458,8 +459,8 @@ func TestH_GroupSequentialScoresOrderTheServers(t *testing.T) {
+ 	}
+ 	require.EqualValues(t, 1, first.calls.Load(), "the failed server is asked after the one that answers")
+ 	require.EqualValues(t, 3, second.calls.Load())
+-	require.Equal(t, -1, group.sequential.score("first"))
+-	require.Equal(t, 3, group.sequential.score("second"))
++	require.Equal(t, -1, group.sequentialState.score("first"))
++	require.Equal(t, 3, group.sequentialState.score("second"))
+ 
+ 	// the network changed: the scores are forgotten and the first server is first again
+ 	group.Reset()
+@@ -472,15 +473,15 @@ func TestH_GroupSequentialScoresOrderTheServers(t *testing.T) {
+ 
+ // No server loses a point for a query no server answers: that says more about the network.
+ func TestH_GroupSequentialNoAnswerScoresNothing(t *testing.T) {
+-	first := hMember("first", hFail(hErrMember))
+-	second := hMember("second", hFail(hErrMember))
++	first := hMember("first", hFail(errHMember))
++	second := hMember("second", hFail(errHMember))
+ 	group := hNewGroup(t, option.GroupDNSServerOptions{Mode: C.DNSGroupModeSequential}, first, second)
+ 	for i := 0; i < 3; i++ {
+ 		_, err := hExchange(t, group)
+ 		require.Error(t, err)
+ 	}
+-	require.Equal(t, 0, group.sequential.score("first"))
+-	require.Equal(t, 0, group.sequential.score("second"))
++	require.Equal(t, 0, group.sequentialState.score("first"))
++	require.Equal(t, 0, group.sequentialState.score("second"))
+ 	require.EqualValues(t, 3, first.calls.Load(), "the order stays as listed")
+ }
+ 
+@@ -489,17 +490,17 @@ func TestH_GroupSequentialNoAnswerScoresNothing(t *testing.T) {
+ func TestH_GroupSequentialScoreBounds(t *testing.T) {
+ 	sequential := newGroupSequential(option.GroupDNSServerOptions{Mode: C.DNSGroupModeSequential})
+ 	for i := 0; i < 15; i++ {
+-		sequential.record("good", []string{"bad"})
++		sequential.settle("good", []string{"bad"})
+ 	}
+ 	require.Equal(t, 10, sequential.score("good"))
+ 	require.Equal(t, -10, sequential.score("bad"))
+ 
+-	sequential.record("bad", nil)
++	sequential.settle("bad", nil)
+ 	require.Equal(t, 1, sequential.score("bad"), "the first answer after failing gives at least 1")
+-	sequential.record("bad", nil)
++	sequential.settle("bad", nil)
+ 	require.Equal(t, 2, sequential.score("bad"))
+ 
+-	sequential.record("", []string{"good"})
++	sequential.settle("", []string{"good"})
+ 	require.Equal(t, 10, sequential.score("good"), "no answer: no point lost")
+ 
+ 	require.Equal(t, []string{"good", "bad", "new"}, sequential.order([]string{"new", "bad", "good"}))
+@@ -521,15 +522,15 @@ func TestH_GroupSequentialDetourNotReadyIsNoFailure(t *testing.T) {
+ 	require.NoError(t, err)
+ 	require.Equal(t, []string{"4.4.4.4"}, hAnswerIPs(response))
+ 	require.EqualValues(t, 0, viaHop.calls.Load(), "a server behind a detour that is not ready is not asked")
+-	require.Equal(t, 0, group.sequential.score("via-hop"))
+-	require.Equal(t, 1, group.sequential.score("profile"))
++	require.Equal(t, 0, group.sequentialState.score("via-hop"))
++	require.Equal(t, 1, group.sequentialState.score("profile"))
+ 
+ 	hop.status = adapter.StatusReady
+ 	group.Reset()
+ 	_, err = hExchange(t, group)
+ 	require.NoError(t, err)
+ 	require.EqualValues(t, 1, viaHop.calls.Load())
+-	require.Equal(t, -1, group.sequential.score("via-hop"), "with the detour ready the failure counts")
++	require.Equal(t, -1, group.sequentialState.score("via-hop"), "with the detour ready the failure counts")
+ 
+ 	// no server has a ready detour: the query fails at once
+ 	hop.status = adapter.StatusConnecting
+@@ -576,8 +577,8 @@ func TestH_GroupSequentialEmptyAnswerKeepsScore(t *testing.T) {
+ 	group := hNewGroup(t, option.GroupDNSServerOptions{Mode: C.DNSGroupModeSequential}, empty, next)
+ 	_, err := hExchange(t, group)
+ 	require.NoError(t, err)
+-	require.Equal(t, 0, group.sequential.score("empty"))
+-	require.Equal(t, 1, group.sequential.score("next"))
++	require.Equal(t, 0, group.sequentialState.score("empty"))
++	require.Equal(t, 1, group.sequentialState.score("next"))
+ }
+ 
+ // A server that hangs gets a share of the query's time, not all of it: the servers behind it are
 diff --git a/dns/transport/h_sdns.go b/dns/transport/h_sdns.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..7bab236c8dba5dcdee3e466b50e11522170f6881
@@ -993,142 +1184,31 @@ index 7f7c30b3046f7bc23a84dd6efd88fcdba034fbef..dcd25ba1fb53265ebfa9d425b145e7dc
  	}
  }
  
-diff --git a/dns/transport/multiplexer.go b/dns/transport/multiplexer.go
-index 1b6e88c867e693558a0c004b13783c6f3334680d..31a876a1474cc4ff6ae6d1b5988bfc262df5d7c7 100644
---- a/dns/transport/multiplexer.go
-+++ b/dns/transport/multiplexer.go
-@@ -56,7 +56,8 @@ type queryMultiplexer struct {
- 
- type multiplexConn struct {
- 	net.Conn
--	readEpoch atomic.Uint64
-+	readEpoch   atomic.Uint64
-+	writeAccess sync.Mutex
- }
- 
- type queryMultiplexerReadError struct {
-@@ -329,7 +330,7 @@ func (m *queryMultiplexer) exchangeAsync(ctx context.Context, message *mDNS.Msg,
- 			callback(nil, err)
- 			return
- 		}
--		writeErr := m.options.write(conn, message, queryId)
-+		writeErr := m.writeShared(conn, message, queryId)
- 		if writeErr == nil {
- 			return
- 		}
-@@ -346,6 +347,17 @@ func (m *queryMultiplexer) exchangeAsync(ctx context.Context, message *mDNS.Msg,
- 	}
- }
- 
-+// writeShared writes one query to a connection that other queries share.
-+// Connections such as Shadowsocks stream ciphers keep cipher state per
-+// connection and are not safe for concurrent writes, and a write may be split
-+// into several writes underneath, so writes to a shared connection are
-+// serialized.
-+func (m *queryMultiplexer) writeShared(conn *multiplexConn, message *mDNS.Msg, queryId uint16) error {
-+	conn.writeAccess.Lock()
-+	defer conn.writeAccess.Unlock()
-+	return m.options.write(conn, message, queryId)
-+}
-+
- func (m *queryMultiplexer) dialConn(ctx context.Context) (*multiplexConn, error) {
- 	conn, err := m.options.dial(ctx)
- 	if err != nil {
 diff --git a/dns/transport/multiplexer_test.go b/dns/transport/multiplexer_test.go
-index 9ab3ab8b5f88a7100553ccb3345d9baccebcd0f2..de752071e258a5b3671f4149f6ea8d2ee68af23d 100644
+index a65119144b509fdfef8b9b946568078341b29030..de752071e258a5b3671f4149f6ea8d2ee68af23d 100644
 --- a/dns/transport/multiplexer_test.go
 +++ b/dns/transport/multiplexer_test.go
-@@ -5,6 +5,7 @@ import (
- 	"errors"
- 	"io"
- 	"net"
-+	"sync"
- 	"sync/atomic"
- 	"testing"
- 	"time"
-@@ -551,3 +552,82 @@ func TestMultiplexerSlowQueryKeepsActiveConn(t *testing.T) {
- 		}
- 	}
- }
-+
-+func TestMultiplexerSerializesWritesOnSharedConn(t *testing.T) {
-+	t.Parallel()
-+	listener, err := net.Listen("tcp", "127.0.0.1:0")
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	defer listener.Close()
-+	go func() {
-+		for {
-+			conn, acceptErr := listener.Accept()
-+			if acceptErr != nil {
-+				return
-+			}
-+			go func() {
-+				defer conn.Close()
-+				for {
-+					request, readErr := ReadMessage(conn)
-+					if readErr != nil {
-+						return
-+					}
-+					response := new(mDNS.Msg)
-+					response.SetReply(request)
-+					if WriteMessage(conn, request.Id, response) != nil {
-+						return
-+					}
-+				}
-+			}()
-+		}
-+	}()
-+
-+	var (
-+		inFlight   atomic.Int32
-+		overlapped atomic.Bool
-+	)
-+	multiplexer := newQueryMultiplexer(queryMultiplexerOptions{
-+		dial: func(ctx context.Context) (net.Conn, error) {
-+			return net.Dial("tcp", listener.Addr().String())
-+		},
-+		write: func(conn net.Conn, message *mDNS.Msg, queryId uint16) error {
-+			// A stream cipher connection such as Shadowsocks CFB corrupts its
-+			// state, and can panic, when two writes run at once.
-+			if inFlight.Add(1) > 1 {
-+				overlapped.Store(true)
-+			}
-+			time.Sleep(time.Millisecond)
-+			defer inFlight.Add(-1)
-+			return WriteMessage(conn, queryId, message)
-+		},
-+		readNext: func(conn net.Conn) (*mDNS.Msg, error) {
-+			return ReadMessage(conn)
-+		},
-+	})
-+	defer multiplexer.Close()
-+
-+	const queries = 32
-+	var wg sync.WaitGroup
-+	errs := make(chan error, queries)
+@@ -610,17 +610,15 @@ func TestMultiplexerSerializesWritesOnSharedConn(t *testing.T) {
+ 	const queries = 32
+ 	var wg sync.WaitGroup
+ 	errs := make(chan error, queries)
+-	for i := 0; i < queries; i++ {
+-		wg.Add(1)
+-		go func() {
+-			defer wg.Done()
 +	for range queries {
 +		wg.Go(func() {
-+			message := new(mDNS.Msg)
-+			message.SetQuestion("example.com.", mDNS.TypeA)
-+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-+			defer cancel()
-+			_, exchangeErr := multiplexer.Exchange(ctx, message)
-+			errs <- exchangeErr
+ 			message := new(mDNS.Msg)
+ 			message.SetQuestion("example.com.", mDNS.TypeA)
+ 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+ 			defer cancel()
+ 			_, exchangeErr := multiplexer.Exchange(ctx, message)
+ 			errs <- exchangeErr
+-		}()
 +		})
-+	}
-+	wg.Wait()
-+	close(errs)
-+	for exchangeErr := range errs {
-+		if exchangeErr != nil {
-+			t.Fatal("query failed: ", exchangeErr)
-+		}
-+	}
-+	if overlapped.Load() {
-+		t.Fatal("concurrent queries wrote to the shared connection at the same time")
-+	}
-+}
+ 	}
+ 	wg.Wait()
+ 	close(errs)
 diff --git a/dns/transport/quic/quic.go b/dns/transport/quic/quic.go
 index bc2acaf0e77a3903c0303720aaffb1b2adb1f605..fd9f2e256c08a3bf12b1e6fce9a155f021275342 100644
 --- a/dns/transport/quic/quic.go

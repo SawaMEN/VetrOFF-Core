@@ -1,0 +1,234 @@
+diff --git a/include/h_bond_registry_test.go b/include/h_bond_registry_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f7a363a7ac972a2d7a65bd0b7e2d639d8f979eff
+--- /dev/null
++++ b/include/h_bond_registry_test.go
+@@ -0,0 +1,16 @@
++package include
++
++import (
++	"testing"
++
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/option"
++
++	"github.com/stretchr/testify/require"
++)
++
++func TestH_BondOutboundRegistered(t *testing.T) {
++	options, loaded := OutboundRegistry().CreateOptions(C.TypeBond)
++	require.True(t, loaded, "bond outbound must be registered with and without with_bond")
++	require.IsType(t, &option.BondOutboundOptions{}, options)
++}
+diff --git a/include/h_call_stub.go b/include/h_call_stub.go
+index 09560008b9189107708c81dc069205f7558a9e21..6ea33982609ea74f2675f1b41c1b03a8fc6b8b14 100644
+--- a/include/h_call_stub.go
++++ b/include/h_call_stub.go
+@@ -7,7 +7,6 @@ import (
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/adapter/inbound"
+-	"github.com/sagernet/sing-box/adapter/outbound"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+@@ -19,9 +18,3 @@ func registerCallInbound(registry *inbound.Registry) {
+ 		return nil, E.New(`Call is not included in this build, rebuild with -tags with_call`)
+ 	})
+ }
+-
+-func registerCallOutbound(registry *outbound.Registry) {
+-	outbound.Register[option.CallOutboundOptions](registry, C.TypeCall, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.CallOutboundOptions) (adapter.Outbound, error) {
+-		return nil, E.New(`Call is not included in this build, rebuild with -tags with_call`)
+-	})
+-}
+diff --git a/include/h_registry_test.go b/include/h_registry_test.go
+index 1e34a08a2ae8ce753e8208eb78bcd2a238eae3d2..81cdc4a3a517580993b88cebc1bc9f2f80a768b3 100644
+--- a/include/h_registry_test.go
++++ b/include/h_registry_test.go
+@@ -113,12 +113,10 @@ func TestH_TunnelEndpointInvalidUUID(t *testing.T) {
+ 
+ func TestH_OutboundRegistryConcurrent(t *testing.T) {
+ 	var wg sync.WaitGroup
+-	for i := 0; i < 8; i++ {
+-		wg.Add(1)
+-		go func() {
+-			defer wg.Done()
++	for range 8 {
++		wg.Go(func() {
+ 			_ = OutboundRegistry()
+-		}()
++		})
+ 	}
+ 	wg.Wait()
+ }
+diff --git a/include/h_sudoku_stub.go b/include/h_sudoku_stub.go
+index 70a1e85c8dc37cff40f44239402a406526ab109f..6346c4324fe0ffa283f71ae70e6b9e61cf8b89af 100644
+--- a/include/h_sudoku_stub.go
++++ b/include/h_sudoku_stub.go
+@@ -7,7 +7,6 @@ import (
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/adapter/inbound"
+-	"github.com/sagernet/sing-box/adapter/outbound"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+@@ -19,9 +18,3 @@ func registerSudokuInbound(registry *inbound.Registry) {
+ 		return nil, E.New(`Sudoku is not included in this build, rebuild with -tags with_sudoku`)
+ 	})
+ }
+-
+-func registerSudokuOutbound(registry *outbound.Registry) {
+-	outbound.Register[option.SudokuOutboundOptions](registry, C.TypeSudoku, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.SudokuOutboundOptions) (adapter.Outbound, error) {
+-		return nil, E.New(`Sudoku is not included in this build, rebuild with -tags with_sudoku`)
+-	})
+-}
+diff --git a/include/h_xdrive.go b/include/h_xdrive.go
+index c9e5da7e866a69ef09542ba01dfd79f41b80399d..8525e397c862488fe7a19fde0d7a6805825515bc 100644
+--- a/include/h_xdrive.go
++++ b/include/h_xdrive.go
+@@ -1,5 +1,3 @@
+-//go:build with_xdrive
+-
+ package include
+ 
+ import _ "github.com/sagernet/sing-box/transport/v2rayxdrive"
+diff --git a/include/registry.go b/include/registry.go
+index c2158fecd9de07edaa4e94c0dc1a16cdf360c985..214420010ee732f0606dbaa7c37a6b50fd7ac884 100644
+--- a/include/registry.go
++++ b/include/registry.go
+@@ -3,7 +3,7 @@ package include
+ import (
+ 	"context"
+ 
+-	"github.com/sagernet/sing-box"
++	box "github.com/sagernet/sing-box"
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/adapter/certificate"
+ 	"github.com/sagernet/sing-box/adapter/endpoint"
+@@ -23,19 +23,23 @@ import (
+ 	"github.com/sagernet/sing-box/protocol/block"
+ 	"github.com/sagernet/sing-box/protocol/bridge"
+ 	"github.com/sagernet/sing-box/protocol/direct"
++	"github.com/sagernet/sing-box/protocol/fptn"
+ 	"github.com/sagernet/sing-box/protocol/group"
+ 	"github.com/sagernet/sing-box/protocol/group/balancer"
+ 	"github.com/sagernet/sing-box/protocol/hiddify/dnstt"
+ 	"github.com/sagernet/sing-box/protocol/hiddify/gooserelay"
+ 	"github.com/sagernet/sing-box/protocol/hiddify/hinvalid"
+ 	"github.com/sagernet/sing-box/protocol/hiddify/masterdns"
+-	"github.com/sagernet/sing-box/protocol/hiddify/soar" //H
++	"github.com/sagernet/sing-box/protocol/hiddify/soar" // H
+ 	"github.com/sagernet/sing-box/protocol/hiddify/xray"
+ 	"github.com/sagernet/sing-box/protocol/http"
+ 	"github.com/sagernet/sing-box/protocol/masque"
+ 	"github.com/sagernet/sing-box/protocol/mieru"
+ 	"github.com/sagernet/sing-box/protocol/mixed"
+ 	"github.com/sagernet/sing-box/protocol/naive"
++	"github.com/sagernet/sing-box/protocol/olcrtc"
++	"github.com/sagernet/sing-box/protocol/openflux"
++	"github.com/sagernet/sing-box/protocol/pingtunnel"
+ 	"github.com/sagernet/sing-box/protocol/psiphon"
+ 	"github.com/sagernet/sing-box/protocol/redirect"
+ 	"github.com/sagernet/sing-box/protocol/shadowsocks"
+@@ -43,17 +47,20 @@ import (
+ 	snellprotocol "github.com/sagernet/sing-box/protocol/snell"
+ 	"github.com/sagernet/sing-box/protocol/socks"
+ 	"github.com/sagernet/sing-box/protocol/ssh"
++	"github.com/sagernet/sing-box/protocol/sudoku"
+ 	"github.com/sagernet/sing-box/protocol/tor"
+ 	"github.com/sagernet/sing-box/protocol/trojan"
+ 	"github.com/sagernet/sing-box/protocol/trusttunnel"
+ 	"github.com/sagernet/sing-box/protocol/tun"
+ 	"github.com/sagernet/sing-box/protocol/tunnel"
++	"github.com/sagernet/sing-box/protocol/vetroff"
+ 	"github.com/sagernet/sing-box/protocol/vless"
+ 	"github.com/sagernet/sing-box/protocol/vmess"
+ 	legacyWireguard "github.com/sagernet/sing-box/protocol/wireguard"
+ 	"github.com/sagernet/sing-box/service/api"
+ 	originca "github.com/sagernet/sing-box/service/origin_ca"
+ 	"github.com/sagernet/sing-box/service/resolved"
++	smartdnspool "github.com/sagernet/sing-box/service/smart_dns_pool"
+ 	"github.com/sagernet/sing-box/service/ssmapi"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ )
+@@ -69,9 +76,9 @@ func InboundRegistry() *inbound.Registry {
+ 	redirect.RegisterRedirect(registry)
+ 	redirect.RegisterTProxy(registry)
+ 	direct.RegisterInbound(registry)
+-	registerSudokuInbound(registry) //H
+-	registerBondInbound(registry)   //H
+-	registerCallInbound(registry)   //H
++	registerSudokuInbound(registry) // H
++	registerBondInbound(registry)   // H
++	registerCallInbound(registry)   // H
+ 
+ 	socks.RegisterInbound(registry)
+ 	http.RegisterInbound(registry)
+@@ -107,6 +114,8 @@ func OutboundRegistry() *outbound.Registry {
+ 
+ 	group.RegisterSelector(registry)
+ 	group.RegisterURLTest(registry)
++	registerBondOutbound(registry) // H
++	registerCallOutbound(registry)
+ 
+ 	socks.RegisterOutbound(registry)
+ 	http.RegisterOutbound(registry)
+@@ -122,20 +131,23 @@ func OutboundRegistry() *outbound.Registry {
+ 	anytls.RegisterOutbound(registry)
+ 	psiphon.RegisterOutbound(registry)
+ 	mieru.RegisterOutbound(registry)
++	sudoku.RegisterOutbound(registry)
++	openflux.RegisterOutbound(registry)
++	olcrtc.RegisterOutbound(registry)
++	vetroff.RegisterOutbound(registry)
++	fptn.RegisterOutbound(registry)
++	pingtunnel.RegisterOutbound(registry)
+ 	hinvalid.RegisterOutbound(registry)
+-	outbound.RegisterLazy(registry) //H
++	outbound.RegisterLazy(registry)
+ 	xray.RegisterOutbound(registry)
+ 	dnstt.RegisterOutbound(registry)
+ 	gooserelay.RegisterOutbound(registry)
+ 	masterdns.RegisterOutbound(registry)
+-	soar.RegisterOutbound(registry) //H
++	soar.RegisterOutbound(registry) // H
+ 	balancer.RegisterLoadBalance(registry)
+-	group.RegisterFallback(registry) //H
+-	registerSudokuOutbound(registry) //H
+-	registerBondOutbound(registry)   //H
+-	registerCallOutbound(registry)   //H
++	group.RegisterFallback(registry)
+ 	registerMASQUEOutbound(registry)
+-	legacyWireguard.RegisterOutbound(registry) //H
++	legacyWireguard.RegisterOutbound(registry) // H
+ 	trusttunnel.RegisterOutbound(registry)
+ 
+ 	registerQUICOutbounds(registry)
+@@ -158,7 +170,7 @@ func EndpointRegistry() *endpoint.Registry {
+ 	registerWarpEndpoint(registry)
+ 	registerAwgEndpoint(registry)
+ 	hinvalid.RegisterEndpoint(registry)
+-	endpoint.Register[option.HLazyOptions](registry, C.TypeHLazy, outbound.NewLazyEndpoint) //H: a lazy endpoint's stand-in
++	endpoint.Register[option.HLazyOptions](registry, C.TypeHLazy, outbound.NewLazyEndpoint)
+ 
+ 	return registry
+ }
+@@ -177,7 +189,7 @@ func DNSTransportRegistry() *dns.TransportRegistry {
+ 	fakeip.RegisterTransport(registry)
+ 	resolved.RegisterTransport(registry)
+ 	transport.RegisterSDNS(registry)
+-	transport.RegisterMulti(registry) //H
++	transport.RegisterMulti(registry) // H
+ 
+ 	registerQUICTransports(registry)
+ 	registerDHCPTransport(registry)
+@@ -190,6 +202,7 @@ func DNSTransportRegistry() *dns.TransportRegistry {
+ 
+ func ServiceRegistry() *service.Registry {
+ 	registry := service.NewRegistry()
++	smartdnspool.RegisterService(registry) // H: legacy service configurations
+ 
+ 	api.RegisterService(registry)
+ 	resolved.RegisterService(registry)

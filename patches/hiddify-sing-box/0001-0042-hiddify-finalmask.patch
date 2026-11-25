@@ -1,0 +1,216 @@
+diff --git a/hiddify/finalmask/dialer.go b/hiddify/finalmask/dialer.go
+index 81af2878a478f333ffc910e8adc8b1a02fb0a882..ec1233fcd16f3659a90b371893c978eea570c2aa 100644
+--- a/hiddify/finalmask/dialer.go
++++ b/hiddify/finalmask/dialer.go
+@@ -77,8 +77,8 @@ func (m *Masks) ListenPacket(ctx context.Context, destination M.Socksaddr, dial
+ 
+ // WrapConnServer applies the tcp masks to an accepted connection, as an Xray server does.
+ func (m *Masks) WrapConnServer(conn net.Conn) (net.Conn, error) {
+-	for i := len(m.tcp) - 1; i >= 0; i-- {
+-		masked, err := m.tcp[i].WrapConnServer(conn)
++	for _, v := range slices.Backward(m.tcp) {
++		masked, err := v.WrapConnServer(conn)
+ 		if err != nil {
+ 			conn.Close()
+ 			return nil, err
+@@ -134,7 +134,7 @@ func dialUDPFunc(dial DialFunc, listen ListenPacketFunc) func(context.Context, x
+ func xrayDestination(network xnet.Network, destination M.Socksaddr) xnet.Destination {
+ 	dest := xnet.Destination{Network: network, Port: xnet.Port(destination.Port)}
+ 	switch {
+-	case destination.IsFqdn():
++	case destination.IsDomain():
+ 		dest.Address = xnet.DomainAddress(destination.Fqdn)
+ 	case destination.IsIP():
+ 		dest.Address = xnet.IPAddress(destination.Addr.Unmap().AsSlice())
+diff --git a/hiddify/finalmask/h_fragment_ranges.go b/hiddify/finalmask/h_fragment_ranges.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5d15380247c0b4a5645a073905e207250d516ae5
+--- /dev/null
++++ b/hiddify/finalmask/h_fragment_ranges.go
+@@ -0,0 +1,27 @@
++package finalmask
++
++import (
++	"bytes"
++	"encoding/json"
++)
++
++// hInt32Ranges keeps the compact panel form compatible with Xray's array form.
++// finalmask uses the standard JSON loader, so this implements its unmarshaler.
++type hInt32Ranges []Int32Range
++
++func (r *hInt32Ranges) UnmarshalJSON(content []byte) error {
++	trimmed := bytes.TrimSpace(content)
++	if bytes.Equal(trimmed, []byte("null")) {
++		*r = nil
++		return nil
++	}
++	if bytes.HasPrefix(trimmed, []byte("[")) {
++		return json.Unmarshal(content, (*[]Int32Range)(r))
++	}
++	var single Int32Range
++	if err := json.Unmarshal(content, &single); err != nil {
++		return err
++	}
++	*r = hInt32Ranges{single}
++	return nil
++}
+diff --git a/hiddify/finalmask/h_xdns_legacy.go b/hiddify/finalmask/h_xdns_legacy.go
+index b0c5884cecc0b9abad79049f79d918beb2ca86f9..b6308a2cbae093800c4a9725c5a728d823991d14 100644
+--- a/hiddify/finalmask/h_xdns_legacy.go
++++ b/hiddify/finalmask/h_xdns_legacy.go
+@@ -6,6 +6,7 @@ import (
+ 	"strings"
+ 
+ 	E "github.com/sagernet/sing/common/exceptions"
++
+ 	"google.golang.org/protobuf/proto"
+ )
+ 
+diff --git a/hiddify/finalmask/xray_conf.go b/hiddify/finalmask/xray_conf.go
+index 2f2a1c47e1fa9ece4082451105ff742133a9ec6e..f5fa47e690a239d09db5b79b80cba980538342c6 100644
+--- a/hiddify/finalmask/xray_conf.go
++++ b/hiddify/finalmask/xray_conf.go
+@@ -223,12 +223,12 @@ func (c *HeaderCustomTCP) Build() (proto.Message, error) {
+ }
+ 
+ type FragmentMask struct {
+-	Packets  string         `json:"packets"`
+-	Length   Int32Range     `json:"length"`
+-	Delay    Int32Range     `json:"delay"`
+-	Lengths  Int32RangeList `json:"lengths"`
+-	Delays   Int32RangeList `json:"delays"`
+-	MaxSplit Int32Range     `json:"maxSplit"`
++	Packets  string       `json:"packets"`
++	Length   Int32Range   `json:"length"`
++	Delay    Int32Range   `json:"delay"`
++	Lengths  hInt32Ranges `json:"lengths"` // H: accept old compact ranges
++	Delays   hInt32Ranges `json:"delays"`  // H: accept old compact ranges
++	MaxSplit Int32Range   `json:"maxSplit"`
+ }
+ 
+ func (c *FragmentMask) Build() (proto.Message, error) {
+@@ -1088,7 +1088,7 @@ type UDPHop struct {
+ 
+ func (c *UDPHop) Build() (proto.Message, error) {
+ 	var local, remote, remoteOnce bool
+-	for _, mode := range strings.Split(c.Mode, ",") {
++	for mode := range strings.SplitSeq(c.Mode, ",") {
+ 		switch strings.ToLower(mode) {
+ 		case "intervallocal":
+ 			local = true
+diff --git a/hiddify/finalmask/xray_range.go b/hiddify/finalmask/xray_range.go
+index 0bf244d81e161423067cccb4e95f096dd6b18e91..482a44f95fc4faa040c40dfa1ba04fdedea238d1 100644
+--- a/hiddify/finalmask/xray_range.go
++++ b/hiddify/finalmask/xray_range.go
+@@ -3,7 +3,6 @@
+ package finalmask
+ 
+ import (
+-	"bytes"
+ 	"encoding/json"
+ 	"fmt"
+ 	"strconv"
+@@ -22,63 +21,33 @@ type Int32Range struct {
+ 	To    int32
+ }
+ 
+-// Int32RangeList accepts Xray-style arrays (["1-2","3"]) and the compact single-value
+-// form used by some panels/clients ("1-104" or 0) for fields like lengths/delays.
+-type Int32RangeList []Int32Range
+-
+-func (v Int32RangeList) MarshalJSON() ([]byte, error) {
+-	return json.Marshal([]Int32Range(v))
+-}
+-
+-func (v *Int32RangeList) UnmarshalJSON(data []byte) error {
+-	data = bytes.TrimSpace(data)
+-	if len(data) == 0 || string(data) == "null" {
+-		*v = nil
+-		return nil
+-	}
+-	if data[0] == '[' {
+-		var list []Int32Range
+-		if err := json.Unmarshal(data, &list); err != nil {
+-			return err
+-		}
+-		*v = list
+-		return nil
+-	}
+-	var one Int32Range
+-	if err := one.UnmarshalJSON(data); err != nil {
+-		return errors.New("Invalid integer range list, expected a string/number or an array of ranges").Base(err)
+-	}
+-	*v = Int32RangeList{one}
+-	return nil
+-}
+-
+ // MarshalJSON implements encoding/json.Marshaler.MarshalJSON
+-func (v *Int32Range) MarshalJSON() ([]byte, error) {
+-	return json.Marshal(v.String())
++func (receiver *Int32Range) MarshalJSON() ([]byte, error) {
++	return json.Marshal(receiver.String())
+ }
+ 
+-func (v Int32Range) String() string {
+-	if v.Left == v.Right {
+-		return strconv.Itoa(int(v.Left))
++func (receiver Int32Range) String() string {
++	if receiver.Left == receiver.Right {
++		return strconv.Itoa(int(receiver.Left))
+ 	} else {
+-		return fmt.Sprintf("%d-%d", v.Left, v.Right)
++		return fmt.Sprintf("%d-%d", receiver.Left, receiver.Right)
+ 	}
+ }
+ 
+ // UnmarshalJSON implements encoding/json.Unmarshaler.UnmarshalJSON
+-func (v *Int32Range) UnmarshalJSON(data []byte) error {
+-	defer v.ensureOrder()
++func (receiver *Int32Range) UnmarshalJSON(data []byte) error {
++	defer receiver.ensureOrder()
+ 	var str string
+ 	var rawint int32
+ 	if err := json.Unmarshal(data, &str); err == nil {
+ 		left, right, err := ParseRangeString(str)
+ 		if err == nil {
+-			v.Left, v.Right = int32(left), int32(right)
++			receiver.Left, receiver.Right = int32(left), int32(right)
+ 			return nil
+ 		}
+ 	} else if err := json.Unmarshal(data, &rawint); err == nil {
+-		v.Left = rawint
+-		v.Right = rawint
++		receiver.Left = rawint
++		receiver.Right = rawint
+ 		return nil
+ 	}
+ 
+@@ -86,10 +55,10 @@ func (v *Int32Range) UnmarshalJSON(data []byte) error {
+ }
+ 
+ // ensureOrder() gives value to .From & .To and make sure .From < .To
+-func (r *Int32Range) ensureOrder() {
+-	r.From, r.To = r.Left, r.Right
+-	if r.From > r.To {
+-		r.From, r.To = r.To, r.From
++func (receiver *Int32Range) ensureOrder() {
++	receiver.From, receiver.To = receiver.Left, receiver.Right
++	if receiver.From > receiver.To {
++		receiver.From, receiver.To = receiver.To, receiver.From
+ 	}
+ }
+ 
+diff --git a/hiddify/finalmask/xray_tls.go b/hiddify/finalmask/xray_tls.go
+index 86328c3c098d71c0d4c39587aeb8fda446bccd35..7070bfe749180c4df93d3cf09c3f04c8d956c474 100644
+--- a/hiddify/finalmask/xray_tls.go
++++ b/hiddify/finalmask/xray_tls.go
+@@ -178,7 +178,7 @@ func (list *PortList) UnmarshalJSON(data []byte) error {
+ 	if err := json.Unmarshal(data, &listStr); err != nil {
+ 		return errors.New("invalid port: ", string(data)).Base(err)
+ 	}
+-	for _, rangeStr := range strings.Split(listStr, ",") {
++	for rangeStr := range strings.SplitSeq(listStr, ",") {
+ 		trimmed := strings.TrimSpace(rangeStr)
+ 		if trimmed == "" {
+ 			continue

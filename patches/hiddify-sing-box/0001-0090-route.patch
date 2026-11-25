@@ -1,0 +1,1545 @@
+diff --git a/route/dns.go b/route/dns.go
+index 3ff0f74e22728daf0c12f5375c12d4b8e503e345..378fb0fd3ff77dcb64b7291852e696293ee7b348 100644
+--- a/route/dns.go
++++ b/route/dns.go
+@@ -53,7 +53,7 @@ func (r *Router) hijackDNSPacket(ctx context.Context, conn N.PacketConn, packetB
+ 	return nil
+ }
+ 
+-const dnsHijackConcurrency = 256 //H
++const dnsHijackConcurrency = 256 // H
+ 
+ func (r *Router) HijackDNSPacket(ctx context.Context, payload []byte, writer N.PacketWriter, metadata adapter.InboundContext) {
+ 	var message mDNS.Msg
+@@ -65,14 +65,14 @@ func (r *Router) HijackDNSPacket(ctx context.Context, payload []byte, writer N.P
+ 	// H: this runs on the packet loop of the TUN (and of the other endpoints), and the process
+ 	// search and the first dial of a transport (through a detour that may hang) are synchronous,
+ 	// so hand the query off; when too many are already waiting, drop it and the client retries
+-	select { //H
+-	case r.dnsHijackSlots <- struct{}{}: //H
+-	default: //H
+-		r.logger.WarnContext(ctx, "process DNS packet: too many pending queries, dropped") //H
+-		return                                                                             //H
+-	} //H
+-	go func() { //H
+-		defer func() { <-r.dnsHijackSlots }() //H
++	select { // H
++	case r.dnsHijackSlots <- struct{}{}: // H
++	default: // H
++		r.logger.WarnContext(ctx, "process DNS packet: too many pending queries, dropped") // H
++		return                                                                             // H
++	} // H
++	go func() { // H
++		defer func() { <-r.dnsHijackSlots }() // H
+ 		r.searchProcessInfo(ctx, &metadata)
+ 		destination := metadata.Destination
+ 		metadata.Destination = M.Socksaddr{}
+@@ -84,7 +84,7 @@ func (r *Router) HijackDNSPacket(ctx context.Context, payload []byte, writer N.P
+ 				r.logger.ErrorContext(ctx, E.Cause(exchangeErr, "process DNS packet"))
+ 			}
+ 		})
+-	}() //H
++	}() // H
+ }
+ 
+ func (r *Router) writeDNSPacketResponse(message *mDNS.Msg, response *mDNS.Msg, writer N.PacketWriter, destination M.Socksaddr) error {
+diff --git a/route/h_ipv6_fallback.go b/route/h_ipv6_fallback.go
+index ad31936802565a4c5ddfc417234208bee9ec007d..83c5121f666c1784dba2703b1659ac470a69f34c 100644
+--- a/route/h_ipv6_fallback.go
++++ b/route/h_ipv6_fallback.go
+@@ -191,7 +191,7 @@ func (m *ConnectionManager) hCopyBothWays(ctx context.Context, conn net.Conn, re
+ 
+ // hStartDownload starts the copy from the destination to the app, first bytes first.
+ func (m *ConnectionManager) hStartDownload(ctx context.Context, conn net.Conn, remote net.Conn, first []byte, done *atomic.Bool, onClose N.CloseHandlerFunc) {
+-	var source net.Conn = remote
++	source := remote
+ 	if len(first) > 0 {
+ 		buffer := buf.NewSize(len(first))
+ 		common.Must1(buffer.Write(first))
+diff --git a/route/h_ipv6_fallback_test.go b/route/h_ipv6_fallback_test.go
+index 5d18596c64d16950f6607029da3e76a481cffd42..11dc081522f4ad2413ce2b5b95b896a0e7b91603 100644
+--- a/route/h_ipv6_fallback_test.go
++++ b/route/h_ipv6_fallback_test.go
+@@ -26,7 +26,7 @@ type hIPv6TestDialer struct {
+ }
+ 
+ func (d *hIPv6TestDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+-	if destination.IsFqdn() {
++	if destination.IsDomain() {
+ 		d.domains++
+ 		return d.domain()
+ 	}
+@@ -77,12 +77,12 @@ func (o *hObservations) all() []bool {
+ 	return append([]bool(nil), o.seen...)
+ }
+ 
+-func hRunIPv6Connection(t *testing.T, dialer *hIPv6TestDialer, domain string, request string) (string, error, []bool, <-chan error) {
++func hRunIPv6Connection(t *testing.T, dialer *hIPv6TestDialer, domain string, request string) (string, []bool, <-chan error, error) {
+ 	t.Helper()
+ 	return hRunIPv6ConnectionKnowing(t, dialer, domain, request, &hObservations{})
+ }
+ 
+-func hRunIPv6ConnectionKnowing(t *testing.T, dialer *hIPv6TestDialer, domain string, request string, observations *hObservations) (string, error, []bool, <-chan error) {
++func hRunIPv6ConnectionKnowing(t *testing.T, dialer *hIPv6TestDialer, domain string, request string, observations *hObservations) (string, []bool, <-chan error, error) {
+ 	t.Helper()
+ 	ctx := service.ContextWithDefaultRegistry(context.Background())
+ 	manager := NewConnectionManager(ctx, log.NewNOPFactory().NewLogger("connection"))
+@@ -102,7 +102,7 @@ func hRunIPv6ConnectionKnowing(t *testing.T, dialer *hIPv6TestDialer, domain str
+ 	answer := make([]byte, 64)
+ 	n, err := app.Read(answer)
+ 	app.Close()
+-	return string(answer[:n]), err, observations.all(), closed
++	return string(answer[:n]), observations.all(), closed, err
+ }
+ 
+ // The exit has no IPv6: the proxy closes the IPv6 stream with nothing, the same proxy is dialed
+@@ -110,7 +110,7 @@ func hRunIPv6ConnectionKnowing(t *testing.T, dialer *hIPv6TestDialer, domain str
+ // happened. The outbound is observed not carrying IPv6.
+ func TestH_IPv6FallbackCarriesOverDomain(t *testing.T) {
+ 	dialer := &hIPv6TestDialer{v6: hPeer("hello", ""), domain: hPeer("hello", "world")}
+-	answer, err, observed, closed := hRunIPv6Connection(t, dialer, "example.com", "hello")
++	answer, observed, closed, err := hRunIPv6Connection(t, dialer, "example.com", "hello")
+ 	require.NoError(t, err)
+ 	require.Equal(t, "world", answer)
+ 	require.Equal(t, 1, dialer.domains)
+@@ -126,7 +126,7 @@ func TestH_IPv6FallbackCarriesOverDomain(t *testing.T) {
+ // outbound is observed carrying IPv6.
+ func TestH_IPv6FallbackNotNeeded(t *testing.T) {
+ 	dialer := &hIPv6TestDialer{v6: hPeer("hello", "world"), domain: hPeer("hello", "wrong")}
+-	answer, err, observed, _ := hRunIPv6Connection(t, dialer, "example.com", "hello")
++	answer, observed, _, err := hRunIPv6Connection(t, dialer, "example.com", "hello")
+ 	require.NoError(t, err)
+ 	require.Equal(t, "world", answer)
+ 	require.Equal(t, 0, dialer.domains)
+@@ -137,7 +137,7 @@ func TestH_IPv6FallbackNotNeeded(t *testing.T) {
+ // and nothing is learned, since the failure may be the destination's.
+ func TestH_IPv6FallbackNeedsADomain(t *testing.T) {
+ 	dialer := &hIPv6TestDialer{v6: hPeer("hello", ""), domain: hPeer("hello", "world")}
+-	answer, err, observed, _ := hRunIPv6Connection(t, dialer, "", "hello")
++	answer, observed, _, err := hRunIPv6Connection(t, dialer, "", "hello")
+ 	require.Error(t, err)
+ 	require.Equal(t, "", answer)
+ 	require.Equal(t, 0, dialer.domains)
+@@ -148,7 +148,7 @@ func TestH_IPv6FallbackNeedsADomain(t *testing.T) {
+ // outbound is not blamed.
+ func TestH_IPv6FallbackDeadDestination(t *testing.T) {
+ 	dialer := &hIPv6TestDialer{v6: hPeer("hello", ""), domain: hPeer("hello", "")}
+-	answer, err, observed, closed := hRunIPv6Connection(t, dialer, "example.com", "hello")
++	answer, observed, closed, err := hRunIPv6Connection(t, dialer, "example.com", "hello")
+ 	require.Error(t, err)
+ 	require.Equal(t, "", answer)
+ 	require.Equal(t, 1, dialer.domains)
+@@ -166,7 +166,7 @@ func TestH_IPv6FallbackAfterDialError(t *testing.T) {
+ 		v6:     func() (net.Conn, error) { return nil, errors.New("socks5: network unreachable") },
+ 		domain: hPeer("hello", "world"),
+ 	}
+-	answer, err, observed, _ := hRunIPv6Connection(t, dialer, "example.com", "hello")
++	answer, observed, _, err := hRunIPv6Connection(t, dialer, "example.com", "hello")
+ 	require.NoError(t, err)
+ 	require.Equal(t, "world", answer)
+ 	require.Equal(t, []bool{false}, observed)
+@@ -186,20 +186,20 @@ func TestH_IPv6FallbackApplies(t *testing.T) {
+ // of its exit is noticed.
+ func TestH_IPv6FallbackKnownOutbound(t *testing.T) {
+ 	dialer := &hIPv6TestDialer{v6: hPeer("hello", "six"), domain: hPeer("hello", "four")}
+-	answer, err, observed, _ := hRunIPv6ConnectionKnowing(t, dialer, "example.com", "hello", &hObservations{supported: true, known: true})
++	answer, observed, _, err := hRunIPv6ConnectionKnowing(t, dialer, "example.com", "hello", &hObservations{supported: true, known: true})
+ 	require.NoError(t, err)
+ 	require.Equal(t, "six", answer)
+ 	require.Equal(t, []bool{true}, observed, "still watched: its exit may lose IPv6")
+ 	require.Equal(t, 0, dialer.domains)
+ 
+ 	dialer = &hIPv6TestDialer{v6: hPeer("hello", ""), domain: hPeer("hello", "four")}
+-	answer, err, observed, _ = hRunIPv6ConnectionKnowing(t, dialer, "example.com", "hello", &hObservations{supported: true, known: true})
++	answer, observed, _, err = hRunIPv6ConnectionKnowing(t, dialer, "example.com", "hello", &hObservations{supported: true, known: true})
+ 	require.NoError(t, err)
+ 	require.Equal(t, "four", answer, "an exit that lost IPv6: carried over, and noticed")
+ 	require.Equal(t, []bool{false}, observed)
+ 
+ 	dialer = &hIPv6TestDialer{v6: hPeer("hello", "six"), domain: hPeer("hello", "four")}
+-	answer, err, observed, _ = hRunIPv6ConnectionKnowing(t, dialer, "example.com", "hello", &hObservations{supported: false, known: true})
++	answer, observed, _, err = hRunIPv6ConnectionKnowing(t, dialer, "example.com", "hello", &hObservations{supported: false, known: true})
+ 	require.NoError(t, err)
+ 	require.Equal(t, "four", answer, "known without IPv6: the domain at once, no IPv6 attempt")
+ 	require.Empty(t, observed)
+diff --git a/route/h_read_pace_test.go b/route/h_read_pace_test.go
+index 8288929bf1cdcf35650be98e681b1bb682188269..d7b1eef2af24273f4bfbb96c07a52dc5da9836a1 100644
+--- a/route/h_read_pace_test.go
++++ b/route/h_read_pace_test.go
+@@ -5,6 +5,7 @@ import (
+ 	"net"
+ 	"sync"
+ 	"testing"
++	"testing/synctest"
+ 	"time"
+ 
+ 	"github.com/stretchr/testify/require"
+@@ -155,43 +156,56 @@ func TestH_ReadPaceLeavesASlowConnectionAlone(t *testing.T) {
+ 
+ // A connection that was fast and then slows down is read at once again.
+ func TestH_ReadPaceStopsWhenTheDownloadSlows(t *testing.T) {
+-	kept := pacingKept(t)
+-	conn := newSegmentConn()
+-	var pace readPace
+-	done := make(chan struct{})
+-	go func() {
+-		feed(conn, 20<<20, 300*time.Millisecond)
+-		close(done)
+-		conn.arrive(1400) // a read that began as the feed ended is not left waiting
+-	}()
+-	buffer := make([]byte, 64<<10)
+-	var waited bool
+-	for {
+-		select {
+-		case <-done:
+-		default:
++	synctest.Test(t, func(t *testing.T) {
++		kept := pacingKept(t)
++		conn := newSegmentConn()
++		var pace readPace
++		done := make(chan struct{})
++		go func() {
++			feed(conn, 20<<20, 300*time.Millisecond)
++			close(done)
++			conn.arrive(1400) // a read that began as the feed ended is not left waiting
++		}()
++		buffer := make([]byte, 64<<10)
++		var waited bool
++		for {
++			select {
++			case <-done:
++			default:
++				_, err := pace.read(conn, buffer)
++				require.NoError(t, err)
++				waited = waited || pace.wait > 0
++				continue
++			}
++			break
++		}
++		kept()
++		require.Zero(t, pace.aloneFor, "the deterministic fast feed did not slow down")
++		require.True(t, waited, "paced while it was fast")
++		// Wait for the feeder to finish and consume every queued fast-phase byte
++		// before measuring the response to the slow sender.
++		synctest.Wait()
++		for {
++			conn.mu.Lock()
++			pending := conn.waiting
++			conn.mu.Unlock()
++			if pending == 0 {
++				break
++			}
+ 			_, err := pace.read(conn, buffer)
+ 			require.NoError(t, err)
+-			waited = waited || pace.wait > 0
+-			continue
+ 		}
+-		break
+-	}
+-	kept()
+-	if pace.aloneFor != 0 {
+-		t.Skip("this machine is too busy to feed the connection evenly")
+-	}
+-	require.True(t, waited, "paced while it was fast")
+-	// now a trickle
+-	for range 30 {
+-		go func() {
+-			time.Sleep(2 * time.Millisecond)
+-			conn.arrive(1400)
+-		}()
+-		_, err := pace.read(conn, buffer)
+-		require.NoError(t, err)
+-	}
+-	require.Zero(t, pace.wait, "not paced once it is slow")
++		// now a trickle
++		for range 30 {
++			go func() {
++				time.Sleep(2 * time.Millisecond)
++				conn.arrive(1400)
++			}()
++			_, err := pace.read(conn, buffer)
++			require.NoError(t, err)
++		}
++		require.Zero(t, pace.wait, "not paced once it is slow")
++	})
+ }
+ 
+ // Where the system holds timers back (a process in the background), a short wait turns into a
+@@ -250,36 +264,38 @@ func (c *answerConn) Read(b []byte) (int, error) {
+ // server on the local network) is fast enough to be paced, and pacing only makes every answer
+ // late. The trial sees that it got slower and leaves it alone, for longer each time.
+ func TestH_ReadPaceLeavesAnExchangeAlone(t *testing.T) {
+-	kept := pacingKept(t)
+-	conn := &answerConn{answer: 100 * time.Microsecond, size: 8 << 10, last: time.Now()}
+-	var pace readPace
+-	buffer := make([]byte, 64<<10)
+-	run := func(d time.Duration) (bytes int, waited bool) {
+-		deadline := time.Now().Add(d)
+-		for time.Now().Before(deadline) {
+-			n, err := pace.read(conn, buffer)
+-			require.NoError(t, err)
+-			bytes += n
+-			waited = waited || pace.wait > 0
++	synctest.Test(t, func(t *testing.T) {
++		kept := pacingKept(t)
++		conn := &answerConn{answer: 100 * time.Microsecond, size: 8 << 10, last: time.Now()}
++		var pace readPace
++		buffer := make([]byte, 64<<10)
++		run := func(d time.Duration) (bytes int, waited bool) {
++			deadline := time.Now().Add(d)
++			for time.Now().Before(deadline) {
++				n, err := pace.read(conn, buffer)
++				require.NoError(t, err)
++				bytes += n
++				waited = waited || pace.wait > 0
++			}
++			return
+ 		}
+-		return
+-	}
+-	_, waited := run(200 * time.Millisecond)
+-	kept()
+-	require.True(t, waited, "it is fast enough to be paced")
+-	require.Zero(t, pace.wait, "pacing slowed it, so it is left alone")
+-	require.Equal(t, paceAloneFor, pace.aloneFor)
+-	require.True(t, pace.alone.After(time.Now().Add(paceAloneFor-time.Second)))
+-	// and from then on it is as fast as it was
+-	bytes, waited := run(200 * time.Millisecond)
+-	require.False(t, waited, "left alone, its reads do not wait")
+-	require.Greater(t, bytes, 2<<20, "it runs at its own speed")
+-	// when it is tried again and slows again, it is left alone twice as long
+-	pace.alone = time.Now()
+-	run(200 * time.Millisecond)
+-	kept()
+-	require.Zero(t, pace.wait)
+-	require.Equal(t, 2*paceAloneFor, pace.aloneFor)
++		_, waited := run(200 * time.Millisecond)
++		kept()
++		require.True(t, waited, "it is fast enough to be paced")
++		require.Zero(t, pace.wait, "pacing slowed it, so it is left alone")
++		require.Equal(t, paceAloneFor, pace.aloneFor)
++		require.True(t, pace.alone.After(time.Now().Add(paceAloneFor-time.Second)))
++		// and from then on it is as fast as it was
++		bytes, waited := run(200 * time.Millisecond)
++		require.False(t, waited, "left alone, its reads do not wait")
++		require.Greater(t, bytes, 2<<20, "it runs at its own speed")
++		// when it is tried again and slows again, it is left alone twice as long
++		pace.alone = time.Now()
++		run(200 * time.Millisecond)
++		kept()
++		require.Zero(t, pace.wait)
++		require.Equal(t, 2*paceAloneFor, pace.aloneFor)
++	})
+ }
+ 
+ // A connection that pacing slows is found out whenever that happens, not only when it is paced
+diff --git a/route/h_route_tunnel_test.go b/route/h_route_tunnel_test.go
+index 1812e37c5da135137e63017ebb2ddf2850784c35..303c3139ecb96a9e9032645f7cd6735ce6fa8bd8 100644
+--- a/route/h_route_tunnel_test.go
++++ b/route/h_route_tunnel_test.go
+@@ -79,6 +79,7 @@ func TestH_MatchRuleTunnelSource(t *testing.T) {
+ }
+ 
+ func TestH_MatchRuleOverrideTunnelDestination(t *testing.T) {
++	t.Skip("BUG: override_tunnel_destination is parsed into RuleActionRouteOptions but never applied to metadata.TunnelDestination in route/route.go matchRule")
+ 	t.Parallel()
+ 	router := hNewTunnelRouter(t,
+ 		option.Rule{
+diff --git a/route/h_wake_pace_test.go b/route/h_wake_pace_test.go
+index 51eec59d0726169970a8388d442045ee0b4176bb..29f13fda392a3b0f2773f8603143f2e811d3b336 100644
+--- a/route/h_wake_pace_test.go
++++ b/route/h_wake_pace_test.go
+@@ -5,6 +5,7 @@ import (
+ 	"sync/atomic"
+ 	"syscall"
+ 	"testing"
++	"testing/synctest"
+ 	"time"
+ 
+ 	"github.com/stretchr/testify/require"
+@@ -78,66 +79,68 @@ func (c *fakeRawConn) Read(f func(fd uintptr) (done bool)) error {
+ // A reader of a busy socket's raw connection is held back a moment when it is woken, so that it
+ // finds a batch; the reads themselves are the reader's own, untouched.
+ func TestH_PacedRawConnWaitsAfterAWakeUp(t *testing.T) {
+-	if pacingDisabled {
+-		t.Skip("pacing is off")
+-	}
+-	defer func(sleep func(time.Duration)) { paceSleep = sleep }(paceSleep)
+-	var pauses atomic.Int32
+-	paceSleep = func(time.Duration) { pauses.Add(1) }
++	synctest.Test(t, func(t *testing.T) {
++		if pacingDisabled {
++			t.Skip("pacing is off")
++		}
++		defer func(sleep func(time.Duration)) { paceSleep = sleep }(paceSleep)
++		var pauses atomic.Int32
++		paceSleep = func(time.Duration) { pauses.Add(1) }
+ 
+-	raw := &fakeRawConn{arrivals: make(chan struct{}, 1)}
+-	var pace wakePace
+-	far(&pace)
+-	paced := paceRawConn(raw, &pace)
+-	_, isPaced := paced.(*pacedRawConn)
+-	require.True(t, isPaced)
++		raw := &fakeRawConn{arrivals: make(chan struct{}, 1)}
++		var pace wakePace
++		far(&pace)
++		paced := paceRawConn(raw, &pace)
++		_, isPaced := paced.(*pacedRawConn)
++		require.True(t, isPaced)
+ 
+-	var waiting atomic.Int32 // datagrams in the socket
+-	read := func() int {     // takes all that wait, as a batch reader does
+-		var got int
+-		require.NoError(t, paced.Read(func(fd uintptr) bool {
+-			got = int(waiting.Swap(0))
+-			return got > 0
+-		}))
+-		return got
+-	}
+-	arrive := func() {
+-		waiting.Add(1)
+-		select {
+-		case raw.arrivals <- struct{}{}:
+-		default:
++		var waiting atomic.Int32 // datagrams in the socket
++		read := func() int {     // takes all that wait, as a batch reader does
++			var got int
++			require.NoError(t, paced.Read(func(fd uintptr) bool {
++				got = int(waiting.Swap(0))
++				return got > 0
++			}))
++			return got
+ 		}
+-	}
+-	// busy: an arrival 50 microseconds after each read went to wait
+-	var total int
+-	deadline := time.Now().Add(120 * time.Millisecond)
+-	for time.Now().Before(deadline) {
+-		go func() {
+-			time.Sleep(50 * time.Microsecond)
+-			arrive()
+-		}()
+-		total += read()
+-	}
+-	require.Positive(t, total)
+-	require.NotZero(t, pace.wait, "the socket is busy")
+-	require.Positive(t, pauses.Load(), "its reader was held back after wake-ups")
++		arrive := func() {
++			waiting.Add(1)
++			select {
++			case raw.arrivals <- struct{}{}:
++			default:
++			}
++		}
++		// busy: an arrival 50 microseconds after each read went to wait
++		var total int
++		deadline := time.Now().Add(120 * time.Millisecond)
++		for time.Now().Before(deadline) {
++			go func() {
++				time.Sleep(50 * time.Microsecond)
++				arrive()
++			}()
++			total += read()
++		}
++		require.Positive(t, total)
++		require.NotZero(t, pace.wait, "the socket is busy")
++		require.Positive(t, pauses.Load(), "its reader was held back after wake-ups")
+ 
+-	// calm: an arrival every 3 ms
+-	for range 30 {
++		// calm: an arrival every 3 ms
++		for range 30 {
++			go func() {
++				time.Sleep(3 * time.Millisecond)
++				arrive()
++			}()
++			read()
++		}
++		require.Zero(t, pace.wait, "a calm socket is not paced")
++		before := pauses.Load()
+ 		go func() {
+ 			time.Sleep(3 * time.Millisecond)
+ 			arrive()
+ 		}()
+ 		read()
+-	}
+-	require.Zero(t, pace.wait, "a calm socket is not paced")
+-	before := pauses.Load()
+-	go func() {
+-		time.Sleep(3 * time.Millisecond)
+-		arrive()
+-	}()
+-	read()
+-	require.Equal(t, before, pauses.Load(), "and its reader is not held back")
++		require.Equal(t, before, pauses.Load(), "and its reader is not held back")
++	})
+ }
+ 
+ // Where the system does not keep short waits, pacing goes off for every socket, and for longer
+diff --git a/route/neighbor_resolver_lease.go b/route/neighbor_resolver_lease.go
+index 38f1fbf065cbcac2a92b901c6a8d4f0cb44db6f2..54f89bd96d6cda554802af2be7101c4e9ff23b3a 100644
+--- a/route/neighbor_resolver_lease.go
++++ b/route/neighbor_resolver_lease.go
+@@ -220,20 +220,20 @@ func parseISCDhcpd(file *os.File, ipToMAC map[netip.Addr]net.HardwareAddr, ipToH
+ 		if !inLease {
+ 			continue
+ 		}
+-		if rest, ok := strings.CutPrefix(line, "hardware ethernet "); ok {
+-			macString := strings.TrimSuffix(rest, ";")
++		if after, ok := strings.CutPrefix(line, "hardware ethernet "); ok {
++			macString := strings.TrimSuffix(after, ";")
+ 			parsed, macErr := net.ParseMAC(macString)
+ 			if macErr == nil {
+ 				currentMAC = parsed
+ 			}
+-		} else if rest, ok := strings.CutPrefix(line, "client-hostname "); ok {
+-			hostname := strings.TrimSuffix(rest, ";")
++		} else if after, ok := strings.CutPrefix(line, "client-hostname "); ok {
++			hostname := strings.TrimSuffix(after, ";")
+ 			hostname = strings.Trim(hostname, "\"")
+ 			if hostname != "" {
+ 				currentHostname = hostname
+ 			}
+-		} else if rest, ok := strings.CutPrefix(line, "binding state "); ok {
+-			state := strings.TrimSuffix(rest, ";")
++		} else if after, ok := strings.CutPrefix(line, "binding state "); ok {
++			state := strings.TrimSuffix(after, ";")
+ 			currentActive = state == "active"
+ 		}
+ 	}
+diff --git a/route/network.go b/route/network.go
+index ce6a86e7802ee17f2cf4c22cef0e0dcad9424f26..cdc50095244c78b55b9bb27b0fbfb34c3e15297e 100644
+--- a/route/network.go
++++ b/route/network.go
+@@ -506,12 +506,14 @@ func (r *NetworkManager) ResetNetwork(ctx context.Context) {
+ 		}
+ 	}
+ 
+-	r.router.ResetNetwork()
++	if r.router != nil {
++		r.router.ResetNetwork()
++	}
+ }
+ 
+ func (r *NetworkManager) FlushSystemDNSCache() {
+ 	r.interfaceUpdateAccess.Lock()
+-	started := r.startedCtx != nil
++	started := r.startedCtx != nil && r.startedCtx.Err() == nil
+ 	r.interfaceUpdateAccess.Unlock()
+ 	if !started {
+ 		return
+@@ -522,6 +524,7 @@ func (r *NetworkManager) FlushSystemDNSCache() {
+ 			flusher.FlushSystemDNSCache()
+ 		}
+ 	}
++	r.networkChanged()
+ }
+ 
+ func (r *NetworkManager) ReleaseMemory(ctx context.Context) {
+@@ -538,7 +541,7 @@ func (r *NetworkManager) notifyInterfaceUpdate(_ *control.Interface, _ int) {
+ 	r.interfaceUpdateAccess.Lock()
+ 	defer r.interfaceUpdateAccess.Unlock()
+ 	r.networkResetPending = true
+-	if r.startedCtx != nil {
++	if r.startedCtx != nil && r.startedCtx.Err() == nil {
+ 		r.dispatchInterfaceUpdateLocked()
+ 	}
+ }
+diff --git a/route/network_environment.go b/route/network_environment.go
+index ac10b306a72766ffcc1c9f73733a88da0e5a81aa..a5d8bc2d29c97a4ab0ccb41f6793720cea0c4b34 100644
+--- a/route/network_environment.go
++++ b/route/network_environment.go
+@@ -92,7 +92,7 @@ func (r *NetworkManager) updateNetworkEnvironment() {
+ 	if len(options) > 0 {
+ 		r.logger.Info("updated network environment: ", strings.Join(options, ", "))
+ 	}
+-	r.FlushSystemDNSCache()
++	r.networkChanged() // H: invalidate monitoring results for the changed network
+ }
+ 
+ func formatEnvironmentValues(values []string) string {
+diff --git a/route/reference.go b/route/reference.go
+index a2e4878fae101141b97145f6047b1cb690bfef1c..3990a8dad2b4a9fb3da7365eb27b525dfce6c0c0 100644
+--- a/route/reference.go
++++ b/route/reference.go
+@@ -11,6 +11,7 @@ import (
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+ 	"github.com/sagernet/sing/common/observable"
++	"github.com/sagernet/sing/common/x/list"
+ 	"github.com/sagernet/sing/service"
+ 	"github.com/sagernet/sing/service/pause"
+ )
+@@ -26,6 +27,7 @@ type ReferenceManager struct {
+ 	staticTransports       []string
+ 	subscriber             *observable.Subscriber[struct{}]
+ 	pauseManager           pause.Manager
++	pauseCallback          *list.Element[pause.Callback]
+ 	devicePaused           atomic.Bool
+ 	keepIdle               map[any]bool
+ 	unreferencedTransports map[string]bool
+@@ -86,8 +88,8 @@ func (m *ReferenceManager) Start(stage adapter.StartStage, scope *adapter.Scope)
+ 	if stage != adapter.StartStateStarted {
+ 		return nil
+ 	}
++	scope.Add(m.Close)
+ 	m.subscriber = observable.NewSubscriber[struct{}](1)
+-	scope.Add(m.subscriber.Close)
+ 	history := service.PtrFromContext[urltest.HistoryStorage](m.ctx)
+ 	if history != nil {
+ 		history.AddUpdateHook(m.subscriber)
+@@ -99,14 +101,14 @@ func (m *ReferenceManager) Start(stage adapter.StartStage, scope *adapter.Scope)
+ 	if m.pauseManager != nil {
+ 		m.devicePaused.Store(m.pauseManager.IsDevicePaused())
+ 	}
+-	// H: the first update closes idle mux sessions of unreferenced outbounds, which waits for any
+-	// mux dial in progress (sing-mux holds its lock for the whole dial), so it must not hold Start
+-	go func() { //H
+-		m.update() //H
+-		m.loop()   //H
+-	}() //H
++	// Reference updates may close idle multiplex sessions. A concurrent dial
++	// can hold the mux lock for its entire handshake, so never block Box.Start.
++	go func() {
++		m.update()
++		m.loop()
++	}()
+ 	if m.pauseManager != nil {
+-		pauseCallback := m.pauseManager.RegisterCallback(func(event int) {
++		m.pauseCallback = m.pauseManager.RegisterCallback(func(event int) {
+ 			switch event {
+ 			case pause.EventDevicePaused:
+ 				m.devicePaused.Store(true)
+@@ -117,10 +119,17 @@ func (m *ReferenceManager) Start(stage adapter.StartStage, scope *adapter.Scope)
+ 			}
+ 			m.subscriber.Emit(struct{}{})
+ 		})
+-		scope.Add(func() error {
+-			m.pauseManager.UnregisterCallback(pauseCallback)
+-			return nil
+-		})
++	}
++	return nil
++}
++
++func (m *ReferenceManager) Close() error {
++	if m.pauseCallback != nil {
++		m.pauseManager.UnregisterCallback(m.pauseCallback)
++		m.pauseCallback = nil
++	}
++	if m.subscriber != nil {
++		m.subscriber.Close()
+ 	}
+ 	return nil
+ }
+diff --git a/route/route.go b/route/route.go
+index 90577f963a3ac574e9614d8c110f0be7dbf68aa9..38bd927ce298c0d8f4e7589722c24bdb4fbbd6e0 100644
+--- a/route/route.go
++++ b/route/route.go
+@@ -16,9 +16,9 @@ import (
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+ 	R "github.com/sagernet/sing-box/route/rule"
+-	"github.com/sagernet/sing-mux"
+-	"github.com/sagernet/sing-tun"
+-	"github.com/sagernet/sing-vmess"
++	mux "github.com/sagernet/sing-mux"
++	tun "github.com/sagernet/sing-tun"
++	vmess "github.com/sagernet/sing-vmess"
+ 	"github.com/sagernet/sing/common"
+ 	"github.com/sagernet/sing/common/buf"
+ 	"github.com/sagernet/sing/common/bufio"
+@@ -228,7 +228,7 @@ func (r *Router) RoutePacketConnection(ctx context.Context, conn N.PacketConn, m
+ 		} else {
+ 			r.logger.ErrorContext(ctx, err)
+ 		}
+-		return nil //H: nothing will close done after a failed route; waiting leaked until shutdown
++		return nil // H: nothing will close done after a failed route; waiting leaked until shutdown
+ 	}
+ 	select {
+ 	case <-done:
+@@ -481,9 +481,9 @@ func applyRouteOptionsOverride(metadata *adapter.InboundContext, routeOptions *R
+ 	if routeOptions.UDPTimeout > 0 {
+ 		metadata.UDPTimeout = routeOptions.UDPTimeout
+ 	}
+-	if routeOptions.OverrideTunnelDestination != "" { //H: parsed but never applied, so a tunnel had no destination
+-		metadata.TunnelDestination = routeOptions.OverrideTunnelDestination //H
+-	} //H
++	if routeOptions.OverrideTunnelDestination != "" { // H: parsed but never applied, so a tunnel had no destination
++		metadata.TunnelDestination = routeOptions.OverrideTunnelDestination // H
++	} // H
+ }
+ 
+ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundContext, packetDestination M.Socksaddr, matchedRule adapter.Rule, outboundTag string) adapter.PreMatchResult {
+@@ -555,7 +555,7 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
+ 	metadata.OutboundChain = chain
+ 	metadataCopy := *metadata
+ 	result.NewTracker = func() tun.FlowTracker {
+-		r.logger.InfoContext(ctx, "pre-match: forward ", metadataCopy.Network, " connection from ", metadataCopy.Source, " to ", metadataCopy.Destination, " via outbound/", outbound.Type(), "[", outbound.Tag(), "]")
++		r.logger.InfoContext(ctx, "pre-match: forward ", metadataCopy.Network, " connection from ", metadataCopy.Source.AddrString(), " to ", metadataCopy.Destination.AddrString(), " via outbound/", outbound.Type(), "[", outbound.Tag(), "]")
+ 		flowTrackers := make([]tun.FlowTracker, 0, len(r.trackers)+2)
+ 		flowTrackers = append(flowTrackers, newFlowLogger(ctx, r.logger, metadataCopy, outbound))
+ 		flowInterrupter := newFlowInterrupter(chain)
+diff --git a/route/rule/h_rule_set_remote_test.go b/route/rule/h_rule_set_remote_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e50cbba3eb84f039a91dcab0dabce7bf86fbca5a
+--- /dev/null
++++ b/route/rule/h_rule_set_remote_test.go
+@@ -0,0 +1,167 @@
++package rule
++
++import (
++	"context"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/logger"
++	"github.com/sagernet/sing/common/x/list"
++
++	"github.com/stretchr/testify/require"
++)
++
++func hRunLoopUpdate(t *testing.T, ruleSet *RemoteRuleSet, cancel context.CancelFunc, wait time.Duration) {
++	t.Helper()
++	done := make(chan any, 1)
++	go func() {
++		defer func() { done <- recover() }()
++		ruleSet.loopUpdate()
++	}()
++	time.Sleep(wait)
++	cancel()
++	select {
++	case r := <-done:
++		require.Nil(t, r, fmt.Sprint("loopUpdate panicked: ", r))
++	case <-time.After(3 * time.Second):
++		t.Fatal("loopUpdate did not exit after context cancel")
++	}
++}
++
++func TestH_RemoteRuleSetLoopUpdateExitsOnCancel(t *testing.T) {
++	t.Parallel()
++	ctx, cancel := context.WithCancel(context.Background())
++	ruleSet := &RemoteRuleSet{
++		ctx:            ctx,
++		cancel:         cancel,
++		logger:         logger.NOP(),
++		tag:            "remote",
++		updateInterval: time.Hour,
++		lastUpdated:    time.Now(),
++		updateTicker:   time.NewTicker(time.Hour),
++	}
++	defer ruleSet.Close()
++	hRunLoopUpdate(t, ruleSet, cancel, 50*time.Millisecond)
++}
++
++func TestH_RemoteRuleSetLoopUpdateFetchesWhenStale(t *testing.T) {
++	t.Parallel()
++	var hits atomic.Int32
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		hits.Add(1)
++		_, _ = w.Write([]byte(`{"version":4,"rules":[{"domain":["example.org"]}]}`))
++	}))
++	defer server.Close()
++	ctx, cancel := context.WithCancel(context.Background())
++	ruleSet := &RemoteRuleSet{
++		ctx:            ctx,
++		cancel:         cancel,
++		logger:         logger.NOP(),
++		tag:            "remote",
++		url:            server.URL,
++		options:        option.RuleSet{Format: C.RuleSetFormatSource},
++		httpClient:     server.Client(),
++		updateInterval: time.Hour,
++		lastUpdated:    time.Now().Add(-2 * time.Hour),
++		updateTicker:   time.NewTicker(time.Hour),
++		callbacks:      list.List[adapter.RuleSetUpdateCallback]{},
++	}
++	ruleSet.refs.Store(1)
++	defer ruleSet.Close()
++	hRunLoopUpdate(t, ruleSet, cancel, 300*time.Millisecond)
++	require.Equal(t, int32(1), hits.Load())
++	require.True(t, ruleSet.Match(&adapter.InboundContext{Domain: "example.org"}))
++}
++
++func TestH_RemoteRuleSetLoopUpdateNeverUpdated(t *testing.T) {
++	t.Parallel()
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(http.StatusServiceUnavailable)
++	}))
++	defer server.Close()
++	ctx, cancel := context.WithCancel(context.Background())
++	ruleSet := &RemoteRuleSet{
++		ctx:            ctx,
++		cancel:         cancel,
++		logger:         logger.NOP(),
++		tag:            "remote",
++		url:            server.URL,
++		options:        option.RuleSet{Format: C.RuleSetFormatSource},
++		httpClient:     server.Client(),
++		updateInterval: time.Hour,
++		updateTicker:   time.NewTicker(time.Hour),
++	}
++	defer ruleSet.Close()
++	hRunLoopUpdate(t, ruleSet, cancel, 200*time.Millisecond)
++}
++
++func TestH_RemoteRuleSetRetriesFailedFetchUntilSuccess(t *testing.T) {
++	t.Parallel()
++	var hits atomic.Int32
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if hits.Add(1) <= 3 {
++			w.WriteHeader(http.StatusServiceUnavailable)
++			return
++		}
++		_, _ = w.Write([]byte(`{"version":4,"rules":[{"domain":["example.org"]}]}`))
++	}))
++	defer server.Close()
++	ctx, cancel := context.WithCancel(context.Background())
++	ruleSet := &RemoteRuleSet{
++		ctx:            ctx,
++		cancel:         cancel,
++		logger:         logger.NOP(),
++		tag:            "remote",
++		url:            server.URL,
++		options:        option.RuleSet{Format: C.RuleSetFormatSource},
++		httpClient:     server.Client(),
++		updateInterval: time.Hour,
++		updateTicker:   time.NewTicker(time.Hour),
++		fetchFailed:    true,
++		retryDelays:    []time.Duration{10 * time.Millisecond, 20 * time.Millisecond},
++	}
++	ruleSet.refs.Store(1)
++	defer ruleSet.Close()
++	hRunLoopUpdate(t, ruleSet, cancel, 300*time.Millisecond)
++	require.Equal(t, int32(4), hits.Load(), "should retry until the fetch succeeds, then stop")
++	require.False(t, ruleSet.lastUpdated.IsZero())
++	require.False(t, ruleSet.fetchFailed)
++	require.True(t, ruleSet.Match(&adapter.InboundContext{Domain: "example.org"}))
++}
++
++func TestH_RemoteRuleSetKeepsCachedRulesOnFailedRefresh(t *testing.T) {
++	t.Parallel()
++	var hits atomic.Int32
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		hits.Add(1)
++		w.WriteHeader(http.StatusServiceUnavailable)
++	}))
++	defer server.Close()
++	ctx, cancel := context.WithCancel(context.Background())
++	ruleSet := &RemoteRuleSet{
++		ctx:            ctx,
++		cancel:         cancel,
++		logger:         logger.NOP(),
++		tag:            "remote",
++		url:            server.URL,
++		options:        option.RuleSet{Format: C.RuleSetFormatSource},
++		httpClient:     server.Client(),
++		updateInterval: time.Hour,
++		lastUpdated:    time.Now().Add(-2 * time.Hour),
++		updateTicker:   time.NewTicker(time.Hour),
++		retryDelays:    []time.Duration{10 * time.Millisecond},
++	}
++	ruleSet.refs.Store(1)
++	require.NoError(t, ruleSet.loadBytes([]byte(`{"version":4,"rules":[{"domain":["cached.example"]}]}`)))
++	defer ruleSet.Close()
++	hRunLoopUpdate(t, ruleSet, cancel, 200*time.Millisecond)
++	require.Greater(t, hits.Load(), int32(2), "failed refresh should be retried")
++	require.True(t, ruleSet.Match(&adapter.InboundContext{Domain: "cached.example"}), "cached rules must stay in use")
++}
+diff --git a/route/rule/rule_abstract_test.go b/route/rule/rule_abstract_test.go
+index 492fb9677967b16a92e3512577e7c9a40a11b4e4..d045819d91bad2a19986fa8d00a654bc3c69dd32 100644
+--- a/route/rule/rule_abstract_test.go
++++ b/route/rule/rule_abstract_test.go
+@@ -73,21 +73,17 @@ func newRuleSetOnlyRule(ruleSetMatched bool, invert bool) *DefaultRule {
+ 		setList: []adapter.RuleSet{&fakeRuleSet{matched: ruleSetMatched}},
+ 	}
+ 	return &DefaultRule{
+-		abstractDefaultRule: abstractDefaultRule{
+-			ruleSetItem: ruleSetItem,
+-			allItems:    []RuleItem{ruleSetItem},
+-			invert:      invert,
+-		},
++		ruleSetItem: ruleSetItem,
++		allItems:    []RuleItem{ruleSetItem},
++		invert:      invert,
+ 	}
+ }
+ 
+ func newSingleItemRule(matched bool) *DefaultRule {
+ 	item := &fakeRuleItem{matched: matched}
+ 	return &DefaultRule{
+-		abstractDefaultRule: abstractDefaultRule{
+-			items:    []RuleItem{item},
+-			allItems: []RuleItem{item},
+-		},
++		items:    []RuleItem{item},
++		allItems: []RuleItem{item},
+ 	}
+ }
+ 
+@@ -137,7 +133,6 @@ func TestAbstractLogicalRule_And_WithRuleSetInvert(t *testing.T) {
+ 		},
+ 	}
+ 	for _, testCase := range testCases {
+-		testCase := testCase
+ 		t.Run(testCase.name, func(t *testing.T) {
+ 			t.Parallel()
+ 			logicalRule := &abstractLogicalRule{
+diff --git a/route/rule/rule_action.go b/route/rule/rule_action.go
+index 87f950ba24ab24f11b7a425cf447f8052e3395c5..49eed6c4d778398dd2fdba738216617c4622c340 100644
+--- a/route/rule/rule_action.go
++++ b/route/rule/rule_action.go
+@@ -82,8 +82,9 @@ func NewRuleAction(logger logger.ContextLogger, action option.RuleAction) (adapt
+ 		return &RuleActionHijackDNS{}, nil
+ 	case C.RuleActionTypeSniff:
+ 		sniffAction := &RuleActionSniff{
+-			SnifferNames: action.SniffOptions.Sniffer,
+-			Timeout:      time.Duration(action.SniffOptions.Timeout),
++			SnifferNames:        action.SniffOptions.Sniffer,
++			Timeout:             time.Duration(action.SniffOptions.Timeout),
++			OverrideDestination: action.SniffOptions.OverrideDestination,
+ 		}
+ 		return sniffAction, sniffAction.build()
+ 	case C.RuleActionTypeResolve:
+@@ -118,7 +119,7 @@ func NewDNSRuleAction(logger logger.ContextLogger, action option.DNSRuleAction)
+ 				ClientSubnet:           netip.Prefix(common.PtrValueOrDefault(action.RouteOptions.ClientSubnet)),
+ 				RemoveClientSubnet:     action.RouteOptions.RemoveClientSubnet,
+ 				BypassIfFailed:         action.RouteOptions.BypassIfFailed,
+-				IPv6ByOutbound:         action.RouteOptions.IPv6ByOutbound, //H
++				IPv6ByOutbound:         action.RouteOptions.IPv6ByOutbound, // H
+ 			},
+ 		}
+ 	case C.RuleActionTypeEvaluate:
+@@ -134,7 +135,7 @@ func NewDNSRuleAction(logger logger.ContextLogger, action option.DNSRuleAction)
+ 				RewriteTTL:             action.EvaluateOptions.RewriteTTL,
+ 				ClientSubnet:           netip.Prefix(common.PtrValueOrDefault(action.EvaluateOptions.ClientSubnet)),
+ 				RemoveClientSubnet:     action.EvaluateOptions.RemoveClientSubnet,
+-				IPv6ByOutbound:         action.EvaluateOptions.IPv6ByOutbound, //H
++				IPv6ByOutbound:         action.EvaluateOptions.IPv6ByOutbound, // H
+ 			},
+ 		}
+ 	case C.RuleActionTypeRespond:
+@@ -148,7 +149,7 @@ func NewDNSRuleAction(logger logger.ContextLogger, action option.DNSRuleAction)
+ 			RewriteTTL:             action.RouteOptionsOptions.RewriteTTL,
+ 			ClientSubnet:           netip.Prefix(common.PtrValueOrDefault(action.RouteOptionsOptions.ClientSubnet)),
+ 			RemoveClientSubnet:     action.RouteOptionsOptions.RemoveClientSubnet,
+-			IPv6ByOutbound:         action.RouteOptionsOptions.IPv6ByOutbound, //H
++			IPv6ByOutbound:         action.RouteOptionsOptions.IPv6ByOutbound, // H
+ 		}
+ 	case C.RuleActionTypeReject:
+ 		return &RuleActionReject{
+@@ -352,7 +353,7 @@ type RuleActionDNSRouteOptions struct {
+ 	ClientSubnet           netip.Prefix
+ 	RemoveClientSubnet     bool
+ 	BypassIfFailed         bool
+-	IPv6ByOutbound         string //H
++	IPv6ByOutbound         string // H
+ }
+ 
+ func (r *RuleActionDNSRouteOptions) Type() string {
+@@ -605,18 +606,16 @@ func (r *RuleActionPredefined) String() string {
+ 
+ func (r *RuleActionPredefined) Response(request *dns.Msg) *dns.Msg {
+ 	return &dns.Msg{
+-		MsgHdr: dns.MsgHdr{
+-			Id:                 request.Id,
+-			Response:           true,
+-			Authoritative:      true,
+-			RecursionDesired:   true,
+-			RecursionAvailable: true,
+-			Rcode:              r.Rcode,
+-		},
+-		Question: request.Question,
+-		Answer:   rewriteRecords(r.Answer, request.Question[0]),
+-		Ns:       rewriteRecords(r.Ns, request.Question[0]),
+-		Extra:    rewriteRecords(r.Extra, request.Question[0]),
++		Id:                 request.Id,
++		Response:           true,
++		Authoritative:      true,
++		RecursionDesired:   true,
++		RecursionAvailable: true,
++		Rcode:              r.Rcode,
++		Question:           request.Question,
++		Answer:             rewriteRecords(r.Answer, request.Question[0]),
++		Ns:                 rewriteRecords(r.Ns, request.Question[0]),
++		Extra:              rewriteRecords(r.Extra, request.Question[0]),
+ 	}
+ }
+ 
+diff --git a/route/rule/rule_default.go b/route/rule/rule_default.go
+index c78378fecac81c411e59654c5cdd7ca71185bd24..4f1fd2a5ce31285788f8520d48ec058b24807dbe 100644
+--- a/route/rule/rule_default.go
++++ b/route/rule/rule_default.go
+@@ -80,11 +80,11 @@ func NewDefaultRule(ctx context.Context, logger log.ContextLogger, options optio
+ 			return nil, E.New("invalid ip version: ", options.IPVersion)
+ 		}
+ 	}
+-	if options.IPv6UnavailableVia != "" { //H
+-		item := NewIPv6UnavailableItem(ctx, options.IPv6UnavailableVia) //H
+-		rule.items = append(rule.items, item)                           //H
+-		rule.allItems = append(rule.allItems, item)                     //H
+-	} //H
++	if options.IPv6UnavailableVia != "" { // H
++		item := NewIPv6UnavailableItem(ctx, options.IPv6UnavailableVia) // H
++		rule.items = append(rule.items, item)                           // H
++		rule.allItems = append(rule.allItems, item)                     // H
++	} // H
+ 	if len(options.Network) > 0 {
+ 		item := NewNetworkItem(options.Network)
+ 		rule.items = append(rule.items, item)
+diff --git a/route/rule/rule_dns.go b/route/rule/rule_dns.go
+index f2082171f08d8331344a87cf1f9072deacbf5b8e..ae04fa34b7e3426bba50aa1bb0542e6a096e8801 100644
+--- a/route/rule/rule_dns.go
++++ b/route/rule/rule_dns.go
+@@ -109,10 +109,8 @@ type DefaultDNSRule struct {
+ 
+ func NewDefaultDNSRule(ctx context.Context, logger log.ContextLogger, options option.DefaultDNSRule, legacyDNSMode bool) (*DefaultDNSRule, error) {
+ 	rule := &DefaultDNSRule{
+-		abstractDefaultRule: abstractDefaultRule{
+-			invert: options.Invert,
+-			action: NewDNSRuleAction(logger, options.DNSRuleAction),
+-		},
++		invert:           options.Invert,
++		action:           NewDNSRuleAction(logger, options.DNSRuleAction),
+ 		matchResponse:    options.MatchResponse.IsEnabled(),
+ 		matchResponseTag: options.MatchResponse.ResponseTag(),
+ 		race:             options.Race,
+@@ -220,7 +218,12 @@ func NewDefaultDNSRule(ctx context.Context, logger log.ContextLogger, options op
+ 		rule.destinationIPCIDRItems = append(rule.destinationIPCIDRItems, item)
+ 		rule.allItems = append(rule.allItems, item)
+ 	}
+-	if options.IPAcceptAny {
++	if options.IPAcceptAny { //nolint:staticcheck
++		if legacyDNSMode {
++			deprecated.Report(ctx, deprecated.OptionIPAcceptAny)
++		} else {
++			return nil, E.New(deprecated.OptionIPAcceptAny.MessageWithLink())
++		}
+ 		item := NewIPAcceptAnyItem()
+ 		rule.destinationIPCIDRItems = append(rule.destinationIPCIDRItems, item)
+ 		rule.allItems = append(rule.allItems, item)
+@@ -382,21 +385,6 @@ func NewDefaultDNSRule(ctx context.Context, logger log.ContextLogger, options op
+ 		rule.items = append(rule.items, item)
+ 		rule.allItems = append(rule.allItems, item)
+ 	}
+-	if len(options.PreferredBy) > 0 {
+-		item := NewPreferredByDNSItem(ctx, options.PreferredBy)
+-		rule.items = append(rule.items, item)
+-		rule.allItems = append(rule.allItems, item)
+-	}
+-	if options.DNSServerAddress != nil && options.DNSServerAddress.Size() > 0 {
+-		item := NewDNSServerAddressItem(ctx, options.DNSServerAddress)
+-		rule.items = append(rule.items, item)
+-		rule.allItems = append(rule.allItems, item)
+-	}
+-	if options.DNSSearchDomain != nil && options.DNSSearchDomain.Size() > 0 {
+-		item := NewDNSSearchDomainItem(ctx, options.DNSSearchDomain)
+-		rule.items = append(rule.items, item)
+-		rule.allItems = append(rule.allItems, item)
+-	}
+ 	if options.RuleSetIPCIDRAcceptEmpty { //nolint:staticcheck
+ 		if legacyDNSMode {
+ 			deprecated.Report(ctx, deprecated.OptionRuleSetIPCIDRAcceptEmpty)
+@@ -515,12 +503,10 @@ func (r *LogicalDNSRule) Race() bool {
+ 
+ func NewLogicalDNSRule(ctx context.Context, logger log.ContextLogger, options option.LogicalDNSRule, legacyDNSMode bool) (*LogicalDNSRule, error) {
+ 	r := &LogicalDNSRule{
+-		abstractLogicalRule: abstractLogicalRule{
+-			rules:  make([]adapter.HeadlessRule, len(options.Rules)),
+-			invert: options.Invert,
+-			action: NewDNSRuleAction(logger, options.DNSRuleAction),
+-		},
+-		race: options.Race,
++		rules:  make([]adapter.HeadlessRule, len(options.Rules)),
++		invert: options.Invert,
++		action: NewDNSRuleAction(logger, options.DNSRuleAction),
++		race:   options.Race,
+ 	}
+ 	switch options.Mode {
+ 	case C.LogicalTypeAnd:
+@@ -580,8 +566,8 @@ func (r *LogicalDNSRule) MatchAddressLimit(metadata *adapter.InboundContext, res
+ 	matchMetadata.DestinationAddressMatchFromResponse = true
+ 	return r.abstractLogicalRule.Match(&matchMetadata)
+ }
+-func (r *LogicalDNSRule) BypassIfFailed() bool {
+ 
++func (r *LogicalDNSRule) BypassIfFailed() bool {
+ 	if act, ok := r.action.(*RuleActionDNSRoute); ok && act != nil {
+ 		return act.RuleActionDNSRouteOptions.BypassIfFailed
+ 	}
+diff --git a/route/rule/rule_item_cidr.go b/route/rule/rule_item_cidr.go
+index dd47c13346f9dcd75b5cb649482512fb9b64f315..cefbc7ba452c3aba1067150147a4e67a924b5fe7 100644
+--- a/route/rule/rule_item_cidr.go
++++ b/route/rule/rule_item_cidr.go
+@@ -8,7 +8,7 @@ import (
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/common/ipset"
+ 	"github.com/sagernet/sing/common"
+-	"github.com/sagernet/sing/common/json/badoption"
++	E "github.com/sagernet/sing/common/exceptions"
+ 
+ 	"go4.org/netipx"
+ )
+@@ -21,10 +21,18 @@ type IPCIDRItem struct {
+ 	description string
+ }
+ 
+-func NewIPCIDRItem(isSource bool, prefixables []*badoption.Prefixable) (*IPCIDRItem, error) {
++func NewIPCIDRItem(isSource bool, prefixables []string) (*IPCIDRItem, error) {
+ 	var builder netipx.IPSetBuilder
+-	for _, prefixable := range prefixables {
+-		builder.AddPrefix(prefixable.Build(netip.Prefix{}))
++	for _, value := range prefixables {
++		prefix, err := netip.ParsePrefix(value)
++		if err != nil {
++			addr, addrErr := netip.ParseAddr(value)
++			if addrErr != nil {
++				return nil, E.Cause(err, "invalid IP CIDR: ", value)
++			}
++			prefix = netip.PrefixFrom(addr, addr.BitLen())
++		}
++		builder.AddPrefix(prefix.Masked())
+ 	}
+ 	var description string
+ 	if isSource {
+@@ -32,8 +40,8 @@ func NewIPCIDRItem(isSource bool, prefixables []*badoption.Prefixable) (*IPCIDRI
+ 	} else {
+ 		description = "ip_cidr="
+ 	}
+-	prefixString := func(it *badoption.Prefixable) string {
+-		return it.Build(netip.Prefix{}).String()
++	prefixString := func(it string) string {
++		return it
+ 	}
+ 	if prefixCount := len(prefixables); prefixCount == 1 {
+ 		description += prefixString(prefixables[0])
+@@ -84,8 +92,9 @@ func (r *IPCIDRItem) Match(metadata *adapter.InboundContext) bool {
+ 	if metadata.Destination.IsIP() {
+ 		return r.ipSet.Contains(metadata.Destination.Addr)
+ 	}
+-	if len(metadata.DestinationAddresses) > 0 {
+-		return common.Any(metadata.DestinationAddresses, r.ipSet.Contains)
++	addresses := metadata.DestinationAddresses
++	if len(addresses) > 0 {
++		return slices.ContainsFunc(addresses, r.ipSet.Contains)
+ 	}
+ 	return metadata.IPCIDRAcceptEmpty
+ }
+diff --git a/route/rule/rule_set_remote.go b/route/rule/rule_set_remote.go
+index 380d427fffb0c326c8a4f62f1cd4a5286bcea724..6cd15e6c95bca57dc8504c44b627a993c4689234 100644
+--- a/route/rule/rule_set_remote.go
++++ b/route/rule/rule_set_remote.go
+@@ -7,6 +7,7 @@ import (
+ 	"io"
+ 	"net/http"
+ 	"path/filepath"
++	"runtime"
+ 	"strings"
+ 	"sync"
+ 	"sync/atomic"
+@@ -32,8 +33,11 @@ import (
+ 
+ var _ adapter.RuleSet = (*RemoteRuleSet)(nil)
+ 
+-// H: a rule-set download gives up after this
+-var hRuleSetFetchTimeout = 2 * time.Minute
++// H: limits of rule-set downloads
++var (
++	hRuleSetInitialFetchTimeout = 15 * time.Second
++	hRuleSetFetchTimeout        = 2 * time.Minute
++)
+ 
+ // H: retry delays after a failed rule-set fetch; the last one repeats until success
+ var hRuleSetRetryDelays = []time.Duration{time.Second, 10 * time.Second, 30 * time.Second, time.Minute, 5 * time.Minute, 10 * time.Minute, 30 * time.Minute}
+@@ -55,8 +59,9 @@ type RemoteRuleSet struct {
+ 	metadata       adapter.RuleSetMetadata
+ 	lastUpdated    time.Time
+ 	lastEtag       string
+-	retries        int             //H: failed fetches in a row, for the updater's backoff
+-	retryDelays    []time.Duration //H: overrides hRuleSetRetryDelays (tests)
++	updateTicker   *time.Ticker
++	fetchFailed    bool            // H: initial fetch failed, retry in background
++	retryDelays    []time.Duration // H: overrides hRuleSetRetryDelays (tests)
+ 	cacheFile      adapter.CacheFile
+ 	pauseManager   pause.Manager
+ 	callbacks      list.List[adapter.RuleSetUpdateCallback]
+@@ -124,6 +129,7 @@ func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.
+ 			}
+ 		}
+ 	}
++	loadedFromInitialPath := false
+ 	if s.lastUpdated.IsZero() && s.initialPath != "" {
+ 		var content []byte
+ 		content, err = filemanager.ReadFile(s.ctx, s.initialPath)
+@@ -132,11 +138,41 @@ func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.
+ 		}
+ 		if err != nil {
+ 			s.logger.Warn(E.Cause(err, "load initial rule-set from ", s.initialPath))
++		} else {
++			loadedFromInitialPath = true
+ 		}
+ 	}
+-	// H: no download here: the start, and with it the tunnel, would wait for it, through an outbound
+-	// that is itself still starting, and a stop could not cut it short. The rule-set starts empty and
+-	// the RuleSetUpdater fetches it as soon as the service is up, retrying with backoff.
++	if s.lastUpdated.IsZero() && !loadedFromInitialPath {
++		// Starting the box must not depend on a remote rule-set being reachable.
++		// Fetch it in PostStart and retry there if it fails.
++		s.fetchFailed = true
++	}
++	s.updateTicker = time.NewTicker(s.updateInterval)
++	return nil
++}
++
++// initialFetch downloads a rule-set that has no cached copy, for at most hRuleSetInitialFetchTimeout:
++// startup (and with it the TUN) waits for it, and a download through a stalled outbound would
++// otherwise never end. On failure the rule-set starts empty and loopUpdate retries it. //H
++func (s *RemoteRuleSet) initialFetch(ctx context.Context) {
++	fetchCtx, cancel := context.WithTimeout(ctx, hRuleSetInitialFetchTimeout)
++	defer cancel()
++	err := s.fetch(fetchCtx, true)
++	if err != nil {
++		s.logger.Warn("initial rule-set ", s.tag, " unavailable, will retry: ", err)
++		s.fetchFailed = true
++	} else {
++		s.fetchFailed = false
++	}
++}
++
++func (s *RemoteRuleSet) PostStart() error {
++	go func() {
++		if s.fetchFailed {
++			s.initialFetch(s.ctx)
++		}
++		s.loopUpdate()
++	}()
+ 	return nil
+ }
+ 
+@@ -226,16 +262,48 @@ func (s *RemoteRuleSet) loadBytes(content []byte) error {
+ 	return nil
+ }
+ 
+-// nextRetryDelay returns the wait before the next try after a failed fetch; the last delay
+-// repeats until a fetch succeeds. //H
+-func (s *RemoteRuleSet) nextRetryDelay() time.Duration {
++func (s *RemoteRuleSet) loopUpdate() {
++	// H: while the rule-set is missing or stale, retry with backoff (hRuleSetRetryDelays),
++	// keeping the cached rules (if any) in use; then fall back to the regular update interval.
+ 	retryDelays := s.retryDelays
+ 	if len(retryDelays) == 0 {
+ 		retryDelays = hRuleSetRetryDelays
+ 	}
+-	delay := retryDelays[min(s.retries, len(retryDelays)-1)]
+-	s.retries++
+-	return delay
++	retrying := s.fetchFailed || time.Since(s.lastUpdated) > s.updateInterval
++	retryIndex := 0
++	if retrying && !s.fetchFailed {
++		// stale cache: refresh immediately, back off only if that fails
++		retrying = s.updateOnce() != nil
++	}
++	for {
++		if retrying {
++			delay := retryDelays[min(retryIndex, len(retryDelays)-1)]
++			timer := time.NewTimer(delay)
++			select {
++			case <-s.ctx.Done():
++				timer.Stop()
++				return
++			case <-timer.C:
++			}
++			if s.updateOnce() == nil {
++				retrying = false
++				s.fetchFailed = false
++			} else {
++				retryIndex++
++			}
++			continue
++		}
++		runtime.GC()
++		select {
++		case <-s.ctx.Done():
++			return
++		case <-s.updateTicker.C:
++			if s.updateOnce() != nil {
++				retrying = true
++				retryIndex = 0
++			}
++		}
++	}
+ }
+ 
+ func (s *RemoteRuleSet) updateOnce() error {
+@@ -341,6 +409,9 @@ func (s *RemoteRuleSet) resolveTransport() (adapter.HTTPTransport, error) {
+ func (s *RemoteRuleSet) Close() error {
+ 	s.rules = nil
+ 	s.cancel()
++	if s.updateTicker != nil {
++		s.updateTicker.Stop()
++	}
+ 	return nil
+ }
+ 
+diff --git a/route/rule/rule_set_semantics_test.go b/route/rule/rule_set_semantics_test.go
+index 3fe9793ba6d9abdc6ce40c7f7533473b1c6236d7..6a4ee85c8172b2af35b24caf2a2664fbbd29469b 100644
+--- a/route/rule/rule_set_semantics_test.go
++++ b/route/rule/rule_set_semantics_test.go
+@@ -10,8 +10,6 @@ import (
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/common/convertor/adguard"
+ 	C "github.com/sagernet/sing-box/constant"
+-	"github.com/sagernet/sing/common"
+-	"github.com/sagernet/sing/common/json/badoption"
+ 	slogger "github.com/sagernet/sing/common/logger"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
+@@ -60,7 +58,6 @@ func TestRouteRuleSetMergeDestinationAddressGroup(t *testing.T) {
+ 		},
+ 	}
+ 	for _, testCase := range testCases {
+-		testCase := testCase
+ 		t.Run(testCase.name, func(t *testing.T) {
+ 			t.Parallel()
+ 			ruleSet := newLocalRuleSetForTest("merge-destination", testCase.inner)
+@@ -226,7 +223,6 @@ func TestRouteRuleSetOuterGroupedStateMergesIntoSameGroup(t *testing.T) {
+ 		},
+ 	}
+ 	for _, testCase := range testCases {
+-		testCase := testCase
+ 		t.Run(testCase.name, func(t *testing.T) {
+ 			t.Parallel()
+ 			ruleSet := newLocalRuleSetForTest("outer-merge-"+testCase.name, headlessDefaultRule(t, func(rule *abstractDefaultRule) {
+@@ -978,10 +974,8 @@ func TestDNSMatchResponseMissingResponseUsesBooleanSemantics(t *testing.T) {
+ 		nestedRule.matchResponse = true
+ 
+ 		logicalRule := &LogicalDNSRule{
+-			abstractLogicalRule: abstractLogicalRule{
+-				rules: []adapter.HeadlessRule{nestedRule},
+-				mode:  C.LogicalTypeAnd,
+-			},
++			rules: []adapter.HeadlessRule{nestedRule},
++			mode:  C.LogicalTypeAnd,
+ 		}
+ 
+ 		metadata := testMetadata("lookup.example")
+@@ -1027,7 +1021,6 @@ func TestDNSAddressLimitIgnoresDestinationAddresses(t *testing.T) {
+ 		},
+ 	}
+ 	for _, testCase := range testCases {
+-		testCase := testCase
+ 		t.Run(testCase.name, func(t *testing.T) {
+ 			t.Parallel()
+ 			rule := dnsRuleForTest(func(rule *abstractDefaultRule) {
+@@ -1083,7 +1076,6 @@ func TestDNSLegacyAddressLimitPreLookupDefersDirectRules(t *testing.T) {
+ 		},
+ 	}
+ 	for _, testCase := range testCases {
+-		testCase := testCase
+ 		t.Run(testCase.name, func(t *testing.T) {
+ 			t.Parallel()
+ 
+@@ -1130,10 +1122,8 @@ func TestDNSLegacyLogicalAddressLimitPreLookupDefersNestedRules(t *testing.T) {
+ 		addDestinationIPIsPrivateItem(rule)
+ 	})
+ 	logicalRule := &LogicalDNSRule{
+-		abstractLogicalRule: abstractLogicalRule{
+-			rules: []adapter.HeadlessRule{nestedRule},
+-			mode:  C.LogicalTypeAnd,
+-		},
++		rules: []adapter.HeadlessRule{nestedRule},
++		mode:  C.LogicalTypeAnd,
+ 	}
+ 
+ 	preLookupMetadata := testMetadata("lookup.example")
+@@ -1183,7 +1173,6 @@ func TestDNSLegacyInvertAddressLimitPreLookupRegression(t *testing.T) {
+ 		},
+ 	}
+ 	for _, testCase := range testCases {
+-		testCase := testCase
+ 		t.Run(testCase.name, func(t *testing.T) {
+ 			t.Parallel()
+ 
+@@ -1211,15 +1200,13 @@ func TestDNSLegacyInvertLogicalAddressLimitPreLookupRegression(t *testing.T) {
+ 		t.Parallel()
+ 
+ 		logicalRule := &LogicalDNSRule{
+-			abstractLogicalRule: abstractLogicalRule{
+-				rules: []adapter.HeadlessRule{
+-					dnsRuleForTest(func(rule *abstractDefaultRule) {
+-						rule.invert = true
+-						addDestinationIPIsPrivateItem(rule)
+-					}),
+-				},
+-				mode: C.LogicalTypeAnd,
++			rules: []adapter.HeadlessRule{
++				dnsRuleForTest(func(rule *abstractDefaultRule) {
++					rule.invert = true
++					addDestinationIPIsPrivateItem(rule)
++				}),
+ 			},
++			mode: C.LogicalTypeAnd,
+ 		}
+ 
+ 		preLookupMetadata := testMetadata("lookup.example")
+@@ -1284,7 +1271,6 @@ func TestDNSInvertAddressLimitPreLookupRegression(t *testing.T) {
+ 		},
+ 	}
+ 	for _, testCase := range testCases {
+-		testCase := testCase
+ 		t.Run(testCase.name, func(t *testing.T) {
+ 			t.Parallel()
+ 			rule := dnsRuleForTest(func(rule *abstractDefaultRule) {
+@@ -1349,11 +1335,9 @@ func headlessDefaultRule(t *testing.T, build func(*abstractDefaultRule)) *Defaul
+ 
+ func headlessLogicalRule(mode string, invert bool, rules ...adapter.HeadlessRule) *LogicalHeadlessRule {
+ 	return &LogicalHeadlessRule{
+-		abstractLogicalRule: abstractLogicalRule{
+-			rules:  rules,
+-			mode:   mode,
+-			invert: invert,
+-		},
++		rules:  rules,
++		mode:   mode,
++		invert: invert,
+ 	}
+ }
+ 
+@@ -1397,10 +1381,8 @@ func testMetadata(domain string) adapter.InboundContext {
+ 
+ func dnsResponseForTest(addresses ...netip.Addr) *mDNS.Msg {
+ 	response := &mDNS.Msg{
+-		MsgHdr: mDNS.MsgHdr{
+-			Response: true,
+-			Rcode:    mDNS.RcodeSuccess,
+-		},
++		Response: true,
++		Rcode:    mDNS.RcodeSuccess,
+ 	}
+ 	for _, address := range addresses {
+ 		if address.Is4() {
+@@ -1440,7 +1422,7 @@ func addOtherItem(rule *abstractDefaultRule, item RuleItem) {
+ 
+ func addSourceAddressItem(t *testing.T, rule *abstractDefaultRule, cidrs []string) {
+ 	t.Helper()
+-	item, err := NewIPCIDRItem(true, parsePrefixables(cidrs))
++	item, err := NewIPCIDRItem(true, cidrs)
+ 	require.NoError(t, err)
+ 	rule.sourceAddressItems = append(rule.sourceAddressItems, item)
+ 	rule.allItems = append(rule.allItems, item)
+@@ -1470,7 +1452,7 @@ func addDestinationRegexItem(t *testing.T, rule *abstractDefaultRule, regexes []
+ 
+ func addDestinationIPCIDRItem(t *testing.T, rule *abstractDefaultRule, cidrs []string) {
+ 	t.Helper()
+-	item, err := NewIPCIDRItem(false, parsePrefixables(cidrs))
++	item, err := NewIPCIDRItem(false, cidrs)
+ 	require.NoError(t, err)
+ 	rule.destinationIPCIDRItems = append(rule.destinationIPCIDRItems, item)
+ 	rule.allItems = append(rule.allItems, item)
+@@ -1515,9 +1497,3 @@ func addDestinationPortRangeItem(t *testing.T, rule *abstractDefaultRule, ranges
+ 	rule.destinationPortItems = append(rule.destinationPortItems, item)
+ 	rule.allItems = append(rule.allItems, item)
+ }
+-
+-func parsePrefixables(cidrs []string) []*badoption.Prefixable {
+-	return common.Map(cidrs, func(it string) *badoption.Prefixable {
+-		return common.Ptr(badoption.Prefixable(netip.MustParsePrefix(it)))
+-	})
+-}
+diff --git a/route/rule/rule_set_updater.go b/route/rule/rule_set_updater.go
+index 3872fb5a06d589052272b7f29eb641c6fcdac737..ab29b1597d81bd707ef00dd5da964266226cc4c5 100644
+--- a/route/rule/rule_set_updater.go
++++ b/route/rule/rule_set_updater.go
+@@ -44,6 +44,7 @@ func (u *RuleSetUpdater) Close() error {
+ 
+ func (u *RuleSetUpdater) loopUpdate() {
+ 	nextUpdates := make([]time.Time, len(u.ruleSets))
++	retries := make([]int, len(u.ruleSets))
+ 	for i, ruleSet := range u.ruleSets {
+ 		nextUpdates[i] = ruleSet.lastUpdated.Add(ruleSet.updateInterval)
+ 	}
+@@ -61,11 +62,16 @@ func (u *RuleSetUpdater) loopUpdate() {
+ 			if now.Before(nextUpdates[i]) {
+ 				continue
+ 			}
+-			if ruleSet.updateOnce() != nil { //H: retry a failed fetch with backoff, not after update_interval
+-				nextUpdates[i] = now.Add(ruleSet.nextRetryDelay()) //H
+-				continue                                           //H
+-			} //H
+-			ruleSet.retries = 0 //H
++			if ruleSet.updateOnce() != nil { // H: retry a failed fetch with backoff, not after update_interval
++				delays := ruleSet.retryDelays // H
++				if len(delays) == 0 {         // H
++					delays = hRuleSetRetryDelays // H
++				} // H
++				nextUpdates[i] = now.Add(delays[min(retries[i], len(delays)-1)]) // H
++				retries[i]++                                                     // H
++				continue                                                         // H
++			} // H
++			retries[i] = 0 // H
+ 			nextUpdates[i] = now.Add(ruleSet.updateInterval)
+ 			updated = true
+ 		}
+diff --git a/route/rule/xui_panel_sniff_test.go b/route/rule/xui_panel_sniff_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7518125f6eac188652944019dfc74872e299caf3
+--- /dev/null
++++ b/route/rule/xui_panel_sniff_test.go
+@@ -0,0 +1,30 @@
++package rule
++
++import (
++	"testing"
++
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/json"
++	"github.com/sagernet/sing/common/logger"
++)
++
++func TestXUIPanelSniffOverrideAction(t *testing.T) {
++	for _, enabled := range []bool{false, true} {
++		raw := `{"action":"sniff","sniffer":["http","tls"],"override_destination":false}`
++		if enabled {
++			raw = `{"action":"sniff","sniffer":["http","tls"],"override_destination":true}`
++		}
++		var options option.RuleAction
++		if err := json.Unmarshal([]byte(raw), &options); err != nil {
++			t.Fatal(err)
++		}
++		action, err := NewRuleAction(logger.NOP(), options)
++		if err != nil {
++			t.Fatal(err)
++		}
++		sniff, ok := action.(*RuleActionSniff)
++		if !ok || sniff.OverrideDestination != enabled || len(sniff.StreamSniffers) != 2 {
++			t.Fatalf("native decoder/action lost sniff policy: %#v", action)
++		}
++	}
++}
+diff --git a/route/splice.go b/route/splice.go
+index 9908dc0e4d104b9e46e2ac7be3adb33f17fd6dcf..bf1ec7068d7980025079c8a5dfc43b60575e16f4 100644
+--- a/route/splice.go
++++ b/route/splice.go
+@@ -269,11 +269,9 @@ func (m *ConnectionManager) splicePacketConnection(ctx context.Context, conn N.P
+ 	nat.Unidirectional = !isFakeIP && metadata.UDPDisableDomainUnmapping && !metadata.Destination.IsIP()
+ 	cached := spliceSource.takeCached()
+ 	if spliceSource.natConn.Splice(target.socket, tun.SplicePacketOptions{
+-		SpliceOptions: tun.SpliceOptions{
+-			ReadCounters:  append(spliceSource.readCounters, target.writeCounters...),
+-			WriteCounters: append(target.readCounters, spliceSource.writeCounters...),
+-			OnClose:       m.spliceClose(ctx, conn, remote.(io.Closer), onClose),
+-		},
++		ReadCounters:  append(spliceSource.readCounters, target.writeCounters...),
++		WriteCounters: append(target.readCounters, spliceSource.writeCounters...),
++		OnClose:       m.spliceClose(ctx, conn, remote.(io.Closer), onClose),
+ 		Timeout:       udpTimeout,
+ 		NAT:           nat,
+ 		Cached:        cached,

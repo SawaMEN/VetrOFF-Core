@@ -1,0 +1,249 @@
+diff --git a/transport/v2raygrpc/client.go b/transport/v2raygrpc/client.go
+index 6f772cb355b2c7540f1f22faf24198df794247cf..d04741a257e01441a7a308755df5a481accc69c9 100644
+--- a/transport/v2raygrpc/client.go
++++ b/transport/v2raygrpc/client.go
+@@ -3,12 +3,11 @@ package v2raygrpc
+ import (
+ 	"context"
+ 	"net"
+-	"sync"
+ 	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+-	"github.com/sagernet/sing-box/common/grpcname" //H
++	"github.com/sagernet/sing-box/common/grpcname" // H
+ 	"github.com/sagernet/sing-box/common/tls"
+ 	"github.com/sagernet/sing-box/option"
+ 	M "github.com/sagernet/sing/common/metadata"
+@@ -26,14 +25,14 @@ var _ adapter.V2RayClientTransport = (*Client)(nil)
+ 
+ type Client struct {
+ 	ctx         context.Context
+-	cancel      context.CancelFunc //H: ends a dial under way when the client closes
++	cancel      context.CancelFunc // H: ends a dial under way when the client closes
+ 	dialer      N.Dialer
+ 	serverAddr  string
+ 	serviceName string
+-	streamName  string //H
++	streamName  string // H
+ 	dialOptions []grpc.DialOption
+ 	conn        atomic.Pointer[grpc.ClientConn]
+-	connAccess  sync.Mutex
++	dialGate    chan struct{}
+ }
+ 
+ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, options option.V2RayGRPCOptions, tlsConfig tls.Config) (adapter.V2RayClientTransport, error) {
+@@ -70,16 +69,17 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
+ 	}))
+ 	//nolint:staticcheck
+ 	dialOptions = append(dialOptions, grpc.WithReturnConnectionError())
+-	serviceName, streamName := grpcname.Names(options.ServiceName) //H
+-	ctx, cancel := context.WithCancel(ctx)                         //H
++	serviceName, streamName := grpcname.Names(options.ServiceName) // H
++	ctx, cancel := context.WithCancel(ctx)                         // H
+ 	return &Client{
+ 		ctx:         ctx,
+-		cancel:      cancel, //H
++		cancel:      cancel, // H
+ 		dialer:      dialer,
+ 		serverAddr:  serverAddr.String(),
+-		serviceName: serviceName, //H: Xray's custom paths
+-		streamName:  streamName,  //H
++		serviceName: serviceName, // H: Xray's custom paths
++		streamName:  streamName,  // H
+ 		dialOptions: dialOptions,
++		dialGate:    make(chan struct{}, 1),
+ 	}, nil
+ }
+ 
+@@ -87,44 +87,58 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
+ //
+ // H: the dial waits until the server answers (WithReturnConnectionError blocks). It ran on the
+ // client's own context, which never ends, so a server that does not answer held it for good: the
+-// caller hung whatever its deadline, everyone after it hung behind connAccess, and gRPC went on
++// caller hung whatever its deadline, everyone waiting for the dial hung, and gRPC went on
+ // redialing the dead server in the background, also after Close, which found no connection to
+ // close yet. Every URL test of a dead gRPC proxy left a goroutine and such a connection behind.
+ // The dial now ends with the caller's context, or when the client closes.
+ func (c *Client) connect(ctx context.Context) (*grpc.ClientConn, error) {
++	if c.ctx.Err() != nil {
++		return nil, net.ErrClosed
++	}
++	if ctx.Err() != nil {
++		return nil, context.Cause(ctx)
++	}
+ 	conn := c.conn.Load()
+ 	if conn != nil && conn.GetState() != connectivity.Shutdown {
+ 		return conn, nil
+ 	}
+-	c.connAccess.Lock()
+-	defer c.connAccess.Unlock()
++	select {
++	case c.dialGate <- struct{}{}:
++		defer func() { <-c.dialGate }()
++	case <-ctx.Done():
++		return nil, context.Cause(ctx)
++	case <-c.ctx.Done():
++		return nil, net.ErrClosed
++	}
+ 	conn = c.conn.Load()
+ 	if conn != nil && conn.GetState() != connectivity.Shutdown {
+ 		return conn, nil
+ 	}
+-	if err := ctx.Err(); err != nil { //H: its time passed while it waited for the dial before it
++	if err := ctx.Err(); err != nil { // H: its time passed while it waited for the dial before it
+ 		return nil, context.Cause(ctx)
+ 	}
+ 	// the context only matters until the dial returns: gRPC ignores it from then on
+-	dialCtx, cancelDial := context.WithCancel(c.ctx)      //H
+-	stopPropagation := context.AfterFunc(ctx, cancelDial) //H
++	dialCtx, cancelDial := context.WithCancel(c.ctx)      // H
++	stopPropagation := context.AfterFunc(ctx, cancelDial) // H
+ 	//nolint:staticcheck
+ 	conn, err := grpc.DialContext(dialCtx, c.serverAddr, c.dialOptions...)
+-	stopPropagation() //H
+-	cancelDial()      //H
++	stopPropagation() // H
++	cancelDial()      // H
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	if c.ctx.Err() != nil { //H: closed while it dialed
+-		conn.Close()
++	c.conn.Store(conn)
++	if c.ctx.Err() != nil { // H: closed during the dial or before the connection was published
++		if c.conn.CompareAndSwap(conn, nil) {
++			conn.Close()
++		}
+ 		return nil, net.ErrClosed
+ 	}
+-	c.conn.Store(conn)
+ 	return conn, nil
+ }
+ 
+ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
+-	clientConn, err := c.connect(ctx) //H
++	clientConn, err := c.connect(ctx) // H
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -133,7 +147,7 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
+ 	stopPropagation := context.AfterFunc(ctx, func() {
+ 		cancel(context.Cause(ctx))
+ 	})
+-	stream, err := client.TunCustomName(streamCtx, c.serviceName, c.streamName) //H
++	stream, err := client.TunCustomName(streamCtx, c.serviceName, c.streamName) // H
+ 	if err != nil {
+ 		stopPropagation()
+ 		cancel(err)
+@@ -146,7 +160,7 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
+ }
+ 
+ func (c *Client) Close() error {
+-	c.cancel() //H: a dial still under way has no connection here to close
++	c.cancel() // H: a dial still under way has no connection here to close
+ 	conn := c.conn.Swap(nil)
+ 	if conn != nil {
+ 		conn.Close()
+diff --git a/transport/v2raygrpc/custom_name.go b/transport/v2raygrpc/custom_name.go
+index e29870c3cd2bb9264c62e69ebe76e3dff54dc2ff..2f3652b43fb2b381ab6e199d51d4d9484104e850 100644
+--- a/transport/v2raygrpc/custom_name.go
++++ b/transport/v2raygrpc/custom_name.go
+@@ -12,14 +12,14 @@ type GunService interface {
+ 	Recv() (*Hunk, error)
+ }
+ 
+-func ServerDesc(name string, streamName string) grpc.ServiceDesc { //H: Xray's custom paths name the stream too
++func ServerDesc(name string, streamName string) grpc.ServiceDesc { // H: Xray's custom paths name the stream too
+ 	return grpc.ServiceDesc{
+ 		ServiceName: name,
+ 		HandlerType: (*GunServiceServer)(nil),
+ 		Methods:     []grpc.MethodDesc{},
+ 		Streams: []grpc.StreamDesc{
+ 			{
+-				StreamName:    streamName, //H
++				StreamName:    streamName, // H
+ 				Handler:       _GunService_Tun_Handler,
+ 				ServerStreams: true,
+ 				ClientStreams: true,
+@@ -29,8 +29,8 @@ func ServerDesc(name string, streamName string) grpc.ServiceDesc { //H: Xray's c
+ 	}
+ }
+ 
+-func (c *gunServiceClient) TunCustomName(ctx context.Context, name string, streamName string, opts ...grpc.CallOption) (GunService_TunClient, error) { //H
+-	stream, err := c.cc.NewStream(ctx, &ServerDesc(name, streamName).Streams[0], "/"+name+"/"+streamName, opts...) //H
++func (c *gunServiceClient) TunCustomName(ctx context.Context, name string, streamName string, opts ...grpc.CallOption) (GunService_TunClient, error) { // H
++	stream, err := c.cc.NewStream(ctx, &ServerDesc(name, streamName).Streams[0], "/"+name+"/"+streamName, opts...) // H
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -41,11 +41,11 @@ func (c *gunServiceClient) TunCustomName(ctx context.Context, name string, strea
+ var _ GunServiceCustomNameClient = (*gunServiceClient)(nil)
+ 
+ type GunServiceCustomNameClient interface {
+-	TunCustomName(ctx context.Context, name string, streamName string, opts ...grpc.CallOption) (GunService_TunClient, error) //H
++	TunCustomName(ctx context.Context, name string, streamName string, opts ...grpc.CallOption) (GunService_TunClient, error) // H
+ 	Tun(ctx context.Context, opts ...grpc.CallOption) (GunService_TunClient, error)
+ }
+ 
+-func RegisterGunServiceCustomNameServer(s *grpc.Server, srv GunServiceServer, name string, streamName string) { //H
+-	desc := ServerDesc(name, streamName) //H
++func RegisterGunServiceCustomNameServer(s *grpc.Server, srv GunServiceServer, name string, streamName string) { // H
++	desc := ServerDesc(name, streamName) // H
+ 	s.RegisterService(&desc, srv)
+ }
+diff --git a/transport/v2raygrpc/server.go b/transport/v2raygrpc/server.go
+index 8556bb88a90b9489a385585438e16c04ab353550..290bdbc8228030adb0b9be07f2c83f1b6b598071 100644
+--- a/transport/v2raygrpc/server.go
++++ b/transport/v2raygrpc/server.go
+@@ -8,7 +8,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+-	"github.com/sagernet/sing-box/common/grpcname" //H
++	"github.com/sagernet/sing-box/common/grpcname" // H
+ 	"github.com/sagernet/sing-box/common/tls"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+@@ -48,8 +48,8 @@ func NewServer(ctx context.Context, logger logger.ContextLogger, options option.
+ 		}))
+ 	}
+ 	server := &Server{ctx, logger, handler, grpc.NewServer(serverOptions...)}
+-	serviceName, streamName := grpcname.Names(options.ServiceName)                     //H: Xray's custom paths
+-	RegisterGunServiceCustomNameServer(server.server, server, serviceName, streamName) //H
++	serviceName, streamName := grpcname.Names(options.ServiceName)                     // H: Xray's custom paths
++	RegisterGunServiceCustomNameServer(server.server, server, serviceName, streamName) // H
+ 	return server, nil
+ }
+ 
+diff --git a/transport/v2raygrpc/tls_credentials.go b/transport/v2raygrpc/tls_credentials.go
+index c695ac14e41019e7583786c675832f2454d87ab6..d3b9fcb40c03bd10e153f1d31118aaa7446e452a 100644
+--- a/transport/v2raygrpc/tls_credentials.go
++++ b/transport/v2raygrpc/tls_credentials.go
+@@ -39,10 +39,8 @@ func (c *TLSTransportCredentials) ClientHandshake(ctx context.Context, authority
+ 		return nil, nil, err
+ 	}
+ 	tlsInfo := credentials.TLSInfo{
+-		State: conn.ConnectionState(),
+-		CommonAuthInfo: credentials.CommonAuthInfo{
+-			SecurityLevel: credentials.PrivacyAndIntegrity,
+-		},
++		State:         conn.ConnectionState(),
++		SecurityLevel: credentials.PrivacyAndIntegrity, // H: Go 1.27 promoted field
+ 	}
+ 	id := internal_credentials.SPIFFEIDFromState(conn.ConnectionState())
+ 	if id != nil {
+@@ -62,10 +60,8 @@ func (c *TLSTransportCredentials) ServerHandshake(rawConn net.Conn) (net.Conn, c
+ 		return nil, nil, err
+ 	}
+ 	tlsInfo := credentials.TLSInfo{
+-		State: conn.ConnectionState(),
+-		CommonAuthInfo: credentials.CommonAuthInfo{
+-			SecurityLevel: credentials.PrivacyAndIntegrity,
+-		},
++		State:         conn.ConnectionState(),
++		SecurityLevel: credentials.PrivacyAndIntegrity, // H: Go 1.27 promoted field
+ 	}
+ 	id := internal_credentials.SPIFFEIDFromState(conn.ConnectionState())
+ 	if id != nil {

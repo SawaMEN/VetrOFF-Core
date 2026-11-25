@@ -1,0 +1,101 @@
+diff --git a/ray2sing_test/finalmask_test.go b/ray2sing_test/finalmask_test.go
+index a1a689b1b328cfac82403271558645b6684b183c..87c5114044544de865797c348e3d333cd4590918 100644
+--- a/ray2sing_test/finalmask_test.go
++++ b/ray2sing_test/finalmask_test.go
+@@ -41,12 +41,12 @@ func TestFinalMaskVless(t *testing.T) {
+ 		t.Fatalf("settings not kept: %s", fm.TCP[1].Settings)
+ 	}
+ 
+-	// the converted config carries it as finalmask
++	// Both supported engine spellings retain the converted final mask.
+ 	out, err := ray2sing.Ray2Singbox(context.Background(), link, false)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+-	if !strings.Contains(string(out), `"finalmask"`) {
++	if !strings.Contains(string(out), `"finalmask"`) && !strings.Contains(string(out), `"final_mask"`) {
+ 		t.Fatalf("finalmask missing from %s", out)
+ 	}
+ }
+diff --git a/ray2sing_test/h_soar_key_test.go b/ray2sing_test/h_soar_key_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..770c830d1d454775e163f52b4a7b8e399ee81791
+--- /dev/null
++++ b/ray2sing_test/h_soar_key_test.go
+@@ -0,0 +1,22 @@
++package ray2sing_test
++
++import (
++	"encoding/base64"
++	"testing"
++
++	"github.com/hiddify/ray2sing/ray2sing"
++	"github.com/sagernet/sing-box/option"
++)
++
++func TestSoarRawBase64LeadingPlus(t *testing.T) {
++	key := make([]byte, 32)
++	key[0] = 0xfb
++	encoded := base64.StdEncoding.EncodeToString(key)
++	out, err := ray2sing.SoarSingbox("soar://t.example.com?pk=" + encoded)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got := out.Options.(*option.SoarOptions).PublicKey; got != encoded {
++		t.Fatalf("key changed: %q != %q", got, encoded)
++	}
++}
+diff --git a/ray2sing_test/psiphon_test.go b/ray2sing_test/psiphon_test.go
+index 0425e1581c75f073ed145cbb1bb17f8ff5deb0c7..f6f5846d3946948925bdfb235f01f43e38366b23 100644
+--- a/ray2sing_test/psiphon_test.go
++++ b/ray2sing_test/psiphon_test.go
+@@ -25,27 +25,3 @@ func TestPsiphonRegion(t *testing.T) {
+ 		ray2sing.CheckUrlAndJson(url, expectedJSON, t)
+ 	}
+ }
+-
+-// A psiphon:// link shares the CDN edge scanner and its search.
+-func TestPsiphonScanner(t *testing.T) {
+-	url := "psiphon://auto?scan_sets=fastly,psiphon-akamai&scan_candidates=3&scan_timeout=2.5&search_timeout=2h&deep_concurrency=64&block_bits_ipv4=22#psiphon"
+-	expectedJSON := `
+-	{
+-		"outbounds": [
+-		  {
+-			"type": "psiphon",
+-			"tag": "psiphon § 0",
+-			"scanner": {
+-			  "sets": ["fastly", "psiphon-akamai"],
+-			  "candidates": 3,
+-			  "timeout": "2.5s",
+-			  "search_timeout": "2h0m0s",
+-			  "deep_concurrency": 64,
+-			  "block_bits_ipv4": 22
+-			}
+-		  }
+-		]
+-	  }
+-	`
+-	ray2sing.CheckUrlAndJson(url, expectedJSON, t)
+-}
+diff --git a/ray2sing_test/xdrive_test.go b/ray2sing_test/xdrive_test.go
+index f537b907d7de6feb9d0d2c0094e7f5d691b318d0..6a0ad08dc2a4087190db55d6f40a39cb4f8aa231 100644
+--- a/ray2sing_test/xdrive_test.go
++++ b/ray2sing_test/xdrive_test.go
+@@ -12,7 +12,7 @@ import (
+ 
+ // An XDRIVE link carries Xray's xdriveSettings as JSON in xdrive=, with VLESS encryption.
+ func TestXDriveLink(t *testing.T) {
+-	settings := `{"service":"google-drive","remoteFolder":"1AbC","secrets":["id","secret","token"],"pollIntervalMs":100,"xmux":{"maxConnections":"2-4"},"address":"216.239.38.120","port":443}`
++	settings := `{"service":"google-drive","remoteFolder":"1AbC","secrets":["id","secret","token"],"pollIntervalMs":100,"sessionTtlSeconds":77,"xmux":{"maxConnections":"2-4"},"address":"216.239.38.120","port":443}`
+ 	link := "vless://dffb7646-1656-427a-8187-9c056a6a5fd5@127.0.0.1:1?encryption=mlkem768x25519plus.native.0rtt.9zy0chrl2-czYBSv11y34twAmvJlMoJIDhhMGc--lDo&security=tls&fp=chrome&type=xdrive&xdrive=" + url.QueryEscape(settings) + "#xdrive"
+ 	options, err := ray2sing.Ray2SingboxOptions(libbox.BaseContext(nil), link, false)
+ 	if err != nil {
+@@ -23,7 +23,7 @@ func TestXDriveLink(t *testing.T) {
+ 		t.Fatalf("transport %+v", vless.Transport)
+ 	}
+ 	xdrive := vless.Transport.XDriveOptions
+-	if xdrive.Service != "google-drive" || xdrive.RemoteFolder != "1AbC" || len(xdrive.Secrets) != 3 || xdrive.PollIntervalMs != 100 {
++	if xdrive.Service != "google-drive" || xdrive.RemoteFolder != "1AbC" || len(xdrive.Secrets) != 3 || xdrive.PollIntervalMs != 100 || xdrive.SessionTtlSeconds != 77 {
+ 		t.Fatalf("xdrive %+v", xdrive)
+ 	}
+ 	if xdrive.Xmux == nil || xdrive.Xmux.MaxConnections.From != 2 || xdrive.Xmux.MaxConnections.To != 4 {

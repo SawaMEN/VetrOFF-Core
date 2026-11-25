@@ -1,0 +1,109 @@
+diff --git a/transport/call/common/http.go b/transport/call/common/http.go
+index 242820077e154c4e91780ad694b32b8c43afb170..8a6fddccc79264600afade85217a37ab99571ce2 100644
+--- a/transport/call/common/http.go
++++ b/transport/call/common/http.go
+@@ -89,10 +89,10 @@ func HttpClient(dialer N.Dialer) *http.Client {
+ }
+ 
+ func HttpGet(dialer N.Dialer, endpoint string) ([]byte, error) {
+-	req, err := http.NewRequest("GET", endpoint, nil) //H
+-	if err != nil {                                   //H: the URL can come from a scraped page; a nil request crashed the app
+-		return nil, err //H
+-	} //H
++	req, err := http.NewRequest("GET", endpoint, nil) // H
++	if err != nil {                                   // H: the URL can come from a scraped page; a nil request crashed the app
++		return nil, err // H
++	} // H
+ 	req.Header.Set("User-Agent", UserAgent)
+ 	resp, err := HttpClient(dialer).Do(req)
+ 	if err != nil {
+diff --git a/transport/call/dion/api.go b/transport/call/dion/api.go
+index 596ef4a7de7c143638f9a4565b636aa5aa8e4b0a..81e120b7cefab061eba2d7280dbf792de1cd3d0d 100644
+--- a/transport/call/dion/api.go
++++ b/transport/call/dion/api.go
+@@ -101,7 +101,6 @@ type Session struct {
+ 	AccessTokenExp time.Time
+ 	UserID         string
+ 	SessionID      string
+-	cookiesPath    string
+ 	email          string
+ 	password       string
+ 	refreshMu      sync.Mutex
+diff --git a/transport/call/telemost/api.go b/transport/call/telemost/api.go
+index 184c6d99de882f73f9b5ecb4ce8cd539ab35c32e..29e722e648adc3676847595bd0d760f203b94b33 100644
+--- a/transport/call/telemost/api.go
++++ b/transport/call/telemost/api.go
+@@ -183,7 +183,6 @@ func MungeSDPAddVideoContent(sdp string) string {
+ 		if strings.HasPrefix(line, "m=") {
+ 			if inVideo && !inserted {
+ 				out = append(out, "a=content:speaker,main")
+-				inserted = true
+ 			}
+ 			inVideo = strings.HasPrefix(line, "m=video")
+ 			inserted = false
+diff --git a/transport/call/telemost/connect.go b/transport/call/telemost/connect.go
+index b805bebf4989aff18b0e302c287cb053005b5619..deb775058040d87feca883ffebaaae0c1b7c67d6 100644
+--- a/transport/call/telemost/connect.go
++++ b/transport/call/telemost/connect.go
+@@ -18,6 +18,9 @@ import (
+ // Hiddify: it waited 60 s for a first peer and failed without one, and the inbound tried again:
+ // a server nobody had joined yet made a new conference every two minutes.
+ func ConnectCreator(ctx context.Context, cookieStr, joinLink string, readBuf int, dialer N.Dialer, accept tunnel.AcceptHandlers, logger logger.ContextLogger) (func(), string, error) {
++	if err := ctx.Err(); err != nil {
++		return nil, "", err
++	}
+ 	cfg, err := FetchConfig(dialer, logger)
+ 	if err != nil {
+ 		return nil, "", err
+@@ -48,6 +51,10 @@ func ConnectCreator(ctx context.Context, cookieStr, joinLink string, readBuf int
+ 		accept:    accept,
+ 		logger:    logger,
+ 	}
++	if err := ctx.Err(); err != nil {
++		bridge.Close()
++		return nil, "", err
++	}
+ 	go bridge.Run()
+ 	return bridge.Close, connInfo.ConferenceURI, nil
+ }
+@@ -81,13 +88,20 @@ func ConnectJoiner(ctx context.Context, joinLink, displayName string, readBuf in
+ 	params := fmt.Sprintf(`{"joinLink":%q,"displayName":%q}`, joinLink, displayName)
+ 	// TODO(hiddify): RunWithParams returns when its first join fails and tells nobody: the select
+ 	// below waits until ctx ends and the caller never retries. Have it report its end and error.
+-	go joiner.RunWithParams(params)
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		joiner.RunWithParams(params)
++	}()
+ 	select {
+ 	case tun := <-tunCh:
+ 		rb := tunnel.NewJoinerBridge(tun, logger)
+ 		rb.SetOnConfigAck(joiner.MarkConfigAcked)
+ 		rb.MarkReady()
+ 		return rb, joiner.Close, nil
++	case <-done:
++		joiner.Close()
++		return nil, nil, fmt.Errorf("telemost: joiner stopped before connecting")
+ 	case <-ctx.Done():
+ 		joiner.Close()
+ 		return nil, nil, ctx.Err()
+diff --git a/transport/call/vk/vk_auth.go b/transport/call/vk/vk_auth.go
+index f209c216fdd92e416fc734218cb2b12d3aac9f38..1ee660dbc7cb72e33f5401627d6a8227f36769d3 100644
+--- a/transport/call/vk/vk_auth.go
++++ b/transport/call/vk/vk_auth.go
+@@ -35,10 +35,10 @@ type vkCaptchaError struct {
+ func RunVKAuth(dialer N.Dialer, joinLink, displayName string, logger logger.ContextLogger) (string, error) {
+ 	client := common.HttpClient(dialer)
+ 	httpPost := func(targetURL string, form url.Values, extraHeaders map[string]string) (map[string]any, error) {
+-		req, err := http.NewRequest("POST", targetURL, strings.NewReader(form.Encode())) //H
+-		if err != nil {                                                                  //H: the URL can come from VK's reply; a nil request crashed the app
+-			return nil, err //H
+-		} //H
++		req, err := http.NewRequest("POST", targetURL, strings.NewReader(form.Encode())) // H
++		if err != nil {                                                                  // H: the URL can come from VK's reply; a nil request crashed the app
++			return nil, err // H
++		} // H
+ 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+ 		req.Header.Set("User-Agent", headless.ChromeWindows.UserAgent())
+ 		req.Header.Set("Origin", "https://vk.ru")

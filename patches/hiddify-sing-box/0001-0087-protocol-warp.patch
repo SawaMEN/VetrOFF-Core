@@ -1,0 +1,494 @@
+diff --git a/protocol/warp/endpoint_warp.go b/protocol/warp/endpoint_warp.go
+index 453fe3f9b9e67d87bf791919c2aaa298fe653817..c7ceae743a021b32965f1b8abb67996f9286a76b 100644
+--- a/protocol/warp/endpoint_warp.go
++++ b/protocol/warp/endpoint_warp.go
+@@ -74,9 +74,9 @@ type WARPEndpoint struct {
+ 	current       *warpSession  // H: the current start
+ 	candidate     bool          // H: a new tunnel next to the one in use, see h_switch.go
+ 	discarded     atomic.Bool   // H: the candidate is not used
+-	linkRefused   atomic.Bool   // H: Cloudflare refused masque.device, see h_link_device.go
+-	starting      atomic.Bool   // H: a start is on its way to the tunnel, see Status
+-	registerWith  hRegister     // H: tests: instead of the WARP API
++	masqueLinkState
++	starting     atomic.Bool // H: a start is on its way to the tunnel, see Status
++	registerWith hRegister   // H: tests: instead of the WARP API
+ }
+ 
+ func NewWARPEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.WARPEndpointOptions) (adapter.Endpoint, error) {
+@@ -143,36 +143,31 @@ func GetWarpProfile(ctx context.Context, profile *option.WARPProfile) (*cloudfla
+ // withWARPAPI calls register with the dialer to reach the WARP API through: profile.detour (a
+ // direct connection when unset), then every outbound until one works, the ones that answer their
+ // ping first, each awake while it is tried (registerDetours). //H
+-func withWARPAPI(ctx context.Context, profile *option.WARPProfile, register func(dialer N.Dialer) error) error {
+-	var dialer N.Dialer
+-	outmanager := service.FromContext[adapter.OutboundManager](ctx)
+-	if profile.Detour != "" && outmanager != nil {
+-		var ok bool
+-		dialer, ok = outmanager.Outbound(profile.Detour)
+-		if !ok {
++func withWARPAPI(ctx context.Context, profile *option.WARPProfile, call func(N.Dialer) error) error {
++	manager := service.FromContext[adapter.OutboundManager](ctx)
++	if profile != nil && profile.Detour != "" {
++		if manager == nil {
++			return E.New("WARP detour manager not available")
++		}
++		outbound, found := manager.Outbound(profile.Detour)
++		if !found {
+ 			return E.New("outbound detour not found: ", profile.Detour)
+ 		}
+-
++		return call(outbound)
+ 	}
+-	err := register(dialer)
+-	if err == nil {
+-		return nil
++	firstErr := call(nil)
++	if firstErr == nil || manager == nil {
++		return firstErr
+ 	}
+-	if outmanager == nil { //H: returning (nil, nil) here made the caller dereference a nil profile
+-		return err //H
+-	} //H
+-
+-	for _, dialer := range registerDetours(ctx, outmanager.Outbounds()) { //H
+-		select {
+-		case <-ctx.Done():
++	for _, outbound := range registerDetours(ctx, manager.Outbounds()) {
++		if ctx.Err() != nil {
+ 			return ctx.Err()
+-		default:
+ 		}
+-		if registerThrough(dialer, register) == nil { //H
++		if err := registerThrough(outbound, call); err == nil {
+ 			return nil
+ 		}
+ 	}
+-	return err
++	return firstErr
+ }
+ func GetWarpProfileDialer(ctx context.Context, dialer N.Dialer, profile *option.WARPProfile) (*cloudflare.CloudflareProfile, error) {
+ 	api := cloudflare.NewCloudflareApiDetour(dialer)
+@@ -243,7 +238,7 @@ func (w *WARPEndpoint) status() adapter.Status { //H
+ 		if inner == nil {
+ 			return adapter.StatusConnecting
+ 		}
+-		return inner.Status()
++		return adapter.OutboundStatus(inner)
+ 	}
+ 	if w.scanStatus.IsScanning() {
+ 		return adapter.StatusSearching
+@@ -343,11 +338,18 @@ func (w *WARPEndpoint) DisplayType() string {
+ // server_port when set, otherwise the profile's endpoint host and one of its ports, or the
+ // port in the host when the profile lists none. //H
+ func warpPeerEndpoint(config *C.WARPConfig, server option.ServerOptions) (string, uint16, error) {
+-	if len(config.Peers) == 0 {
++	if config == nil || len(config.Peers) == 0 {
+ 		return "", 0, E.New("WARP config has no peers")
+ 	}
+ 	endpoint := config.Peers[0].Endpoint
+-	address, portString, hasPort := strings.Cut(endpoint.Host, ":")
++	address, portString, splitErr := net.SplitHostPort(endpoint.Host) // H: preserve IPv6 peer parsing
++	hasPort := splitErr == nil
++	if !hasPort {
++		address = endpoint.Host
++		if strings.Count(address, ":") == 1 {
++			address, portString, hasPort = strings.Cut(address, ":")
++		}
++	}
+ 	var port uint16
+ 	if len(endpoint.Ports) > 0 {
+ 		port = uint16(endpoint.Ports[rand.Intn(len(endpoint.Ports))])
+@@ -359,12 +361,12 @@ func warpPeerEndpoint(config *C.WARPConfig, server option.ServerOptions) (string
+ 	}
+ 	if server.Server != "" {
+ 		address = server.Server
+-	} else if !M.ParseAddr(address).IsValid() { //H: the profile's host is a domain
++	} else if !M.ParseAddr(address).IsValid() { // H: the profile's host is a domain
+ 		// use the profile's own address: a domain peer resolves to IPv4 and IPv6, and WireGuard
+ 		// sends to both over one UDP association, which a detour without IPv6 then closes
+-		if profileAddress := warpProfileAddress(endpoint.V4, endpoint.V6); profileAddress != "" { //H
+-			address = profileAddress //H
+-		} //H
++		if profileAddress := warpProfileAddress(endpoint.V4, endpoint.V6); profileAddress != "" { // H
++			address = profileAddress // H
++		} // H
+ 	}
+ 	if server.ServerPort != 0 {
+ 		port = server.ServerPort
+@@ -378,24 +380,10 @@ func warpPeerEndpoint(config *C.WARPConfig, server option.ServerOptions) (string
+ // warpInterfaceAddresses returns the tunnel addresses of a WARP config; a missing family is
+ // skipped, but at least one is required. //H
+ func warpInterfaceAddresses(config *C.WARPConfig) (badoption.Listable[netip.Prefix], error) {
+-	var addresses badoption.Listable[netip.Prefix]
+-	for _, address := range []struct {
+-		value string
+-		bits  string
+-	}{{config.Interface.Addresses.V4, "/32"}, {config.Interface.Addresses.V6, "/128"}} {
+-		if address.value == "" {
+-			continue
+-		}
+-		prefix, err := netip.ParsePrefix(address.value + address.bits)
+-		if err != nil {
+-			return nil, E.Cause(err, "parse WARP interface address")
+-		}
+-		addresses = append(addresses, prefix)
+-	}
+-	if len(addresses) == 0 {
+-		return nil, E.New("WARP config has no interface address")
++	if config == nil {
++		return nil, E.New("missing WARP profile")
+ 	}
+-	return addresses, nil
++	return warpInterfaceAddressPair(config.Interface.Addresses.V4, config.Interface.Addresses.V6)
+ }
+ 
+ // warpProfileAddress returns the IP of the profile's IPv4 endpoint, or of its IPv6 one when there
+diff --git a/protocol/warp/endpoint_warp_awg.go b/protocol/warp/endpoint_warp_awg.go
+index f645804a6307a9f03752d3f207eaeac32d7c362f..bab61bb13f30cb387a8225a0b5c9f2d35763276d 100644
+--- a/protocol/warp/endpoint_warp_awg.go
++++ b/protocol/warp/endpoint_warp_awg.go
+@@ -25,31 +25,32 @@ func createWARPAwgEndpoint(
+ 	peerPort uint16,
+ 	peerPublicKey string,
+ ) (adapter.Endpoint, error) {
+-	addresses, err := warpInterfaceAddresses(config) //H: a config without addresses crashed the process
+-	if err != nil {                                  //H
+-		return nil, err //H
+-	} //H
++	addresses, err := warpInterfaceAddresses(config)
++	if err != nil {
++		return nil, err
++	}
+ 	return awg.NewEndpoint(ctx, router, logger, tag, option.AwgEndpointOptions{
+ 		UseIntegratedTun: options.System,
+ 		PrivateKey:       config.PrivateKey,
+-		Address:          addresses, //H
++		Address:          addresses,
+ 		MTU:              options.MTU,
+ 		ListenPort:       options.ListenPort,
+ 		Awg:              *options.AWG,
+ 		Peers: []option.AwgPeerOptions{
+ 			{
+-				Address:                     peerAddr,
+-				Port:                        peerPort,
+-				PublicKey:                   peerPublicKey,
+-				PersistentKeepaliveInterval: warpKeepalive, //H: keeps the handshake fresh, so IsReady can tell a dead path
++				Address:                     peerAddr,      // H
++				Port:                        peerPort,      // H
++				PublicKey:                   peerPublicKey, // H
++				PersistentKeepaliveInterval: warpKeepalive, // H
+ 				AllowedIPs: badoption.Listable[netip.Prefix]{
+ 					netip.MustParsePrefix("0.0.0.0/0"),
+ 					netip.MustParsePrefix("::/0"),
+ 				},
+ 			},
+ 		},
+-		DialerOptions:   options.DialerOptions,   //H
+-		MTUDiscovery:    options.MTUDiscovery,    //H
+-		FallbackAddress: options.FallbackAddress, //H
++		DialerOptions: options.DialerOptions,
++
++		MTUDiscovery:    options.MTUDiscovery == nil || *options.MTUDiscovery,
++		FallbackAddress: options.FallbackAddress, // H: preserve explicit fallback addresses
+ 	})
+ }
+diff --git a/protocol/warp/endpoint_warp_masque.go b/protocol/warp/endpoint_warp_masque.go
+index 42d363c62ae8ab9d02be66e285dab50231a64c75..fe2f4a22561a0c776628a96e0e260bdd070e05cd 100644
+--- a/protocol/warp/endpoint_warp_masque.go
++++ b/protocol/warp/endpoint_warp_masque.go
+@@ -17,8 +17,8 @@ import (
+ 	N "github.com/sagernet/sing/common/network"
+ )
+ 
+-// masqueIncluded tells auto mode that MASQUE is in the build.
+-const masqueIncluded = true
++// included reports the capability of the state compiled into this endpoint.
++func (*masqueLinkState) included() bool { return true }
+ 
+ // connectMASQUE runs a MASQUE tunnel to WARP with the device of profile as the inner endpoint.
+ // The tunnel looks up endpoints with the scanner and reconnects by itself.
+diff --git a/protocol/warp/endpoint_warp_masque_stub.go b/protocol/warp/endpoint_warp_masque_stub.go
+index d1c9420ec8cbf334a2ae154c0353ba6cb1842a90..99274d2605dd32e834b4c1517148bb23111a7833 100644
+--- a/protocol/warp/endpoint_warp_masque_stub.go
++++ b/protocol/warp/endpoint_warp_masque_stub.go
+@@ -10,7 +10,8 @@ import (
+ 	E "github.com/sagernet/sing/common/exceptions"
+ )
+ 
+-const masqueIncluded = false
++// included reports the capability of the state compiled into this endpoint.
++func (*masqueLinkState) included() bool { return false }
+ 
+ var errMASQUENotIncluded = E.New(`WARP over MASQUE is not included in this build, rebuild with -tags with_masque`)
+ 
+@@ -36,3 +37,5 @@ func validateMASQUEDevice(options *option.WARPEndpointOptions) error {
+ func (w *WARPEndpoint) linkMASQUEProfile() *warpProfile {
+ 	return nil
+ }
++
++type masqueLinkState struct{}
+diff --git a/protocol/warp/endpoint_warp_wireguard.go b/protocol/warp/endpoint_warp_wireguard.go
+index 45c0971917e35a2045840e7a781563b988d9f046..4f68856cb525e6dfebb2ff42cf459ad735543b92 100644
+--- a/protocol/warp/endpoint_warp_wireguard.go
++++ b/protocol/warp/endpoint_warp_wireguard.go
+@@ -9,6 +9,7 @@ import (
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+ 	wg "github.com/sagernet/sing-box/protocol/wireguard"
++	"github.com/sagernet/sing/common/json/badoption"
+ )
+ 
+ func createWARPWireGuardEndpoint(
+@@ -22,10 +23,10 @@ func createWARPWireGuardEndpoint(
+ 	peerPort uint16,
+ 	peerPublicKey string,
+ ) (adapter.Endpoint, error) {
+-	addresses, err := warpInterfaceAddresses(config) //H: a config without addresses crashed the process
+-	if err != nil {                                  //H
+-		return nil, err //H
+-	} //H
++	addresses, err := warpInterfaceAddresses(config)
++	if err != nil {
++		return nil, err
++	}
+ 	return wg.NewEndpoint(ctx, router, logger, tag, option.WireGuardEndpointOptions{
+ 		System:        options.System,
+ 		Name:          options.Name,
+@@ -35,22 +36,23 @@ func createWARPWireGuardEndpoint(
+ 		Noise:         options.Noise,
+ 		AWG:           options.AWG,
+ 		DialerOptions: options.DialerOptions,
+-		Address:       addresses, //H
++		Address:       addresses,
+ 		PrivateKey:    config.PrivateKey,
+ 		Peers: []option.WireGuardPeer{
+ 			{
+ 				Address:                     peerAddr,
+ 				Port:                        peerPort,
+ 				PublicKey:                   peerPublicKey,
+-				PersistentKeepaliveInterval: warpKeepalive, //H: keeps the handshake fresh, so IsReady can tell a dead path
+-				AllowedIPs: option.LegacyListable[netip.Prefix]{
++				PersistentKeepaliveInterval: warpKeepalive, // H
++				AllowedIPs: badoption.Listable[netip.Prefix]{
+ 					netip.MustParsePrefix("0.0.0.0/0"),
+ 					netip.MustParsePrefix("::/0"),
+ 				},
+ 			},
+ 		},
+-		MTU:             options.MTU,             //H
+-		FallbackAddress: options.FallbackAddress, //H
+-		MTUDiscovery:    options.MTUDiscovery,    //H
++		MTU: options.MTU,
++
++		MTUDiscovery:    options.MTUDiscovery,
++		FallbackAddress: options.FallbackAddress, // H: preserve explicit fallback addresses
+ 	})
+ }
+diff --git a/protocol/warp/h_compat.go b/protocol/warp/h_compat.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8f7e468255002807fff55ea1330e736680c8a541
+--- /dev/null
++++ b/protocol/warp/h_compat.go
+@@ -0,0 +1,6 @@
++package warp
++
++import "github.com/sagernet/sing-box/adapter"
++
++// IsReady retains the fork adapter contract alongside detailed Status.
++func (w *WARPEndpoint) IsReady() bool { return w.Status() == adapter.StatusReady }
+diff --git a/protocol/warp/h_endpoint_warp_test.go b/protocol/warp/h_endpoint_warp_test.go
+index 08f31da11a8d1e420b3caf4681d8e5e584b9abd3..ca9f34374ae107cd1ff27fade460794167d188ac 100644
+--- a/protocol/warp/h_endpoint_warp_test.go
++++ b/protocol/warp/h_endpoint_warp_test.go
+@@ -169,7 +169,7 @@ func TestH_GetWarpProfileDetourNotFound(t *testing.T) {
+ 	require.ErrorContains(t, err, "outbound detour not found: missing")
+ }
+ 
+-func TestH_GetWarpProfileFallsBackToAllOutbounds(t *testing.T) {
++func TestH_GetWarpProfileHonorsExplicitDetour(t *testing.T) {
+ 	key, err := wgtypes.GeneratePrivateKey()
+ 	require.NoError(t, err)
+ 	first := &hFakeOutbound{hRecordingDialer: &hRecordingDialer{}, tag: "first"}
+@@ -178,8 +178,8 @@ func TestH_GetWarpProfileFallsBackToAllOutbounds(t *testing.T) {
+ 	profile, err := GetWarpProfile(ctx, &option.WARPProfile{PrivateKey: key.String(), Detour: "first"})
+ 	require.Error(t, err)
+ 	require.Nil(t, profile)
+-	require.GreaterOrEqual(t, first.count(), 2, "detour is tried first, then again in the fallback loop")
+-	require.NotZero(t, second.count())
++	require.NotZero(t, first.count(), "the explicitly configured detour is tried")
++	require.Zero(t, second.count(), "an explicit detour does not fall back to other outbounds")
+ }
+ 
+ func TestH_GetWarpProfileWithoutOutboundManagerReturnsError(t *testing.T) {
+@@ -300,11 +300,11 @@ func (l *hWarnLogger) logged() []string {
+ // failed the whole config for a while, and before that the endpoint retried its start for good.
+ func TestH_WARPIncompleteProfileIsNotUsed(t *testing.T) {
+ 	for reason, content := range map[string]string{
+-		"no private key":          `{"interface":{"addresses":{"v4":"172.16.0.2"}},"peers":[{"public_key":"p","endpoint":{"host":"h:1"}}]}`,
+-		"no peers":                `{"private_key":"x","interface":{"addresses":{"v4":"172.16.0.2"}},"peers":[]}`,
+-		"no peer public key":      `{"private_key":"x","interface":{"addresses":{"v4":"172.16.0.2"}},"peers":[{"endpoint":{"host":"h:1"}}]}`,
+-		"no interface address":    `{"private_key":"x","peers":[{"public_key":"p","endpoint":{"host":"h:1"}}]}`,
+-		"no peer address or port": `{"private_key":"x","interface":{"addresses":{"v4":"172.16.0.2"}},"peers":[{"public_key":"p","endpoint":{"host":"h"}}]}`,
++		"no private key":     `{"interface":{"addresses":{"v4":"172.16.0.2"}},"peers":[{"public_key":"p","endpoint":{"host":"h:1"}}]}`,
++		"no peers":           `{"private_key":"x","interface":{"addresses":{"v4":"172.16.0.2"}},"peers":[]}`,
++		"no peer public key": `{"private_key":"x","interface":{"addresses":{"v4":"172.16.0.2"}},"peers":[{"endpoint":{"host":"h:1"}}]}`,
++		"WARP interface is missing IPv4 and IPv6 addresses": `{"private_key":"x","peers":[{"public_key":"p","endpoint":{"host":"h:1"}}]}`,
++		"no peer address or port":                           `{"private_key":"x","interface":{"addresses":{"v4":"172.16.0.2"}},"peers":[{"public_key":"p","endpoint":{"host":"h"}}]}`,
+ 	} {
+ 		logger := &hWarnLogger{ContextLogger: hLogger()}
+ 		created, err := NewWARPEndpoint(hTestContext(t), nil, logger, "warp-tag", option.WARPEndpointOptions{WARPConfig: hWARPConfig(t, content)})
+@@ -386,7 +386,7 @@ func TestH_WARPIncompleteRegisteredDeviceFails(t *testing.T) {
+ 	require.Nil(t, ep.obtainProfile(ep.session().done, kindWireGuard))
+ 	require.Equal(t, 1, registrations, "an incomplete device is not registered again and again")
+ 	require.Equal(t, adapter.StatusFailed, ep.Status())
+-	require.ErrorContains(t, adapter.StatusError(ep), "no interface address")
++	require.ErrorContains(t, adapter.StatusError(ep), "WARP interface is missing IPv4 and IPv6 addresses")
+ 	require.Nil(t, ep.profiles.usable(kindWireGuard), "and not kept")
+ }
+ 
+@@ -780,3 +780,13 @@ func TestH_WARPDevicePool(t *testing.T) {
+ 	fourth := loadWARPProfiles(ctx, hLogger(), "warp-d")
+ 	require.Nil(t, fourth.usable(kindWireGuard), "a retired device is not taken")
+ }
++
++func TestH_WARPIPv6PeerAddress(t *testing.T) {
++	config := hWARPConfig(t, `{"private_key":"x","peers":[{"endpoint":{"host":"[2001:db8::1]:2408"}}]}`)
++	address, port, err := warpPeerEndpoint(config, option.ServerOptions{})
++	require.NoError(t, err)
++	require.Equal(t, "2001:db8::1", address)
++	require.Equal(t, uint16(2408), port)
++	_, _, err = warpPeerEndpoint(nil, option.ServerOptions{})
++	require.Error(t, err)
++}
+diff --git a/protocol/warp/h_interface_addresses.go b/protocol/warp/h_interface_addresses.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..47b741a156964b8dd88cbfe31236a295a357be40
+--- /dev/null
++++ b/protocol/warp/h_interface_addresses.go
+@@ -0,0 +1,32 @@
++package warp
++
++import (
++	"net/netip"
++
++	E "github.com/sagernet/sing/common/exceptions"
++	"github.com/sagernet/sing/common/json/badoption"
++)
++
++// warpInterfaceAddresses accepts IPv4-only and IPv6-only WARP profiles,
++// rather than panicking when an optional address is missing.
++func warpInterfaceAddressPair(ipv4, ipv6 string) (badoption.Listable[netip.Prefix], error) {
++	var result badoption.Listable[netip.Prefix]
++	if ipv4 != "" {
++		addr, err := netip.ParseAddr(ipv4)
++		if err != nil || !addr.Is4() {
++			return nil, E.New("invalid WARP interface IPv4 address: ", ipv4)
++		}
++		result = append(result, netip.PrefixFrom(addr, 32))
++	}
++	if ipv6 != "" {
++		addr, err := netip.ParseAddr(ipv6)
++		if err != nil || !addr.Is6() || addr.Is4In6() {
++			return nil, E.New("invalid WARP interface IPv6 address: ", ipv6)
++		}
++		result = append(result, netip.PrefixFrom(addr, 128))
++	}
++	if len(result) == 0 {
++		return nil, E.New("WARP interface is missing IPv4 and IPv6 addresses")
++	}
++	return result, nil
++}
+diff --git a/protocol/warp/h_interface_addresses_test.go b/protocol/warp/h_interface_addresses_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8bdd0ac57f9d0d6b52250ccbd9c557ac98234780
+--- /dev/null
++++ b/protocol/warp/h_interface_addresses_test.go
+@@ -0,0 +1,29 @@
++package warp
++
++import (
++	"net/netip"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++func TestH_WARPInterfaceAddresses(t *testing.T) {
++	for _, tc := range []struct {
++		name, ipv4, ipv6 string
++		want             []netip.Prefix
++	}{
++		{"ipv4", "172.16.9.2", "", []netip.Prefix{netip.MustParsePrefix("172.16.9.2/32")}},
++		{"ipv6", "", "2606:4700::2", []netip.Prefix{netip.MustParsePrefix("2606:4700::2/128")}},
++		{"dual", "172.16.9.2", "2606:4700::2", []netip.Prefix{netip.MustParsePrefix("172.16.9.2/32"), netip.MustParsePrefix("2606:4700::2/128")}},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			addresses, err := warpInterfaceAddressPair(tc.ipv4, tc.ipv6)
++			require.NoError(t, err)
++			require.Equal(t, tc.want, []netip.Prefix(addresses))
++		})
++	}
++	for _, tc := range [][2]string{{"", ""}, {"not-ip", ""}, {"::1", ""}, {"", "127.0.0.1"}} {
++		_, err := warpInterfaceAddressPair(tc[0], tc[1])
++		require.Error(t, err)
++	}
++}
+diff --git a/protocol/warp/h_link_device.go b/protocol/warp/h_link_device.go
+index ebf01e1c5f7a46db0351135aee5f69905d2fc137..aa11e88fde2e6e2bbe0d67be370dcbbc12d986ac 100644
+--- a/protocol/warp/h_link_device.go
++++ b/protocol/warp/h_link_device.go
+@@ -7,6 +7,7 @@ import (
+ 	"encoding/hex"
+ 	"encoding/json"
+ 	"strings"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+@@ -97,3 +98,5 @@ func (w *WARPEndpoint) rememberLinkDeviceRefused() bool {
+ 	}
+ 	return true
+ }
++
++type masqueLinkState struct{ linkRefused atomic.Bool }
+diff --git a/protocol/warp/h_mode.go b/protocol/warp/h_mode.go
+index 0ec8a961fa9672f968252b42fd94ee0e838a0339..daeb5d7b6e7f12a45b8b99af9f52d3633b9613c7 100644
+--- a/protocol/warp/h_mode.go
++++ b/protocol/warp/h_mode.go
+@@ -191,6 +191,9 @@ func (w *WARPEndpoint) start() {
+ 		// this one registers, scans or connects. Side by side they dialed with one key.
+ 		<-previous.finished
+ 	}
++	if session.ctx.Err() != nil {
++		return
++	}
+ 	mode := w.mode
+ 	if mode == modeAuto {
+ 		w.selecting.Store(true)
+@@ -458,7 +461,7 @@ func (w *WARPEndpoint) chooseMode(session *warpSession) string {
+ 			return ""
+ 		}
+ 	}
+-	if masqueIncluded {
++	if w.masqueLinkState.included() {
+ 		if w.obtainProfile(done, kindMASQUE) == nil {
+ 			return ""
+ 		}
+@@ -485,7 +488,7 @@ func (w *WARPEndpoint) chooseMode(session *warpSession) string {
+ 	default:
+ 	}
+ 	modes := []string{modeWireGuard, modeAWG}
+-	if masqueIncluded {
++	if w.masqueLinkState.included() {
+ 		modes = append(modes, modeMASQUE)
+ 	}
+ 	var left []string
+@@ -575,7 +578,7 @@ func (w *WARPEndpoint) raceModes(done <-chan struct{}) tunnelRace {
+ 		peer := netip.AddrPortFrom(addr, port)
+ 		probes[mode] = func(ctx context.Context) (time.Duration, error) { return probe(ctx, peer) }
+ 	}
+-	if masqueIncluded {
++	if w.masqueLinkState.included() {
+ 		if profile := w.profiles.usable(kindMASQUE); profile != nil {
+ 			probes[modeMASQUE] = func(ctx context.Context) (time.Duration, error) { return w.probeMASQUE(ctx, profile) }
+ 		}

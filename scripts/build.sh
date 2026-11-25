@@ -25,7 +25,7 @@ fi
 name="vetroff-core-$GOOS-$GOARCH$extension"
 ldflags="$strip -checklinkname=0 -X github.com/hiddify/hiddify-core/v2/hcommon/constants.Version=$version"
 echo "Building $name with tags: $tags (CGO_ENABLED=$CGO_ENABLED)"
-go build -mod=mod -trimpath -buildvcs=false -tags "$tags" -ldflags "$ldflags" -o "$DIST/$name" ./cmd/main
+go build -mod=readonly -trimpath -buildvcs=false -tags "$tags" -ldflags "$ldflags" -o "$DIST/$name" ./cmd/main
 (cd "$DIST" && sha256sum "$name" > "$name.sha256")
 cat > "$DIST/$name.sources.txt" <<PROVENANCE
 Version: $version

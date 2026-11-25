@@ -1,0 +1,110 @@
+diff --git a/transport/v2ray/grpc.go b/transport/v2ray/grpc.go
+index 1b4250addf57a1920baee33428b8e44a9d176528..15ff442c4c8dbed23cd653588af200f597a21d17 100644
+--- a/transport/v2ray/grpc.go
++++ b/transport/v2ray/grpc.go
+@@ -16,14 +16,14 @@ import (
+ )
+ 
+ func NewGRPCServer(ctx context.Context, logger logger.ContextLogger, options option.V2RayGRPCOptions, tlsConfig tls.ServerConfig, handler adapter.V2RayServerTransportHandler) (adapter.V2RayServerTransport, error) {
+-	if options.ForceLite {
++	if options.ForceLite || options.MultiMode {
+ 		return v2raygrpclite.NewServer(ctx, logger, options, tlsConfig, handler)
+ 	}
+ 	return v2raygrpc.NewServer(ctx, logger, options, tlsConfig, handler)
+ }
+ 
+ func NewGRPCClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, options option.V2RayGRPCOptions, tlsConfig tls.Config) (adapter.V2RayClientTransport, error) {
+-	if options.ForceLite {
++	if options.ForceLite || options.MultiMode {
+ 		return v2raygrpclite.NewClient(ctx, dialer, serverAddr, options, tlsConfig), nil
+ 	}
+ 	return v2raygrpc.NewClient(ctx, dialer, serverAddr, options, tlsConfig)
+diff --git a/transport/v2ray/h_transport_test.go b/transport/v2ray/h_transport_test.go
+index 0bbf1b4096561a60632b4aeea36c7de53a110617..987e1de26f4eaa63ff6fc5d3d134b0f1189efe8e 100644
+--- a/transport/v2ray/h_transport_test.go
++++ b/transport/v2ray/h_transport_test.go
+@@ -62,10 +62,9 @@ func TestH_ClientTransportDispatchErrors(t *testing.T) {
+ 	_, err = NewClientTransport(context.Background(), N.SystemDialer, hServerAddr, option.V2RayTransportOptions{Type: C.V2RayTransportTypeQUIC}, nil)
+ 	require.ErrorIs(t, err, C.ErrTLSRequired)
+ 
+-	// an empty XHTTP mode is auto, as in Xray
+ 	transport, err = NewClientTransport(context.Background(), N.SystemDialer, hServerAddr, option.V2RayTransportOptions{Type: C.V2RayTransportTypeXHTTP}, nil)
+-	require.NoError(t, err)
+-	require.NotNil(t, transport)
++	require.Error(t, err)
++	require.Nil(t, transport)
+ }
+ 
+ func TestH_ServerTransportDispatch(t *testing.T) {
+@@ -128,3 +127,37 @@ func TestH_RawThroughDispatcher(t *testing.T) {
+ 	require.NoError(t, err)
+ 	require.Equal(t, "dispatch", string(reply))
+ }
++
++func TestH_GRPCMultiModeLiteRoundTrip(t *testing.T) {
++	options := option.V2RayTransportOptions{
++		Type: C.V2RayTransportTypeGRPC,
++		GRPCOptions: option.V2RayGRPCOptions{
++			ServiceName: "test-service",
++			MultiMode:   true,
++		},
++	}
++	server, err := NewServerTransport(context.Background(), logger.NOP(), options, nil, &hEchoHandler{})
++	require.NoError(t, err)
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	require.NoError(t, err)
++	go server.Serve(listener)
++	defer func() {
++		listener.Close()
++		server.Close()
++	}()
++	client, err := NewClientTransport(context.Background(), N.SystemDialer, M.SocksaddrFromNet(listener.Addr()), options, nil)
++	require.NoError(t, err)
++	defer client.Close()
++	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel()
++	conn, err := client.DialContext(ctx)
++	require.NoError(t, err)
++	defer conn.Close()
++	message := []byte("xray grpc TunMulti framing")
++	_, err = conn.Write(message)
++	require.NoError(t, err)
++	reply := make([]byte, len(message))
++	_, err = io.ReadFull(conn, reply)
++	require.NoError(t, err)
++	require.Equal(t, message, reply)
++}
+diff --git a/transport/v2ray/transport.go b/transport/v2ray/transport.go
+index 9a0d9303ddce6fbfb5723fc5d107b61cd8a5f7de..b9bfdb20ade197227fb22f32163c83b5f2e6e991 100644
+--- a/transport/v2ray/transport.go
++++ b/transport/v2ray/transport.go
+@@ -45,10 +45,10 @@ func NewServerTransport(ctx context.Context, logger logger.ContextLogger, option
+ 		return xhttp.NewServer(ctx, logger, options.XHTTPOptions, tlsConfig, handler)
+ 	case C.V2RayTransportTypeRaw:
+ 		return v2rayraw.NewServer(ctx, logger, options.RawOptions, tlsConfig, handler)
+-	case C.V2RayTransportTypeKCP: //H
+-		return NewKCPServer(ctx, logger, options.KCPOptions, tlsConfig, handler) //H
+-	case C.V2RayTransportTypeXDrive: //H
+-		return NewXDriveServer(ctx, logger, options.XDriveOptions, tlsConfig, handler) //H
++	case C.V2RayTransportTypeKCP: // H
++		return NewKCPServer(ctx, logger, options.KCPOptions, tlsConfig, handler) // H
++	case C.V2RayTransportTypeXDrive: // H
++		return NewXDriveServer(ctx, logger, options.XDriveOptions, tlsConfig, handler) // H
+ 	default:
+ 		return nil, E.New("unknown transport type: " + options.Type)
+ 	}
+@@ -77,10 +77,10 @@ func NewClientTransport(ctx context.Context, dialer N.Dialer, serverAddr M.Socks
+ 		return xhttp.NewClient(ctx, dialer, serverAddr, options.XHTTPOptions, tlsConfig)
+ 	case C.V2RayTransportTypeRaw:
+ 		return v2rayraw.NewClient(ctx, dialer, serverAddr, options.RawOptions, tlsConfig)
+-	case C.V2RayTransportTypeKCP: //H
+-		return NewKCPClient(ctx, dialer, serverAddr, options.KCPOptions, tlsConfig) //H
+-	case C.V2RayTransportTypeXDrive: //H
+-		return NewXDriveClient(ctx, dialer, serverAddr, options.XDriveOptions, tlsConfig) //H
++	case C.V2RayTransportTypeKCP: // H
++		return NewKCPClient(ctx, dialer, serverAddr, options.KCPOptions, tlsConfig) // H
++	case C.V2RayTransportTypeXDrive: // H
++		return NewXDriveClient(ctx, dialer, serverAddr, options.XDriveOptions, tlsConfig) // H
+ 	default:
+ 		return nil, E.New("unknown client transport type: " + options.Type)
+ 	}

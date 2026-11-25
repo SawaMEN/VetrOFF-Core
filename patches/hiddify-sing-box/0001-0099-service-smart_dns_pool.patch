@@ -1,0 +1,643 @@
+diff --git a/service/smart_dns_pool/h_service_test.go b/service/smart_dns_pool/h_service_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d03bad6cfcb3cfb91b9586976328b7996235cb4a
+--- /dev/null
++++ b/service/smart_dns_pool/h_service_test.go
+@@ -0,0 +1,151 @@
++package smart_dns_pool
++
++import (
++	"context"
++	"net/netip"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/json"
++	"github.com/sagernet/sing/common/json/badoption"
++
++	multidns "github.com/hiddify/hmrd_multi_resolver_dns"
++	"github.com/stretchr/testify/require"
++)
++
++func TestH_ProtocolFromString(t *testing.T) {
++	t.Parallel()
++	cases := map[string]multidns.Protocol{
++		"":      multidns.ProtoUDP,
++		"udp":   multidns.ProtoUDP,
++		"tcp":   multidns.ProtoTCP,
++		"tls":   multidns.ProtoDoT,
++		"dot":   multidns.ProtoDoT,
++		"https": multidns.ProtoDoH,
++		"doh":   multidns.ProtoDoH,
++	}
++	for input, expected := range cases {
++		proto, err := protocolFromString(input)
++		require.NoError(t, err, input)
++		require.Equal(t, expected, proto, input)
++	}
++	for _, input := range []string{"UDP", "quic", "h3", "doq", " udp"} {
++		_, err := protocolFromString(input)
++		require.ErrorContains(t, err, "unsupported upstream type", input)
++	}
++}
++
++func TestH_LBFromString(t *testing.T) {
++	t.Parallel()
++	require.Equal(t, multidns.LBWeighted, lbFromString("weighted"))
++	require.Equal(t, multidns.LBLowestLatency, lbFromString("lowest_latency"))
++	require.Equal(t, multidns.LBRoundRobin, lbFromString("roundrobin"))
++	require.Equal(t, multidns.LBRoundRobin, lbFromString(""))
++	require.Equal(t, multidns.LBRoundRobin, lbFromString("unknown"))
++}
++
++func TestH_NewServiceValidation(t *testing.T) {
++	t.Parallel()
++	logger := log.NewNOPFactory().NewLogger("test")
++	_, err := NewService(context.Background(), logger, "t", option.SmartDNSPoolServiceOptions{
++		ListenPort: 19000,
++		Upstreams: []option.SmartDNSPoolUpstreamOptions{
++			{Type: "udp", Address: "127.0.0.1:53"},
++			{Type: "tcp"},
++		},
++	})
++	require.ErrorContains(t, err, "upstream #1 missing address")
++
++	_, err = NewService(context.Background(), logger, "t", option.SmartDNSPoolServiceOptions{
++		ListenPort: 19000,
++		Upstreams: []option.SmartDNSPoolUpstreamOptions{
++			{Type: "udp", Address: "127.0.0.1:53"},
++			{Type: "quic", Address: "127.0.0.1:853"},
++		},
++	})
++	require.ErrorContains(t, err, "upstream #1")
++	require.ErrorContains(t, err, "unsupported upstream type")
++}
++
++func TestH_NewServiceListenAddress(t *testing.T) {
++	t.Parallel()
++	logger := log.NewNOPFactory().NewLogger("test")
++	upstreams := []option.SmartDNSPoolUpstreamOptions{{Address: "127.0.0.1:53"}}
++
++	instance, err := NewService(context.Background(), logger, "pool", option.SmartDNSPoolServiceOptions{
++		ListenPort: 19876,
++		Upstreams:  upstreams,
++	})
++	require.NoError(t, err)
++	service := instance.(*Service)
++	require.Equal(t, "127.0.0.1:19876", service.listenAddr)
++	require.Equal(t, C.TypeSmartDNSPool, service.Type())
++	require.Equal(t, "pool", service.Tag())
++
++	listen := badoption.Addr(netip.MustParseAddr("::1"))
++	instance, err = NewService(context.Background(), logger, "pool", option.SmartDNSPoolServiceOptions{
++		Listen: &listen, ListenPort: 5353,
++		Upstreams: upstreams,
++	})
++	require.NoError(t, err)
++	require.Equal(t, "[::1]:5353", instance.(*Service).listenAddr)
++
++	listen4 := badoption.Addr(netip.MustParseAddr("0.0.0.0"))
++	instance, err = NewService(context.Background(), logger, "pool", option.SmartDNSPoolServiceOptions{
++		Listen: &listen4, ListenPort: 53,
++		Upstreams: upstreams,
++	})
++	require.NoError(t, err)
++	require.Equal(t, "0.0.0.0:53", instance.(*Service).listenAddr)
++}
++
++func TestH_ServiceStartOtherStagesAndCloseIdle(t *testing.T) {
++	t.Parallel()
++	instance, err := NewService(context.Background(), log.NewNOPFactory().NewLogger("test"), "pool", option.SmartDNSPoolServiceOptions{
++		ListenPort: 1,
++		Upstreams:  []option.SmartDNSPoolUpstreamOptions{{Address: "127.0.0.1:53"}},
++	})
++	require.NoError(t, err)
++	service := instance.(*Service)
++	for _, stage := range []adapter.StartStage{adapter.StartStateInitialize, adapter.StartStatePostStart, adapter.StartStateStarted} {
++		require.NoError(t, service.Start(stage, nil))
++	}
++	require.Nil(t, service.mgr)
++	require.Nil(t, service.server)
++	require.NoError(t, service.Close())
++	require.NoError(t, service.Close())
++}
++
++func TestH_SmartDNSPoolOptionsJSON(t *testing.T) {
++	t.Parallel()
++	var options option.SmartDNSPoolServiceOptions
++	err := json.Unmarshal([]byte(`{
++		"listen": "127.0.0.1",
++		"listen_port": 19876,
++		"upstreams": [
++			{"type": "udp", "address": "1.1.1.1:53", "weight": 3, "name": "cf"},
++			{"type": "https", "address": "https://dns.example/dns-query"}
++		],
++		"load_balance": "weighted",
++		"deadline": "3s",
++		"per_attempt": "500ms",
++		"probe_interval": "10s",
++		"down_after": 4
++	}`), &options)
++	require.NoError(t, err)
++	require.EqualValues(t, 19876, options.ListenPort)
++	require.NotNil(t, options.Listen)
++	require.Equal(t, "127.0.0.1", options.Listen.Build(netip.Addr{}).String())
++	require.Len(t, options.Upstreams, 2)
++	require.Equal(t, option.SmartDNSPoolUpstreamOptions{Type: "udp", Address: "1.1.1.1:53", Weight: 3, Name: "cf"}, options.Upstreams[0])
++	require.Equal(t, "https", options.Upstreams[1].Type)
++	require.Equal(t, "weighted", options.LoadBalance)
++	require.Equal(t, 3*time.Second, time.Duration(options.Deadline))
++	require.Equal(t, 500*time.Millisecond, time.Duration(options.PerAttempt))
++	require.Equal(t, 10*time.Second, time.Duration(options.ProbeInterval))
++	require.Equal(t, 4, options.DownAfter)
++}
+diff --git a/service/smart_dns_pool/service.go b/service/smart_dns_pool/service.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..762781565cb6284b3ec01d89239ac7c541780797
+--- /dev/null
++++ b/service/smart_dns_pool/service.go
+@@ -0,0 +1,213 @@
++// Package smart_dns_pool provides a sing-box service that runs a local DNS
++// server fronting many recursive upstream resolvers, using
++// github.com/hiddify/hmrd_multi_resolver_dns under the hood.
++//
++// Why: dnstt's tunnel sends DNS queries to a single recursive resolver
++// (e.g. `8.8.8.8`). When that resolver gets rate-limited or blocked the
++// tunnel stalls. Configure this service with the recursive resolvers you
++// want to distribute load across, then point dnstt's `resolvers` at the
++// service's listen address (e.g. `udp://127.0.0.1:19876`). dnstt sees a
++// normal local resolver; the service transparently fans queries out to
++// many real upstreams with deadline-aware failover, AIMD rate-limit
++// throttling, and recovery probing.
++package smart_dns_pool
++
++import (
++	"context"
++	"fmt"
++	"net"
++	"net/netip"
++	"strconv"
++	"sync"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	boxService "github.com/sagernet/sing-box/adapter/service"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	E "github.com/sagernet/sing/common/exceptions"
++
++	multidns "github.com/hiddify/hmrd_multi_resolver_dns"
++)
++
++// RegisterService hooks the smart_dns_pool service type into the registry.
++func RegisterService(registry *boxService.Registry) {
++	boxService.Register[option.SmartDNSPoolServiceOptions](registry, C.TypeSmartDNSPool, NewService)
++}
++
++var _ adapter.Service = (*Service)(nil)
++
++type Service struct {
++	boxService.Adapter
++	logger log.ContextLogger
++	opts   option.SmartDNSPoolServiceOptions
++
++	listenAddr string
++
++	mu       sync.Mutex
++	mgr      *multidns.Manager
++	server   *multidns.Server
++	serveErr chan error
++}
++
++// NewService constructs a smart_dns_pool service. It validates the options
++// up-front so config errors surface at parse time, but defers any network
++// activity (binding the listener, building upstream transports) to Start.
++func NewService(ctx context.Context, logger log.ContextLogger, tag string, opts option.SmartDNSPoolServiceOptions) (adapter.Service, error) {
++	if len(opts.Upstreams) == 0 {
++		return nil, E.New("smart_dns_pool: at least one upstream is required")
++	}
++
++	host := "127.0.0.1"
++	if opts.Listen != nil {
++		host = opts.Listen.Build(netip.AddrFrom4([4]byte{127, 0, 0, 1})).String()
++	}
++	port := opts.ListenPort
++	if port == 0 {
++		return nil, E.New("smart_dns_pool: listen_port is required (e.g. 19876)")
++	}
++
++	for i, up := range opts.Upstreams {
++		if up.Address == "" {
++			return nil, E.New("smart_dns_pool: upstream #", i, " missing address")
++		}
++		if _, err := protocolFromString(up.Type); err != nil {
++			return nil, E.Cause(err, "smart_dns_pool: upstream #", i)
++		}
++	}
++
++	return &Service{
++		Adapter:    boxService.NewAdapter(C.TypeSmartDNSPool, tag),
++		logger:     logger,
++		opts:       opts,
++		listenAddr: net.JoinHostPort(host, strconv.Itoa(int(port))),
++	}, nil
++}
++
++// Start brings up the smart pool and binds the local DNS listener. It runs
++// at the StartStart stage so dnstt outbounds (which start later) find a
++// listener already accepting queries on their first request.
++func (s *Service) Start(stage adapter.StartStage, scope *adapter.Scope) error {
++	if stage != adapter.StartStateStart {
++		return nil
++	}
++
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	mgr := multidns.New(multidns.Options{
++		DefaultDeadline:        time.Duration(s.opts.Deadline),
++		DefaultResolverTimeout: time.Duration(s.opts.PerAttempt),
++		ProbeInterval:          time.Duration(s.opts.ProbeInterval),
++		DownAfterFailures:      s.opts.DownAfter,
++		LoadBalance:            lbFromString(s.opts.LoadBalance),
++		Logger:                 newLoggerAdapter(s.logger, s.Tag()),
++	})
++
++	for i, up := range s.opts.Upstreams {
++		proto, _ := protocolFromString(up.Type) // already validated in NewService
++		cfg := multidns.ResolverConfig{
++			Name:     up.Name,
++			Protocol: proto,
++			Address:  up.Address,
++			Weight:   up.Weight,
++		}
++		if _, err := mgr.AddResolver(cfg); err != nil {
++			_ = mgr.Close()
++			return E.Cause(err, "smart_dns_pool: register upstream #", i, " (", up.Type, " ", up.Address, ")")
++		}
++	}
++
++	srv := mgr.NewServer(s.listenAddr) // UDP+TCP by default
++	s.serveErr = make(chan error, 1)
++	go func() {
++		if err := srv.ListenAndServe(); err != nil {
++			s.serveErr <- err
++			s.logger.Error("smart_dns_pool: listener exited: ", err)
++		}
++	}()
++
++	s.mgr = mgr
++	s.server = srv
++	scope.Add(s.Close)
++	s.logger.Info("smart_dns_pool: listening on ", s.listenAddr, " (udp+tcp), ", len(s.opts.Upstreams), " upstream(s)")
++	return nil
++}
++
++func (s *Service) Close() error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	var firstErr error
++	if s.server != nil {
++		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++		if err := s.server.Shutdown(ctx); err != nil {
++			firstErr = err
++		}
++		cancel()
++		s.server = nil
++	}
++	if s.mgr != nil {
++		if err := s.mgr.Close(); err != nil && firstErr == nil {
++			firstErr = err
++		}
++		s.mgr = nil
++	}
++	return firstErr
++}
++
++func protocolFromString(s string) (multidns.Protocol, error) {
++	switch s {
++	case "udp", "":
++		return multidns.ProtoUDP, nil
++	case "tcp":
++		return multidns.ProtoTCP, nil
++	case "tls", "dot":
++		return multidns.ProtoDoT, nil
++	case "https", "doh":
++		return multidns.ProtoDoH, nil
++	default:
++		return "", fmt.Errorf("unsupported upstream type %q (want udp|tcp|tls|https)", s)
++	}
++}
++
++func lbFromString(s string) multidns.LBStrategy {
++	switch s {
++	case "weighted":
++		return multidns.LBWeighted
++	case "lowest_latency":
++		return multidns.LBLowestLatency
++	default:
++		return multidns.LBRoundRobin
++	}
++}
++
++// loggerAdapter bridges sing-box's ContextLogger to multidns.Logger
++// (printf-style). The tag prefix lets operators tell which service
++// instance produced a line when multiple smart_dns_pool services are
++// configured.
++type loggerAdapter struct {
++	logger log.ContextLogger
++	tag    string
++}
++
++func newLoggerAdapter(logger log.ContextLogger, tag string) *loggerAdapter {
++	return &loggerAdapter{logger: logger, tag: tag}
++}
++
++func (l *loggerAdapter) Debugf(format string, args ...any) {
++	l.logger.Debug(l.tag, ": ", fmt.Sprintf(format, args...))
++}
++
++func (l *loggerAdapter) Infof(format string, args ...any) {
++	l.logger.Info(l.tag, ": ", fmt.Sprintf(format, args...))
++}
++
++func (l *loggerAdapter) Warnf(format string, args ...any) {
++	l.logger.Warn(l.tag, ": ", fmt.Sprintf(format, args...))
++}
++
++func (l *loggerAdapter) Errorf(format string, args ...any) {
++	l.logger.Error(l.tag, ": ", fmt.Sprintf(format, args...))
++}
+diff --git a/service/smart_dns_pool/service_test.go b/service/smart_dns_pool/service_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..61661738872f957dee893048b803eda6815521f5
+--- /dev/null
++++ b/service/smart_dns_pool/service_test.go
+@@ -0,0 +1,261 @@
++package smart_dns_pool
++
++import (
++	"context"
++	"net"
++	"strconv"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/json/badoption"
++
++	"github.com/miekg/dns"
++)
++
++// startUDPUpstream spins up a tiny in-process miekg/dns UDP server that
++// answers any A query with answerIP, simulating a recursive resolver.
++func startUDPUpstream(t *testing.T, answerIP string) (string, func()) {
++	t.Helper()
++	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatalf("listen udp: %v", err)
++	}
++	srv := &dns.Server{
++		PacketConn: pc,
++		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, q *dns.Msg) {
++			r := new(dns.Msg)
++			r.SetReply(q)
++			r.Rcode = dns.RcodeSuccess
++			if len(q.Question) > 0 && q.Question[0].Qtype == dns.TypeA {
++				r.Answer = append(r.Answer, &dns.A{
++					Hdr: dns.RR_Header{
++						Name: q.Question[0].Name, Rrtype: dns.TypeA,
++						Class: dns.ClassINET, Ttl: 30,
++					},
++					A: net.ParseIP(answerIP).To4(),
++				})
++			}
++			_ = w.WriteMsg(r)
++		}),
++	}
++	go func() { _ = srv.ActivateAndServe() }()
++	return pc.LocalAddr().String(), func() { _ = srv.Shutdown() }
++}
++
++// freePort returns a port number guaranteed to be free at the moment of
++// the call (the listener is closed before returning, so technically there's
++// a TOCTOU window, but it's fine for tests).
++func freePort(t *testing.T) uint16 {
++	t.Helper()
++	l, err := net.ListenPacket("udp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatalf("freePort: %v", err)
++	}
++	port := l.LocalAddr().(*net.UDPAddr).Port
++	l.Close()
++	return uint16(port)
++}
++
++// digOnce sends a single A query for `name` to addr (host:port) over UDP and
++// returns the resolved IP string, or fatals.
++func digOnce(t *testing.T, addr, name string) string {
++	t.Helper()
++	c := &dns.Client{Net: "udp", Timeout: 1500 * time.Millisecond}
++	q := new(dns.Msg)
++	q.SetQuestion(dns.Fqdn(name), dns.TypeA)
++	resp, _, err := c.Exchange(q, addr)
++	if err != nil {
++		t.Fatalf("exchange: %v", err)
++	}
++	if resp == nil || resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 1 {
++		t.Fatalf("unexpected resp: %#v", resp)
++	}
++	a, ok := resp.Answer[0].(*dns.A)
++	if !ok || a.A == nil {
++		t.Fatalf("not an A record: %#v", resp.Answer[0])
++	}
++	return a.A.String()
++}
++
++// TestSmartDNSPool_EndToEnd builds the service from a real
++// SmartDNSPoolServiceOptions, starts it, sends an A query to its bound
++// address, and verifies the answer routed through one of the configured
++// upstreams. This is the integration shape dnstt would use: resolver
++// address = 127.0.0.1:<port> instead of 8.8.8.8:53.
++func TestSmartDNSPool_EndToEnd(t *testing.T) {
++	upA, stopA := startUDPUpstream(t, "192.0.2.51")
++	defer stopA()
++	upB, stopB := startUDPUpstream(t, "192.0.2.52")
++	defer stopB()
++
++	port := freePort(t)
++	listenAddr := badoption.Addr{}
++	if err := listenAddr.UnmarshalJSON([]byte(`"127.0.0.1"`)); err != nil {
++		t.Fatalf("parse listen addr: %v", err)
++	}
++
++	opts := option.SmartDNSPoolServiceOptions{
++		Listen:     &listenAddr,
++		ListenPort: port,
++		Upstreams: []option.SmartDNSPoolUpstreamOptions{
++			{Type: "udp", Address: upA},
++			{Type: "udp", Address: upB},
++		},
++		LoadBalance: "roundrobin",
++	}
++
++	svc, err := NewService(context.Background(), log.NewNOPFactory().NewLogger("smart-dns-pool-test"), "smart-dns-pool", opts)
++	if err != nil {
++		t.Fatalf("NewService: %v", err)
++	}
++	scope := adapter.NewScope(context.Background(), log.NewNOPFactory().NewLogger("smart-dns-pool-test"))
++	defer scope.Close()
++	if err := svc.Start(adapter.StartStateStart, scope); err != nil {
++		t.Fatalf("Start: %v", err)
++	}
++	defer svc.(*Service).Close()
++
++	addr := "127.0.0.1:" + strconv.Itoa(int(port))
++
++	// Wait for the listener to bind.
++	deadline := time.Now().Add(time.Second)
++	for time.Now().Before(deadline) {
++		c := &dns.Client{Net: "udp", Timeout: 100 * time.Millisecond}
++		q := new(dns.Msg)
++		q.SetQuestion("ready.test.", dns.TypeA)
++		if _, _, err := c.Exchange(q, addr); err == nil {
++			break
++		}
++		time.Sleep(20 * time.Millisecond)
++	}
++
++	// Run several queries — round-robin should distribute across both upstreams.
++	answers := map[string]int{}
++	for range 10 {
++		ip := digOnce(t, addr, "smart.test.")
++		answers[ip]++
++	}
++	if answers["192.0.2.51"] == 0 || answers["192.0.2.52"] == 0 {
++		t.Fatalf("round-robin didn't reach both upstreams: %#v", answers)
++	}
++}
++
++// TestSmartDNSPool_FailoverWithinDeadline configures one dropping upstream
++// and one healthy one, and verifies queries through the local listener
++// still get answered (the smart pool's failover keeps the tunnel alive
++// even when one resolver is dead — the headline use case for dnstt).
++func TestSmartDNSPool_FailoverWithinDeadline(t *testing.T) {
++	// Dropping upstream: a UDP socket that just drops packets.
++	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatalf("listen drop: %v", err)
++	}
++	defer pc.Close()
++	dropAddr := pc.LocalAddr().String()
++
++	good, stopGood := startUDPUpstream(t, "192.0.2.60")
++	defer stopGood()
++
++	port := freePort(t)
++	listenAddr := badoption.Addr{}
++	if err := listenAddr.UnmarshalJSON([]byte(`"127.0.0.1"`)); err != nil {
++		t.Fatalf("parse listen addr: %v", err)
++	}
++
++	opts := option.SmartDNSPoolServiceOptions{
++		Listen: &listenAddr, ListenPort: port,
++		Upstreams: []option.SmartDNSPoolUpstreamOptions{
++			{Type: "udp", Address: dropAddr},
++			{Type: "udp", Address: good},
++		},
++		Deadline:   badoption.Duration(2 * time.Second),
++		PerAttempt: badoption.Duration(150 * time.Millisecond),
++	}
++
++	svc, err := NewService(context.Background(), log.NewNOPFactory().NewLogger("smart-dns-pool-test"), "smart-dns-pool", opts)
++	if err != nil {
++		t.Fatalf("NewService: %v", err)
++	}
++	scope := adapter.NewScope(context.Background(), log.NewNOPFactory().NewLogger("smart-dns-pool-test"))
++	defer scope.Close()
++	if err := svc.Start(adapter.StartStateStart, scope); err != nil {
++		t.Fatalf("Start: %v", err)
++	}
++	defer svc.(*Service).Close()
++
++	addr := "127.0.0.1:" + strconv.Itoa(int(port))
++	// Warmup until the listener accepts.
++	deadline := time.Now().Add(time.Second)
++	for time.Now().Before(deadline) {
++		c := &dns.Client{Net: "udp", Timeout: 100 * time.Millisecond}
++		q := new(dns.Msg)
++		q.SetQuestion("ready.test.", dns.TypeA)
++		if _, _, err := c.Exchange(q, addr); err == nil {
++			break
++		}
++		time.Sleep(20 * time.Millisecond)
++	}
++
++	saw := false
++	for range 6 {
++		ip := digOnce(t, addr, "fail.test.")
++		if ip == "192.0.2.60" {
++			saw = true
++		}
++	}
++	if !saw {
++		t.Fatalf("no successful answers — failover broken")
++	}
++}
++
++// TestSmartDNSPool_RejectsBadConfig verifies validation at NewService time.
++func TestSmartDNSPool_RejectsBadConfig(t *testing.T) {
++	cases := []struct {
++		name    string
++		opts    option.SmartDNSPoolServiceOptions
++		wantErr string
++		wantOK  bool
++	}{
++		{
++			name: "no upstreams",
++			opts: option.SmartDNSPoolServiceOptions{
++				ListenOptions: option.ListenOptions{ListenPort: 19000},
++			},
++			wantErr: "at least one upstream is required",
++		},
++		{
++			name: "missing port",
++			opts: option.SmartDNSPoolServiceOptions{
++				Upstreams: []option.SmartDNSPoolUpstreamOptions{
++					{Type: "udp", Address: "1.1.1.1:53"},
++				},
++			},
++			wantErr: "listen_port is required",
++		},
++		{
++			name: "unsupported type",
++			opts: option.SmartDNSPoolServiceOptions{
++				ListenOptions: option.ListenOptions{ListenPort: 19000},
++				Upstreams: []option.SmartDNSPoolUpstreamOptions{
++					{Type: "h3", Address: "1.1.1.1:443"},
++				},
++			},
++			wantErr: "unsupported upstream type",
++		},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			_, err := NewService(context.Background(), log.NewNOPFactory().NewLogger("test"), "t", tc.opts)
++			if err == nil {
++				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
++			}
++			if !strings.Contains(err.Error(), tc.wantErr) {
++				t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
++			}
++		})
++	}
++}

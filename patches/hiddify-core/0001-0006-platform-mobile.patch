@@ -1,0 +1,385 @@
+diff --git a/platform/mobile/mobile.go b/platform/mobile/mobile.go
+index 2d3c89fd3b502b713479f94e6516e4aca0a04cf4..54b0407f08fc16ae49ef542ecc0690b4ce4aa1a1 100644
+--- a/platform/mobile/mobile.go
++++ b/platform/mobile/mobile.go
+@@ -18,9 +18,9 @@ type SetupOptions struct {
+ 	Debug           bool
+ 	Mode            int
+ 	FixAndroidStack bool
+-	// MemoryLimit is what the core may use on this device, in bytes; 0 for none of its own.
++	// MemoryLimit is the platform-provided memory budget in bytes.
+ 	MemoryLimit int64
+-	// LowMemory is set on a device short of memory (a low-RAM TV): relaying trades speed for memory.
++	// LowMemory requests the low-memory relay path.
+ 	LowMemory bool
+ }
+ 
+@@ -36,7 +36,7 @@ func Setup(opt *SetupOptions, platformInterface libbox.PlatformInterface) error
+ 		Mode:              hcore.SetupMode(opt.Mode),
+ 		Secret:            opt.Secret,
+ 		FixAndroidStack:   opt.FixAndroidStack,
+-	}, platformInterface)
++	}, platformInterface, opt.MemoryLimit)
+ 
+ 	// return hcore.Start(17078)
+ }
+@@ -88,8 +88,8 @@ func AddGrpcClientPublicKey(clientPublicKey []byte) error {
+ 	return hcore.AddGrpcClientPublicKey(clientPublicKey)
+ }
+ 
+-func Close(mode int) {
+-	hcore.Close(hcore.SetupMode(mode))
++func Close(mode int) error {
++	return hcore.Close(hcore.SetupMode(mode))
+ }
+ 
+ func Test() string {
+@@ -103,3 +103,10 @@ func Pause() {
+ func Wake() {
+ 	hcore.Wake()
+ }
++
++// ApplyDevicePrivacy uses the current native preferences for system-started services.
++func ApplyDevicePrivacy(fullTunnel, hideProxy, hideClash, disableSystemProxy, encryptedDNS bool) {
++	hcore.ApplyDevicePrivacy(fullTunnel, hideProxy, hideClash, disableSystemProxy, encryptedDNS)
++}
++
++func ApplyRegionalPrivacy(policyJSON string) error { return hcore.ApplyRegionalPrivacy(policyJSON) }
+diff --git a/platform/mobile/packet_tunnel.go b/platform/mobile/packet_tunnel.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef56e86a6addd5b81c06430bdb21673092a0ae22
+--- /dev/null
++++ b/platform/mobile/packet_tunnel.go
+@@ -0,0 +1,67 @@
++//go:build darwin
++
++package mobile
++
++import (
++	"encoding/json"
++	"errors"
++
++	"github.com/sagernet/sing-box/experimental/libbox"
++	"strings"
++
++	"github.com/hiddify/hiddify-core/v2/config"
++	"github.com/hiddify/hiddify-core/v2/hcore"
++)
++
++// packetTunnelSettings builds a private, macOS-only configuration profile.
++// This intentionally does not alter Android's default profile preferences.
++func packetTunnelSettings() *config.HiddifyOptions {
++	settings := config.DefaultHiddifyOptions()
++	settings.EnableTun = true
++	settings.FullTunnel = true
++	settings.StrictRoute = true
++	settings.DisableLocalProxy = true
++	settings.EnableClashApi = false
++	settings.SetSystemProxy = false
++	settings.AllowConnectionFromLAN = false
++	settings.WifiVPNSharing = false
++	settings.MixedPort = 0
++	settings.TProxyPort = 0
++	settings.RedirectPort = 0
++	settings.DirectPort = 0
++	settings.MTU = 1500
++	settings.LogFile = "/dev/null"
++	settings.EnableFullConfig = false
++	// The built-in remote and direct resolvers must not use plaintext UDP/53.
++	// Upstream DoH traffic is still subject to actual-network leak testing.
++	settings.RemoteDnsAddress = "https://1.1.1.1/dns-query"
++	settings.DirectDnsAddress = "https://1.1.1.1/dns-query"
++	return settings
++}
++
++// StartPacketTunnel enables a real sing-box TUN *only* for callers explicitly
++// using the macOS Network Extension. Ordinary mobile.Start remains untouched.
++//
++// It accepts a JSON proxy/outbound profile; the fork's own ParseBuildConfig
++// generates the full TUN, routing, DNS and outbound policy. It does not
++// launch a second RPC server or a local proxy listener.
++func StartPacketTunnel(configContent string) error {
++	if strings.TrimSpace(configContent) == "" || len(configContent) > config.MaxConfigBytes {
++		return errors.New("packet tunnel profile must be non-empty and at most 8 MiB")
++	}
++	bytes, err := json.Marshal(packetTunnelSettings())
++	if err != nil {
++		return err
++	}
++	_, err = hcore.ChangeHiddifySettings(
++		&hcore.ChangeHiddifySettingsRequest{HiddifySettingsJson: string(bytes)}, false,
++	)
++	if err != nil {
++		return err
++	}
++	_, err = hcore.StartServiceWithoutConfigPersistence(
++		libbox.BaseContext(nil),
++		&hcore.StartRequest{ConfigContent: configContent},
++	)
++	return err
++}
+diff --git a/platform/mobile/packet_tunnel_test.go b/platform/mobile/packet_tunnel_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9fc6b2b33302e19c4286778a7151e13c696767d5
+--- /dev/null
++++ b/platform/mobile/packet_tunnel_test.go
+@@ -0,0 +1,46 @@
++//go:build darwin
++
++package mobile
++
++import (
++	"strings"
++	"testing"
++
++	"github.com/hiddify/hiddify-core/v2/config"
++)
++
++func TestPacketTunnelSettingsDoNotExposeProxyListeners(t *testing.T) {
++	s := packetTunnelSettings()
++	if !s.EnableTun || !s.FullTunnel || !s.StrictRoute {
++		t.Fatal("a macOS packet tunnel must always create a strict full-route TUN")
++	}
++	if !s.DisableLocalProxy || s.EnableClashApi || s.SetSystemProxy || s.AllowConnectionFromLAN {
++		t.Fatal("packet tunnel must not expose local proxy/API servers")
++	}
++	if s.MixedPort != 0 || s.DirectPort != 0 || s.TProxyPort != 0 || s.RedirectPort != 0 {
++		t.Fatal("local listener ports must be disabled")
++	}
++	if s.LogFile != "/dev/null" {
++		t.Fatal("macOS Packet Tunnel must not persist proxy logs")
++	}
++	if s.EnableFullConfig || s.MTU != 1500 {
++		t.Fatal("packet tunnel must use a bounded MTU and its own managed routing")
++	}
++	if !strings.HasPrefix(s.RemoteDnsAddress, "https://") ||
++		!strings.HasPrefix(s.DirectDnsAddress, "https://") {
++		t.Fatal("packet tunnel DNS bootstrap must use HTTPS")
++	}
++
++	defaults := config.DefaultHiddifyOptions()
++	if defaults.EnableTun || defaults.FullTunnel {
++		t.Fatal("macOS packet mode must not mutate global default settings")
++	}
++}
++
++func TestPacketTunnelRejectsEmptyOrHugeSourceBeforeSetup(t *testing.T) {
++	for _, input := range []string{"", "  \n ", strings.Repeat("x", config.MaxConfigBytes+1)} {
++		if err := StartPacketTunnel(input); err == nil {
++			t.Fatal("expected invalid packet tunnel source rejection")
++		}
++	}
++}
+diff --git a/platform/mobile/profile_validation.go b/platform/mobile/profile_validation.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..477631c8558537364461e3477f093657d6abb603
+--- /dev/null
++++ b/platform/mobile/profile_validation.go
+@@ -0,0 +1,96 @@
++package mobile
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/hiddify/hiddify-core/v2/config"
++	"github.com/sagernet/sing-box/experimental/libbox"
++)
++
++type profileValidationSession struct {
++	ctx    context.Context
++	cancel context.CancelFunc
++}
++
++var profileValidations = struct {
++	sync.Mutex
++	sessions map[string]*profileValidationSession
++}{sessions: make(map[string]*profileValidationSession)}
++
++// BeginProfileValidation registers cancellation before entering the blocking native parser.
++// It does not start a service, change global settings or open a local RPC listener.
++func BeginProfileValidation(id string) error {
++	if len(id) == 0 || len(id) > 64 {
++		return errors.New("invalid profile validation ID")
++	}
++	profileValidations.Lock()
++	defer profileValidations.Unlock()
++	if _, exists := profileValidations.sessions[id]; exists {
++		return errors.New("profile validation already registered")
++	}
++	if len(profileValidations.sessions) >= 4 {
++		return errors.New("too many profile validations")
++	}
++	ctx, cancel := context.WithTimeout(libbox.BaseContext(nil), 45*time.Second)
++	profileValidations.sessions[id] = &profileValidationSession{ctx: ctx, cancel: cancel}
++	return nil
++}
++
++// CancelProfileValidation only interrupts the import owning this ID, never the running VPN.
++func CancelProfileValidation(id string) {
++	profileValidations.Lock()
++	session := profileValidations.sessions[id]
++	profileValidations.Unlock()
++	if session != nil {
++		session.cancel()
++	}
++}
++
++// FinishProfileValidation is required even when cancellation wins before ValidateProfile starts.
++func FinishProfileValidation(id string) {
++	profileValidations.Lock()
++	session := profileValidations.sessions[id]
++	delete(profileValidations.sessions, id)
++	profileValidations.Unlock()
++	if session != nil {
++		session.cancel()
++	}
++}
++
++// ValidateProfile uses the same parser and sing-box validation as hcore.Parse, with private
++// options instead of settingsSnapshot(). It neither persists source nor applies overrides.
++func ValidateProfile(id, content, settingsJSON string) (err error) {
++	defer config.DeferPanicToError("profile validation", func(recovered error) { err = recovered })
++	profileValidations.Lock()
++	session := profileValidations.sessions[id]
++	profileValidations.Unlock()
++	if session == nil {
++		return errors.New("profile validation not registered")
++	}
++	if err := session.ctx.Err(); err != nil {
++		return err
++	}
++	if strings.TrimSpace(content) == "" || len(content) > config.MaxConfigBytes {
++		return errors.New("profile configuration is empty or exceeds 8 MiB")
++	}
++	if len(settingsJSON) > config.MaxConfigBytes {
++		return errors.New("profile settings exceed 8 MiB")
++	}
++	options := config.DefaultHiddifyOptions()
++	if settingsJSON != "" {
++		if err := json.Unmarshal([]byte(settingsJSON), options); err != nil {
++			return err
++		}
++	}
++	// Validate subscription shapes normally; only the explicit user option selects raw mode.
++	_, err = config.ParseConfig(session.ctx, &config.ReadOptions{Content: content}, false, options, false)
++	if cancelled := session.ctx.Err(); cancelled != nil {
++		return cancelled
++	}
++	return err
++}
+diff --git a/platform/mobile/profile_validation_test.go b/platform/mobile/profile_validation_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..cae1fd04888db3e8e6efb898948d7d5f08acbc70
+--- /dev/null
++++ b/platform/mobile/profile_validation_test.go
+@@ -0,0 +1,105 @@
++package mobile
++
++import (
++	"context"
++	"errors"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/hiddify/hiddify-core/v2/config"
++)
++
++func registerValidation(t *testing.T, id string) {
++	t.Helper()
++	if err := BeginProfileValidation(id); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { FinishProfileValidation(id) })
++}
++
++func TestValidateProfileAcceptedShapes(t *testing.T) {
++	registerValidation(t, "valid-shapes")
++	for _, content := range []string{
++		`{"type":"direct","tag":"direct"}`,
++		`[{"type":"direct","tag":"direct"}]`,
++		`{"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"direct"}}`,
++	} {
++		if err := ValidateProfile("valid-shapes", content, `{}`); err != nil {
++			t.Fatalf("%s: %v", content, err)
++		}
++	}
++}
++
++func TestValidateProfileRespectsExplicitFullConfigMode(t *testing.T) {
++	registerValidation(t, "full-mode")
++	if err := ValidateProfile("full-mode", `[{"type":"direct","tag":"direct"}]`, `{"enable-full-config":true}`); err == nil {
++		t.Fatal("full-config mode accepted a configuration array")
++	}
++}
++
++func TestValidateProfileRejectsInvalidSourceAndSettings(t *testing.T) {
++	registerValidation(t, "invalid-source")
++	for _, content := range []string{"", "not a configuration", `{"type":"direct"} {"type":"direct"}`, strings.Repeat("x", config.MaxConfigBytes+1)} {
++		if err := ValidateProfile("invalid-source", content, `{}`); err == nil {
++			t.Fatal("accepted invalid profile")
++		}
++	}
++	if err := ValidateProfile("invalid-source", `{"type":"direct"}`, `{"use-xray-core-when-possible":"invalid"}`); err == nil {
++		t.Fatal("accepted invalid option type")
++	}
++}
++
++func TestValidationCancellationBeforeNativeEntryAndIsolation(t *testing.T) {
++	registerValidation(t, "cancelled")
++	registerValidation(t, "independent")
++	CancelProfileValidation("cancelled")
++	if err := ValidateProfile("cancelled", `{"type":"direct"}`, `{}`); !errors.Is(err, context.Canceled) {
++		t.Fatalf("expected cancellation, got %v", err)
++	}
++	if err := ValidateProfile("independent", `{"type":"direct"}`, `{}`); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestValidationRegistrationAndCleanup(t *testing.T) {
++	if err := ValidateProfile("missing", `{"type":"direct"}`, `{}`); err == nil {
++		t.Fatal("accepted unregistered validation")
++	}
++	registerValidation(t, "cleanup")
++	if err := BeginProfileValidation("cleanup"); err == nil {
++		t.Fatal("accepted duplicate registration")
++	}
++	FinishProfileValidation("cleanup")
++	FinishProfileValidation("cleanup")
++	if err := BeginProfileValidation("cleanup"); err != nil {
++		t.Fatal(err)
++	}
++	if err := BeginProfileValidation(""); err == nil {
++		t.Fatal("accepted empty ID")
++	}
++}
++
++func TestValidationSessionLimit(t *testing.T) {
++	for _, id := range []string{"limit-one", "limit-two", "limit-three", "limit-four"} {
++		registerValidation(t, id)
++	}
++	if err := BeginProfileValidation("limit-five"); err == nil {
++		FinishProfileValidation("limit-five")
++		t.Fatal("accepted validation beyond the session limit")
++	}
++	FinishProfileValidation("limit-one")
++	registerValidation(t, "limit-five")
++}
++
++func TestExpiredValidationCannotEnterParser(t *testing.T) {
++	registerValidation(t, "expired")
++	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
++	profileValidations.Lock()
++	profileValidations.sessions["expired"].cancel()
++	profileValidations.sessions["expired"] = &profileValidationSession{ctx: ctx, cancel: cancel}
++	profileValidations.Unlock()
++	if err := ValidateProfile("expired", `{"type":"direct"}`, `{}`); !errors.Is(err, context.DeadlineExceeded) {
++		t.Fatalf("expected deadline, got %v", err)
++	}
++}

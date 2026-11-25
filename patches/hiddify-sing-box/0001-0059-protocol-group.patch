@@ -1,0 +1,1718 @@
+diff --git a/protocol/group/balancer/balancer.go b/protocol/group/balancer/balancer.go
+index 635a6d40faf549e6c0d7d74399bb0fe2808a7592..a76f2a4909403c720fadf3a405cb78c0670f2735 100644
+--- a/protocol/group/balancer/balancer.go
++++ b/protocol/group/balancer/balancer.go
+@@ -43,10 +43,7 @@ type Balancer struct {
+ 	connection                   adapter.ConnectionManager
+ 	logger                       log.ContextLogger
+ 	tags                         []string
+-	link                         string
+-	interval                     time.Duration
+ 	tolerance                    uint16
+-	idleTimeout                  time.Duration
+ 	strategyFn                   Strategy
+ 	options                      option.BalancerOutboundOptions
+ 	interruptExternalConnections bool
+@@ -118,29 +115,29 @@ func (s *Balancer) Start() error {
+ 	case StrategyConsistentHashing:
+ 		s.strategyFn = NewConsistentHashing(outbounds, s.options)
+ 	case StrategyStickySessions:
+-		sticky, err := NewStickySession(outbounds, s.options) //H
+-		if err != nil {                                       //H
+-			return err //H
+-		} //H
+-		s.strategyFn = sticky //H
++		sticky, err := NewStickySession(outbounds, s.options) // H
++		if err != nil {                                       // H
++			return err // H
++		} // H
++		s.strategyFn = sticky // H
+ 	case StrategyLowestDelay:
+ 		s.strategyFn = NewLowestDelay(outbounds, s.options)
+-	case StrategyPool: //H
+-		pool, err := NewPool(outbounds, s.options) //H
+-		if err != nil {                            //H
+-			return err //H
+-		} //H
+-		s.strategyFn = pool //H
++	case StrategyPool: // H
++		pool, err := NewPool(outbounds, s.options) // H
++		if err != nil {                            // H
++			return err // H
++		} // H
++		s.strategyFn = pool // H
+ 	default:
+ 		return E.New("unknown load balance strategy: ", s.options.Strategy)
+ 	}
+ 	if s.monitor != nil {
+ 		s.strategyFn.UpdateOutboundsInfo(s.monitor.OutboundsHistory(s.Tag())) // the cached results choose the first member
+ 	}
+-	if lowest, ok := s.strategyFn.(*LowestDelay); ok { //H: the LOWEST log, from here on: the first choice is logged as the start
+-		lowest.logger, lowest.tag = s.logger, s.Tag() //H
++	if lowest, ok := s.strategyFn.(*LowestDelay); ok { // H: the LOWEST log, from here on: the first choice is logged as the start
++		lowest.logger, lowest.tag = s.logger, s.Tag() // H
+ 		s.logger.Info("LOWEST ", s.Tag(), ": starts on ", lowest.Now())
+-	} //H
++	} // H
+ 
+ 	return nil
+ }
+@@ -185,6 +182,7 @@ func (s *Balancer) worker() {
+ 		}
+ 	}
+ }
++
+ func (s *Balancer) Close() error {
+ 	s.closeOnce.Do(func() { close(s.close) })
+ 	return nil
+diff --git a/protocol/group/balancer/common.go b/protocol/group/balancer/common.go
+index f521d935699867fb06c6f2853f040eb4f9314647..1edadda0236b60717fa600794db13e15fe11ce18 100644
+--- a/protocol/group/balancer/common.go
++++ b/protocol/group/balancer/common.go
+@@ -7,12 +7,12 @@ import (
+ 	"sort"
+ 	"strings"
+ 
+-	"github.com/sagernet/sing-box/option"
+-
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/common/monitoring"
++	"github.com/sagernet/sing-box/option"
+ 	"github.com/sagernet/sing/common"
+ 	N "github.com/sagernet/sing/common/network"
++
+ 	"golang.org/x/net/publicsuffix"
+ )
+ 
+@@ -22,7 +22,7 @@ func getKey(metadata *adapter.InboundContext) string {
+ 	}
+ 
+ 	var metadataHost string
+-	if metadata.Destination.IsFqdn() {
++	if metadata.Destination.IsDomain() {
+ 		metadataHost = metadata.Destination.Fqdn
+ 	} else {
+ 		metadataHost = metadata.Domain
+@@ -158,14 +158,15 @@ func sortOutboundsByDelay(outbounds map[string][]adapter.Outbound, history map[s
+ 	for net, outs := range outbounds {
+ 		res[net] = append([]adapter.Outbound{}, outs...)
+ 		sort.SliceStable(res[net], func(i, j int) bool {
+-			var delayi uint16 = getTagDelay(res[net][i].Tag(), history)
+-			var delayj uint16 = getTagDelay(res[net][j].Tag(), history)
++			delayi := getTagDelay(res[net][i].Tag(), history)
++			delayj := getTagDelay(res[net][j].Tag(), history)
+ 			return delayi < delayj
+ 		})
+ 	}
+ 
+ 	return res
+ }
++
+ func getAcceptableIndex(sortedOutbounds map[string][]adapter.Outbound, history map[string]*adapter.URLTestHistory, delayAcceptableRatio float64) map[string]int {
+ 	res := map[string]int{}
+ 	for net, outs := range sortedOutbounds {
+@@ -183,7 +184,6 @@ func getAcceptableIndex(sortedOutbounds map[string][]adapter.Outbound, history m
+ 		res[net] = maxAvailableIndex
+ 	}
+ 	return res
+-
+ }
+ 
+ func getMinDelay(outbounds map[string][]adapter.Outbound, history map[string]*adapter.URLTestHistory) (map[string]adapter.Outbound, map[string]uint16) {
+@@ -204,7 +204,6 @@ func getMinDelay(outbounds map[string][]adapter.Outbound, history map[string]*ad
+ 		bestOuts[net] = minOut
+ 	}
+ 	return bestOuts, delays
+-
+ }
+ 
+ func getDelayMap(history map[string]*adapter.URLTestHistory) map[string]uint16 {
+@@ -214,7 +213,6 @@ func getDelayMap(history map[string]*adapter.URLTestHistory) map[string]uint16 {
+ 	}
+ 
+ 	return delayMap
+-
+ }
+ 
+ // aliveSet names the members within the acceptable delay, per network, so a strategy can tell
+diff --git a/protocol/group/balancer/consistent_hashing.go b/protocol/group/balancer/consistent_hashing.go
+index 1693296906c6f8047bde00f9474863b30f08be07..7998e7c30edc57da784f91283b609be5741b3e7e 100644
+--- a/protocol/group/balancer/consistent_hashing.go
++++ b/protocol/group/balancer/consistent_hashing.go
+@@ -36,6 +36,7 @@ var _ Strategy = (*ConsistentHashing)(nil)
+ func (s *ConsistentHashing) Now() string {
+ 	return ""
+ }
++
+ func (s *ConsistentHashing) UpdateOutboundsInfo(history map[string]*adapter.URLTestHistory) bool {
+ 	_, minDelay := getMinDelay(s.outbounds, history)
+ 	delayMap := getDelayMap(history)
+@@ -52,31 +53,31 @@ func (s *ConsistentHashing) UpdateOutboundsInfo(history map[string]*adapter.URLT
+ 	s.mu.Unlock()
+ 	return changed
+ }
+-func (g *ConsistentHashing) Select(metadata adapter.InboundContext, net string, touch bool) adapter.Outbound {
+-	g.mu.Lock()
+-	defer g.mu.Unlock()
++
++func (s *ConsistentHashing) Select(metadata adapter.InboundContext, net string, touch bool) adapter.Outbound {
++	s.mu.Lock()
++	defer s.mu.Unlock()
+ 	if net != N.NetworkTCP && net != N.NetworkUDP {
+ 		net = N.NetworkTCP
+ 	}
+-	key := g.hash.Hash(getKey(&metadata))
+-	buckets := int32(len(g.outbounds[net]))
+-	for i := 0; i < g.maxRetry; i, key = i+1, key+1 {
++	key := s.hash.Hash(getKey(&metadata))
++	buckets := int32(len(s.outbounds[net]))
++	for i := 0; i < s.maxRetry; i, key = i+1, key+1 {
+ 		idx := jumpHash(key, buckets)
+-		proxy := g.outbounds[net][idx]
+-		if g.Alive(proxy, net) {
++		proxy := s.outbounds[net][idx]
++		if s.Alive(proxy, net) {
+ 			return proxy
+ 		}
+ 	}
+ 
+ 	// when availability is poor, traverse the entire list to get the available nodes
+-	for _, proxy := range g.outbounds[net] {
+-		if g.Alive(proxy, net) {
++	for _, proxy := range s.outbounds[net] {
++		if s.Alive(proxy, net) {
+ 			return proxy
+ 		}
+ 	}
+ 	idx := jumpHash(key, buckets)
+-	return g.outbounds[net][fallbackIndex(g.outbounds[net], int(idx), g.delays)] //H: not a member at rest
+-
++	return s.outbounds[net][fallbackIndex(s.outbounds[net], int(idx), s.delays)]
+ }
+ 
+ func (s *ConsistentHashing) Alive(proxy adapter.Outbound, net string) bool {
+@@ -84,5 +85,4 @@ func (s *ConsistentHashing) Alive(proxy adapter.Outbound, net string) bool {
+ 		return delay <= s.maxAcceptableDelay[net]
+ 	}
+ 	return false
+-
+ }
+diff --git a/protocol/group/balancer/h_balancer_bugs_test.go b/protocol/group/balancer/h_balancer_bugs_test.go
+index 7cd4ed0802def6d7741e4d45ce6aecb511394618..58bf855df9ef036a873804d7777fa85e5e450934 100644
+--- a/protocol/group/balancer/h_balancer_bugs_test.go
++++ b/protocol/group/balancer/h_balancer_bugs_test.go
+@@ -10,6 +10,7 @@ import (
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common"
+ 	N "github.com/sagernet/sing/common/network"
+ 
+ 	"github.com/stretchr/testify/require"
+diff --git a/protocol/group/balancer/h_balancer_test.go b/protocol/group/balancer/h_balancer_test.go
+index 5d60ffe0ffb3b2fd45dc38b0778407a5c18134e4..b4da43df8f0bba9d318e53396482006933e86dad 100644
+--- a/protocol/group/balancer/h_balancer_test.go
++++ b/protocol/group/balancer/h_balancer_test.go
+@@ -13,6 +13,7 @@ import (
+ 	"github.com/sagernet/sing-box/adapter/htest"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/adapter/htest"
+ 	"github.com/sagernet/sing-box/common/monitoring"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+diff --git a/protocol/group/balancer/h_pool.go b/protocol/group/balancer/h_pool.go
+index db340e545eb3b7b03760cc7995e11798306db7f6..96674a3da9be3ee66f460226e3acdc7cba83fe68 100644
+--- a/protocol/group/balancer/h_pool.go
++++ b/protocol/group/balancer/h_pool.go
+@@ -45,6 +45,9 @@ type Pool struct {
+ var _ Strategy = (*Pool)(nil)
+ 
+ func NewPool(outbounds []adapter.Outbound, options option.BalancerOutboundOptions) (*Pool, error) {
++	if options.Tolerance == 0 {
++		options.Tolerance = options.PoolTolerance
++	} // H: legacy alias
+ 	size := options.Pool
+ 	if size < 0 {
+ 		return nil, E.New("pool must not be negative")
+@@ -159,7 +162,7 @@ func (p *Pool) Select(metadata adapter.InboundContext, network string, touch boo
+ 		}
+ 	}
+ 	if len(working) == 0 {
+-		// nothing tested yet, or nothing works: the first member not at rest, as the other strategies
++		// nothing tested yet, or nothing works: choose the first member not at rest
+ 		if members := p.outbounds[network]; len(members) > 0 {
+ 			return members[fallbackIndex(members, 0, p.delays)]
+ 		}
+diff --git a/protocol/group/balancer/h_stable.go b/protocol/group/balancer/h_stable.go
+index b6fbba2a553d92dbfa7f0866571c005713ee9a64..71695b1de20068533f4609a6babe38b4a0726f5e 100644
+--- a/protocol/group/balancer/h_stable.go
++++ b/protocol/group/balancer/h_stable.go
+@@ -102,7 +102,7 @@ func (s *Balancer) update(history map[string]*adapter.URLTestHistory) {
+ 		s.dead[tag] = dead
+ 	}
+ 	if changed && s.monitor != nil && signalsSelection(s.Strategy()) {
+-		s.monitor.SignalChange(s.Tag()) //H: what follows the group learns the new member at once
++		s.monitor.SignalChange(s.Tag()) // H: what follows the group learns the new member at once
+ 	}
+ }
+ 
+diff --git a/protocol/group/balancer/h_strategy_test.go b/protocol/group/balancer/h_strategy_test.go
+index 4f847fee3ffc90658cae3e32d5062ebb312580bb..5efd75b7ed1e567c2fec3dbd6629fd0bf3f0cd96 100644
+--- a/protocol/group/balancer/h_strategy_test.go
++++ b/protocol/group/balancer/h_strategy_test.go
+@@ -14,6 +14,7 @@ import (
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/common/monitoring"
+ 	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
+ 
+@@ -40,6 +41,7 @@ func (f *fakeOutbound) Tag() string            { return f.tag }
+ func (f *fakeOutbound) Network() []string      { return f.network }
+ func (f *fakeOutbound) Dependencies() []string { return nil }
+ func (f *fakeOutbound) Status() adapter.Status { return adapter.StatusReady }
++func (f *fakeOutbound) IsReady() bool          { return true }
+ 
+ func (f *fakeOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+ 	f.dialed.Add(1)
+@@ -92,7 +94,7 @@ func TestH_BalancerGetKey(t *testing.T) {
+ }
+ 
+ func TestH_BalancerJumpHash(t *testing.T) {
+-	for key := uint64(0); key < 1000; key++ {
++	for key := range uint64(1000) {
+ 		require.Equal(t, int32(0), jumpHash(key, 1))
+ 		v := jumpHash(key, 7)
+ 		require.GreaterOrEqual(t, v, int32(0))
+@@ -100,7 +102,7 @@ func TestH_BalancerJumpHash(t *testing.T) {
+ 		require.Equal(t, v, jumpHash(key, 7))
+ 	}
+ 	seen := map[int32]bool{}
+-	for key := uint64(0); key < 1000; key++ {
++	for key := range uint64(1000) {
+ 		seen[jumpHash(key*0x9E3779B97F4A7C15, 4)] = true
+ 	}
+ 	require.Len(t, seen, 4)
+diff --git a/protocol/group/balancer/lowest_delay.go b/protocol/group/balancer/lowest_delay.go
+index e4f4b8c4158c69c9597ecf9ff54703091277fb4b..2cfc1643bda06593bf567dd34564da82b92bba65 100644
+--- a/protocol/group/balancer/lowest_delay.go
++++ b/protocol/group/balancer/lowest_delay.go
+@@ -2,18 +2,17 @@ package balancer
+ 
+ import (
+ 	"sync"
+-	"time" //H
++	"time" // H
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/common/monitoring"
+-	"github.com/sagernet/sing-box/log" //H
++	"github.com/sagernet/sing-box/log" // H
+ 	"github.com/sagernet/sing-box/option"
+ 	N "github.com/sagernet/sing/common/network"
+ )
+ 
+ type LowestDelay struct {
+ 	outbounds        map[string][]adapter.Outbound
+-	udpOutbounds     []adapter.Outbound
+ 	selectedOutbound map[string]adapter.Outbound
+ 	tolerance        uint16            // a member takes the selection when faster by more than this ...
+ 	toleranceRatio   float64           // ... and than this share of the selected member's delay
+@@ -45,7 +44,7 @@ func NewLowestDelay(outbounds []adapter.Outbound, options option.BalancerOutboun
+ 		},
+ 		tolerance:      tolerance,
+ 		toleranceRatio: ratio,
+-		stay:           minStay, //H
++		stay:           minStay, // H
+ 	}
+ }
+ 
+@@ -68,52 +67,55 @@ func (s *LowestDelay) Now() string {
+ // ping that works, however slow, and for a better cached one, and a cached ping never takes a
+ // member whose real ping answers.
+ func (s *LowestDelay) UpdateOutboundsInfo(history map[string]*adapter.URLTestHistory) bool {
+-	reported := inUse(s.outbounds, history)       //H: never a member at rest
++	reported := inUse(s.outbounds, history)       // exclude members at rest
+ 	min, delays := getMinDelay(reported, history) // real pings first, then cached ones
+ 
+ 	s.mu.Lock()
+ 	changed := false
+ 	for net, best := range min {
+ 		current := s.selectedOutbound[net]
+-		if delays[net] >= monitoring.TimeoutDelay { //H: none answers: the selection stays, unless it rests
+-			first := reported[net][0]                                                        //H
+-			_, currentReported := history[current.Tag()]                                     //H
+-			if _, firstReported := history[first.Tag()]; firstReported && !currentReported { //H
+-				s.selectedOutbound[net] = first //H
+-				changed = true                  //H
+-			} //H
++		if delays[net] >= monitoring.TimeoutDelay {
++			// No member currently answers. Keep the current choice unless it is
++			// parked and a member with test history can take its place.
++			first := reported[net][0]
++			_, currentReported := history[current.Tag()]
++			if _, firstReported := history[first.Tag()]; firstReported && !currentReported {
++				s.selectedOutbound[net] = first
++				changed = true
++			}
+ 			continue
+ 		}
+ 		if best == nil || best.Tag() == current.Tag() {
+ 			continue
+ 		}
+-		currentHis, bestHis := history[current.Tag()], history[best.Tag()]                 //H
+-		currentMeasured, bestMeasured := measuredDelay(currentHis), measuredDelay(bestHis) //H
+-		threshold := SelectedThreshold(currentHis, s.tolerance, s.toleranceRatio)          //H: none for a cached pick
+-		if answers(currentHis) {                                                           //H: its real ping answers: only a real ping, faster by the tolerance, after the stay
+-			if !answers(bestHis) { //H
+-				s.logKeep(net, current, best, history, "a cached ping does not take a real one") //H
+-				continue                                                                         //H
+-			} //H
+-			if since := time.Since(s.switchedAt); !s.switchedAt.IsZero() && since < s.stay { //H
+-				s.logKeep(net, current, best, history, "chosen ", since.Round(time.Second), " ago, stays ", s.stay) //H
+-				continue                                                                                            //H
+-			} //H
+-			if uint32(bestMeasured)+threshold >= uint32(currentMeasured) { //H
+-				s.logKeep(net, current, best, history, "not faster by more than ", threshold, " ms") //H
++		currentHis, bestHis := history[current.Tag()], history[best.Tag()]                 // H
++		currentMeasured, bestMeasured := measuredDelay(currentHis), measuredDelay(bestHis) // H
++		threshold := SelectedThreshold(currentHis, s.tolerance, s.toleranceRatio)          // H: none for a cached pick
++		if answers(currentHis) {                                                           // H: its real ping answers: only a real ping, faster by the tolerance, after the stay
++			if !answers(bestHis) { // H
++				s.logKeep(net, current, best, history, "a cached ping does not take a real one") // H
++				continue                                                                         // H
++			} // H
++			if since := time.Since(s.switchedAt); !s.switchedAt.IsZero() && since < s.stay { // H
++				s.logKeep(net, current, best, history, "chosen ", since.Round(time.Second), " ago, stays ", s.stay) // H
++				continue                                                                                            // H
++			} // H
++			if uint32(bestMeasured)+threshold >= uint32(currentMeasured) { // H
++				s.logKeep(net, current, best, history, "not faster by more than ", threshold, " ms") // H
+ 				continue
+ 			}
+-		} //H
+-		s.logSwitch(net, current, best, history, currentMeasured, bestMeasured, threshold) //H
++		} // H
++		s.logSwitch(net, current, best, history, currentMeasured, bestMeasured, threshold) // H
+ 		s.selectedOutbound[net] = best
+-		if answers(bestHis) && net == N.NetworkTCP { //H: a real ping: it stays a while
+-			s.switchedAt = time.Now() //H
+-		} //H
++		if answers(bestHis) && net == N.NetworkTCP { // H: a real ping: it stays a while
++			s.switchedAt = time.Now() // H
++		} // H
+ 		changed = true
+ 	}
+ 	s.mu.Unlock()
+ 	return changed
+ }
++
+ func (s *LowestDelay) Select(metadata adapter.InboundContext, net string, touch bool) adapter.Outbound {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+@@ -121,5 +123,4 @@ func (s *LowestDelay) Select(metadata adapter.InboundContext, net string, touch
+ 		net = N.NetworkTCP
+ 	}
+ 	return s.selectedOutbound[net]
+-
+ }
+diff --git a/protocol/group/balancer/roundrobin.go b/protocol/group/balancer/roundrobin.go
+index 95cc3e50ba4c91a850211cfd007df4be35b12916..99cfd50a8a76af60867349c18d9d87873b0bf3f2 100644
+--- a/protocol/group/balancer/roundrobin.go
++++ b/protocol/group/balancer/roundrobin.go
+@@ -49,7 +49,7 @@ func (s *RoundRobin) Now() string {
+ }
+ 
+ func (s *RoundRobin) UpdateOutboundsInfo(history map[string]*adapter.URLTestHistory) bool {
+-	sortedOutbounds := sortOutboundsByDelay(inUse(s.outbounds, history), history) // H: never a member at rest
++	sortedOutbounds := sortOutboundsByDelay(inUse(s.outbounds, history), history)
+ 	acceptableIndex := getAcceptableIndex(sortedOutbounds, history, s.delayAcceptableRatio)
+ 
+ 	s.mu.Lock()
+@@ -81,5 +81,4 @@ func (s *RoundRobin) Select(metadata adapter.InboundContext, net string, touch b
+ 		s.idx[net] = id
+ 	}
+ 	return proxy
+-
+ }
+diff --git a/protocol/group/balancer/sticky_session.go b/protocol/group/balancer/sticky_session.go
+index 1ec9bdc247cfd858131f9b8f317f35c82fe04228..082540552670edeac0cd9d9cd04912db8698eefb 100644
+--- a/protocol/group/balancer/sticky_session.go
++++ b/protocol/group/balancer/sticky_session.go
+@@ -26,11 +26,11 @@ type StickySession struct {
+ 	alive                map[string]string // members within the acceptable delay, per network
+ }
+ 
+-func NewStickySession(outbounds []adapter.Outbound, options option.BalancerOutboundOptions) (*StickySession, error) { //H: an error for a bad sticky_hash
+-	stickyHash, err := parseStickyHash(options.StickyHash, defaultStickySessionHash) //H
+-	if err != nil {                                                                  //H
+-		return nil, err //H
+-	} //H
++func NewStickySession(outbounds []adapter.Outbound, options option.BalancerOutboundOptions) (*StickySession, error) { // H: an error for a bad sticky_hash
++	stickyHash, err := parseStickyHash(options.StickyHash, defaultStickySessionHash) // H
++	if err != nil {                                                                  // H
++		return nil, err // H
++	} // H
+ 	lruCache := common.Must1(freelru.New[uint64, int](1000, maphash.NewHasher[uint64]().Hash32, true))
+ 	lruCache.SetLifetime(options.TTL.Build())
+ 	cOutbounds := convertOutbounds(outbounds)
+@@ -40,8 +40,8 @@ func NewStickySession(outbounds []adapter.Outbound, options option.BalancerOutbo
+ 		hash:                 maphash.NewHasher[string](),
+ 		maxRetry:             options.MaxRetry,
+ 		delayAcceptableRatio: acceptableRatio(options),
+-		stickyHash:           stickyHash, //H
+-	}, nil //H
++		stickyHash:           stickyHash, // H
++	}, nil // H
+ }
+ 
+ var _ Strategy = (*StickySession)(nil)
+@@ -53,7 +53,7 @@ func (s *StickySession) Select(metadata adapter.InboundContext, net string, touc
+ 	if net != N.NetworkTCP && net != N.NetworkUDP {
+ 		net = N.NetworkTCP
+ 	}
+-	key := s.hash.Hash(stickyKey(&metadata, s.stickyHash)) //H
++	key := s.hash.Hash(stickyKey(&metadata, s.stickyHash)) // H
+ 	outbounds := s.outbounds[net]
+ 	length := int32(len(outbounds))
+ 	idx, has := s.lruCache.Get(key)
+@@ -81,7 +81,7 @@ func (s *StickySession) Select(metadata adapter.InboundContext, net string, touc
+ 			}
+ 		}
+ 		if pick < 0 {
+-			pick = fallbackIndex(outbounds, idx, s.delays) //H: not a member at rest
++			pick = fallbackIndex(outbounds, idx, s.delays)
+ 		}
+ 	}
+ 	if !has || pick != idx {
+@@ -93,6 +93,7 @@ func (s *StickySession) Select(metadata adapter.InboundContext, net string, touc
+ func (s *StickySession) Now() string {
+ 	return ""
+ }
++
+ func (s *StickySession) UpdateOutboundsInfo(history map[string]*adapter.URLTestHistory) bool {
+ 	_, minDelay := getMinDelay(s.outbounds, history)
+ 	delayMap := getDelayMap(history)
+@@ -115,5 +116,4 @@ func (s *StickySession) Alive(proxy adapter.Outbound, net string) bool {
+ 		return delay <= s.maxAcceptableDelay[net]
+ 	}
+ 	return false
+-
+ }
+diff --git a/protocol/group/h_fallback_test.go b/protocol/group/h_fallback_test.go
+index 03db6bbc9ab39111a76467ae9e11f8ad9ecc5cbb..ac536eda06ac2d201dfb47a08f679f831c2e0cca 100644
+--- a/protocol/group/h_fallback_test.go
++++ b/protocol/group/h_fallback_test.go
+@@ -29,6 +29,7 @@ func (o *hScriptedOutbound) Tag() string            { return o.tag }
+ func (o *hScriptedOutbound) Network() []string      { return []string{N.NetworkTCP, N.NetworkUDP} }
+ func (o *hScriptedOutbound) Dependencies() []string { return nil }
+ func (o *hScriptedOutbound) Status() adapter.Status { return adapter.StatusReady }
++func (o *hScriptedOutbound) IsReady() bool          { return true } // H
+ 
+ func (o *hScriptedOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+ 	o.dials.Add(1)
+diff --git a/protocol/group/h_urltest_modes.go b/protocol/group/h_urltest_modes.go
+index 0a3c38be0b0c1202ed010eba46157cdc6894c1f5..1b399ee1e2379f9b8ce41f2495ee5264bfa24b88 100644
+--- a/protocol/group/h_urltest_modes.go
++++ b/protocol/group/h_urltest_modes.go
+@@ -3,6 +3,7 @@ package group
+ import (
+ 	"context"
+ 	"errors"
++	"maps"
+ 	"net"
+ 	"os"
+ 	"sync/atomic"
+@@ -306,9 +307,7 @@ func (g *URLTestGroup) failoverCheck(ctx context.Context) map[string]uint16 {
+ 			others = append(others, detour)
+ 		}
+ 	}
+-	for tag, delay := range g.testMembers(ctx, others, false) {
+-		result[tag] = delay
+-	}
++	maps.Copy(result, g.testMembers(ctx, others, false))
+ 	return result
+ }
+ 
+diff --git a/protocol/group/h_urltest_modes_test.go b/protocol/group/h_urltest_modes_test.go
+index f3c05506b6d0a70f99ca918f9d2d85e3998e7f99..a7da5ccb712e13c882e9350f88f641c3164722f4 100644
+--- a/protocol/group/h_urltest_modes_test.go
++++ b/protocol/group/h_urltest_modes_test.go
+@@ -40,6 +40,7 @@ func (o *hProbeOutbound) Tag() string            { return o.tag }
+ func (o *hProbeOutbound) Network() []string      { return []string{N.NetworkTCP, N.NetworkUDP} }
+ func (o *hProbeOutbound) Dependencies() []string { return nil }
+ func (o *hProbeOutbound) Status() adapter.Status { return adapter.StatusReady }
++func (o *hProbeOutbound) IsReady() bool          { return true } // H
+ 
+ func (o *hProbeOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+ 	o.dials.Add(1)
+diff --git a/protocol/group/h_urltest_signal_test.go b/protocol/group/h_urltest_signal_test.go
+index 362cc2c575507b4564082cc52a8715b76bd16113..553f9d5069a3b6b9e1143869b7202f32bd4f46e6 100644
+--- a/protocol/group/h_urltest_signal_test.go
++++ b/protocol/group/h_urltest_signal_test.go
+@@ -33,7 +33,7 @@ func (hNoEndpoints) Endpoints() []adapter.Endpoint { return nil }
+ func TestH_URLTestSignalsItsMove(t *testing.T) {
+ 	server := hProbeServer(t)
+ 	fast, slow := hProbe(t, server, "fast", 5*time.Millisecond), hProbe(t, server, "slow", 60*time.Millisecond)
+-	manager := &hListedOutboundManager{hOutboundManager: hOutboundManager{outbounds: map[string]adapter.Outbound{"fast": fast, "slow": slow}}}
++	manager := &hListedOutboundManager{outbounds: map[string]adapter.Outbound{"fast": fast, "slow": slow}}
+ 	ctx := service.ContextWithDefaultRegistry(context.Background())
+ 	ctx = pause.WithDefaultManager(ctx)
+ 	ctx = service.ContextWithPtr(ctx, urltest.NewHistoryStorage())
+diff --git a/protocol/group/h_urltest_test.go b/protocol/group/h_urltest_test.go
+index 572dbaed91832aaeeba144f665bdeb7638e97079..0c152ff7a4d3897a2db211522ca3f53677db7079 100644
+--- a/protocol/group/h_urltest_test.go
++++ b/protocol/group/h_urltest_test.go
+@@ -29,6 +29,7 @@ func (h *hHangingOutbound) Tag() string            { return h.tag }
+ func (h *hHangingOutbound) Network() []string      { return []string{N.NetworkTCP, N.NetworkUDP} }
+ func (h *hHangingOutbound) Dependencies() []string { return nil }
+ func (h *hHangingOutbound) Status() adapter.Status { return adapter.StatusReady }
++func (h *hHangingOutbound) IsReady() bool          { return true } // H
+ 
+ func (h *hHangingOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+ 	<-ctx.Done()
+diff --git a/protocol/group/selector.go b/protocol/group/selector.go
+index dd9d02cbd52af10be085575c24b654975788bf1a..e098a869e1a6fb8e1db78b30aff920785b91a2e6 100644
+--- a/protocol/group/selector.go
++++ b/protocol/group/selector.go
+@@ -40,14 +40,16 @@ type Selector struct {
+ 	defaultTag                   string
+ 	outbounds                    map[string]adapter.Outbound
+ 	selected                     common.TypedValue[adapter.Outbound]
++	balance                      *balanceState
+ 	history                      *urltest.HistoryStorage
+ 	interruptGroup               *interrupt.Group
+ 	interruptExternalConnections bool
+ }
+ 
+ func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.SelectorOutboundOptions) (adapter.Outbound, error) {
++	var err error
+ 	outbound := &Selector{
+-		Adapter:                      outbound.NewAdapter(C.TypeSelector, tag, nil, options.Outbounds),
++		Adapter:                      outbound.NewAdapter(C.TypeSelector, tag, nil, selectorDependencies(options)),
+ 		ctx:                          ctx,
+ 		outbound:                     service.FromContext[adapter.OutboundManager](ctx),
+ 		logger:                       logger,
+@@ -66,10 +68,30 @@ func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextL
+ 			return nil, E.New("duplicate tag: ", tag)
+ 		}
+ 	}
++	if options.Balancer != nil {
++		if options.Balancer.Fallback == tag && tag != "" {
++			return nil, E.New("balancer cannot reference itself as fallback")
++		}
++		outbound.balance, err = newBalanceState(ctx, *options.Balancer)
++		if err != nil {
++			return nil, err
++		}
++	}
+ 	return outbound, nil
+ }
+ 
++func selectorDependencies(options option.SelectorOutboundOptions) []string {
++	dependencies := append([]string(nil), options.Outbounds...)
++	if options.Balancer != nil && options.Balancer.Fallback != "" && !slices.Contains(dependencies, options.Balancer.Fallback) {
++		dependencies = append(dependencies, options.Balancer.Fallback)
++	}
++	return dependencies
++}
++
+ func (s *Selector) Network() []string {
++	if s.balance != nil {
++		return []string{N.NetworkTCP, N.NetworkUDP}
++	}
+ 	selected := s.selected.Load()
+ 	if selected == nil {
+ 		return []string{N.NetworkTCP, N.NetworkUDP}
+@@ -78,6 +100,12 @@ func (s *Selector) Network() []string {
+ }
+ 
+ func (s *Selector) Start(stage adapter.StartStage, scope *adapter.Scope) error {
++	if stage == adapter.StartStatePostStart {
++		if s.balance != nil {
++			s.balance.postStart(s.outbounds)
++		}
++		return nil
++	}
+ 	if stage != adapter.StartStateStart {
+ 		return nil
+ 	}
+@@ -88,6 +116,17 @@ func (s *Selector) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 		}
+ 		s.outbounds[tag] = detour
+ 	}
++	if s.balance != nil {
++		if fallback := s.balance.config.Fallback; fallback != "" {
++			detour, loaded := s.outbound.Outbound(fallback)
++			if !loaded {
++				return E.New("balancer fallback outbound not found: ", fallback)
++			}
++			s.outbounds[fallback] = detour
++		}
++		s.selected.Store(s.outbounds[s.tags[0]])
++		return nil
++	}
+ 
+ 	if s.Tag() != "" {
+ 		cacheFile := service.FromContext[adapter.CacheFile](s.ctx)
+@@ -121,6 +160,13 @@ func (s *Selector) All() []string {
+ }
+ 
+ func (s *Selector) Selected(network string) adapter.Outbound {
++	if s.balance != nil {
++		tag, err := s.balance.pick(s.tags)
++		if err != nil {
++			return nil
++		}
++		return s.outbounds[tag]
++	}
+ 	return s.selected.Load()
+ }
+ 
+@@ -129,6 +175,9 @@ func (s *Selector) AttachConnection(closer io.Closer) func() {
+ }
+ 
+ func (s *Selector) References() []string {
++	if s.balance != nil {
++		return selectorDependencies(option.SelectorOutboundOptions{Outbounds: s.tags, Balancer: &s.balance.config})
++	}
+ 	selected := s.selected.Load()
+ 	if selected == nil {
+ 		return s.tags[:1]
+@@ -137,6 +186,9 @@ func (s *Selector) References() []string {
+ }
+ 
+ func (s *Selector) SelectOutbound(tag string) bool {
++	if s.balance != nil {
++		return false
++	}
+ 	detour, loaded := s.outbounds[tag]
+ 	if !loaded {
+ 		return false
+@@ -167,7 +219,11 @@ func (s *Selector) SelectOutbound(tag string) bool {
+ }
+ 
+ func (s *Selector) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+-	conn, err := s.selected.Load().DialContext(ctx, network, destination)
++	detour := s.Selected(network)
++	if detour == nil {
++		return nil, E.New("balancer has no healthy outbound")
++	}
++	conn, err := detour.DialContext(ctx, network, destination)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -175,13 +231,24 @@ func (s *Selector) DialContext(ctx context.Context, network string, destination
+ }
+ 
+ func (s *Selector) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+-	conn, err := s.selected.Load().ListenPacket(ctx, destination)
++	detour := s.Selected(N.NetworkUDP)
++	if detour == nil {
++		return nil, E.New("balancer has no healthy outbound")
++	}
++	conn, err := detour.ListenPacket(ctx, destination)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	return s.interruptGroup.NewPacketConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
+ }
+ 
++func (s *Selector) Close() error {
++	if s.balance != nil {
++		return s.balance.Close()
++	}
++	return nil
++}
++
+ func RealTag(detour adapter.Outbound, network string) string {
+ 	for {
+ 		group, isGroup := detour.(adapter.OutboundGroup)
+diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
+index ac067c7a780aeaf7ef7c4baa2135def1810fc6fe..de906782012ae1eeea065bf96e52102b50dc84d8 100644
+--- a/protocol/group/urltest.go
++++ b/protocol/group/urltest.go
+@@ -44,8 +44,8 @@ type URLTest struct {
+ 	logger                       log.ContextLogger
+ 	tags                         []string
+ 	link                         string
+-	links                        []string //H: url and urls
+-	failover                     bool     //H: mode failover
++	links                        []string // H: url and urls
++	failover                     bool     // H: mode failover
+ 	interval                     time.Duration
+ 	tolerance                    uint16
+ 	idleTimeout                  time.Duration
+@@ -62,8 +62,8 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
+ 		logger:                       logger,
+ 		tags:                         options.Outbounds,
+ 		link:                         options.URL,
+-		links:                        testLinks(options.URL, options.URLs),  //H
+-		failover:                     options.Mode == C.URLTestModeFailover, //H
++		links:                        testLinks(options.URL, options.URLs),  // H
++		failover:                     options.Mode == C.URLTestModeFailover, // H
+ 		interval:                     time.Duration(options.Interval),
+ 		tolerance:                    options.Tolerance,
+ 		idleTimeout:                  time.Duration(options.IdleTimeout),
+@@ -72,11 +72,11 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
+ 	if len(outbound.tags) == 0 {
+ 		return nil, E.New("missing tags")
+ 	}
+-	switch options.Mode { //H
+-	case "", C.URLTestModeFailover: //H
+-	default: //H
+-		return nil, E.New("unknown urltest mode: ", options.Mode) //H
+-	} //H
++	switch options.Mode { // H
++	case "", C.URLTestModeFailover: // H
++	default: // H
++		return nil, E.New("unknown urltest mode: ", options.Mode) // H
++	} // H
+ 	for i, tag := range outbound.tags {
+ 		if slices.Contains(outbound.tags[:i], tag) {
+ 			return nil, E.New("duplicate tag: ", tag)
+@@ -100,9 +100,9 @@ func (s *URLTest) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 		if err != nil {
+ 			return err
+ 		}
+-		group.links = s.links       //H
+-		group.failover = s.failover //H
+-		group.tag = s.Tag()         //H
++		group.links = s.links       // H
++		group.failover = s.failover // H
++		group.tag = s.Tag()         // H
+ 		s.group = group
+ 	case adapter.StartStateStarted:
+ 		s.group.PostStart()
+@@ -111,6 +111,17 @@ func (s *URLTest) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 	return nil
+ }
+ 
++func (s *URLTest) PostStart() error {
++	s.group.PostStart()
++	return nil
++}
++
++func (s *URLTest) Close() error {
++	return common.Close(
++		common.PtrOrNil(s.group),
++	)
++}
++
+ func (s *URLTest) All() []string {
+ 	return s.tags
+ }
+@@ -153,7 +164,7 @@ func (s *URLTest) URLTest(ctx context.Context) (map[string]uint16, error) {
+ }
+ 
+ func (s *URLTest) CheckOutbounds() {
+-	s.group.CheckOutbounds(s.group.ctx, true) //H
++	s.group.CheckOutbounds(s.group.ctx, true) // H
+ }
+ 
+ func (s *URLTest) PerformUpdateCheck() {
+@@ -180,30 +191,30 @@ func (s *URLTest) InterfaceUpdated(ctx context.Context) {
+ 
+ func (s *URLTest) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+ 	s.group.Touch()
+-	network = N.NetworkName(network)                        //H
+-	if network != N.NetworkTCP && network != N.NetworkUDP { //H
++	network = N.NetworkName(network)                        // H
++	if network != N.NetworkTCP && network != N.NetworkUDP { // H
+ 		return nil, E.Extend(N.ErrUnknownNetwork, network)
+ 	}
+-	outbound := s.group.pickForDial(network) //H: penalties may rank first
++	outbound := s.group.pickForDial(network) // H: penalties may rank first
+ 	if outbound == nil {
+ 		return nil, E.New("missing supported outbound")
+ 	}
+ 	conn, err := outbound.DialContext(ctx, network, destination)
+ 	if err == nil {
+-		s.group.penaltyReset(outbound.Tag()) //H: proof of life
++		s.group.penaltyReset(outbound.Tag()) // H: proof of life
+ 		return s.group.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
+ 	}
+ 	s.logger.ErrorContext(ctx, err)
+ 	s.group.history.DeleteURLTestHistory(outbound.Tag())
+-	if conn, ok := s.group.penaltyFailoverDial(ctx, network, destination, outbound, err); ok { //H: one more try through the best other member
+-		return s.group.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil //H
+-	} //H
++	if conn, ok := s.group.penaltyFailoverDial(ctx, network, destination, outbound, err); ok { // H: one more try through the best other member
++		return s.group.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil // H
++	} // H
+ 	return nil, err
+ }
+ 
+ func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+ 	s.group.Touch()
+-	outbound := s.group.pickForDial(N.NetworkUDP) //H
++	outbound := s.group.pickForDial(N.NetworkUDP) // H
+ 	if outbound == nil {
+ 		return nil, E.New("missing supported outbound")
+ 	}
+@@ -218,14 +229,14 @@ func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (ne
+ 
+ type URLTestGroup struct {
+ 	ctx                          context.Context
+-	cancel                       context.CancelFunc //H: stops running tests on close
+-	links                        []string           //H: h_urltest_modes.go
+-	failover                     bool               //H
+-	tag                          string             //H: for signalSelection
+-	penalties                    sync.Map           //H: tag -> *atomic.Int64
+-	degraded                     sync.Map           //H: network -> struct{}, a failover member slowed down
+-	lastForcedRetest             atomic.Value       //H: time.Time
+-	forcedRetestRunning          atomic.Bool        //H
++	cancel                       context.CancelFunc // H: stops running tests on close
++	links                        []string           // H: h_urltest_modes.go
++	failover                     bool               // H
++	tag                          string             // H: for signalSelection
++	penalties                    sync.Map           // H: tag -> *atomic.Int64
++	degraded                     sync.Map           // H: network -> struct{}, a failover member slowed down
++	lastForcedRetest             atomic.Value       // H: time.Time
++	forcedRetestRunning          atomic.Bool        // H
+ 	outbound                     adapter.OutboundManager
+ 	pause                        pause.Manager
+ 	pauseCallback                *list.Element[pause.Callback]
+@@ -266,10 +277,10 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
+ 	if history == nil {
+ 		return nil, E.New("missing URL test history storage")
+ 	}
+-	ctx, cancel := context.WithCancel(ctx) //H
++	ctx, cancel := context.WithCancel(ctx) // H
+ 	return &URLTestGroup{
+ 		ctx:                          ctx,
+-		cancel:                       cancel, //H
++		cancel:                       cancel, // H
+ 		outbound:                     outboundManager,
+ 		logger:                       logger,
+ 		outbounds:                    outbounds,
+@@ -310,7 +321,7 @@ func (g *URLTestGroup) Touch() {
+ }
+ 
+ func (g *URLTestGroup) Close() error {
+-	g.cancel() //H
++	g.cancel() // H
+ 	g.access.Lock()
+ 	defer g.access.Unlock()
+ 	if g.ticker == nil {
+@@ -330,14 +341,14 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+ 	switch network {
+ 	case N.NetworkTCP:
+ 		if g.selectedOutboundTCP != nil {
+-			if history := g.history.LoadURLTestHistory(RealTag(g.selectedOutboundTCP, N.NetworkTCP)); history != nil && history.Delay != urltest.FailedDelay {
++			if history := g.history.LoadURLTestHistory(RealTag(g.selectedOutboundTCP, N.NetworkTCP)); history != nil {
+ 				minOutbound = g.selectedOutboundTCP
+ 				minDelay = history.Delay
+ 			}
+ 		}
+ 	case N.NetworkUDP:
+ 		if g.selectedOutboundUDP != nil {
+-			if history := g.history.LoadURLTestHistory(RealTag(g.selectedOutboundUDP, N.NetworkUDP)); history != nil && history.Delay != urltest.FailedDelay {
++			if history := g.history.LoadURLTestHistory(RealTag(g.selectedOutboundUDP, N.NetworkUDP)); history != nil {
+ 				minOutbound = g.selectedOutboundUDP
+ 				minDelay = history.Delay
+ 			}
+@@ -348,9 +359,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+ 			continue
+ 		}
+ 		history := g.history.LoadURLTestHistory(RealTag(detour, network))
+-		// Failed tests are stored as FailedDelay (65535). Skip them so they
+-		// cannot win Select via uint16 overflow of Delay+tolerance.
+-		if history == nil || history.Delay == urltest.FailedDelay {
++		if history == nil {
+ 			continue
+ 		}
+ 		if minDelay == 0 || uint32(minDelay) > uint32(history.Delay)+uint32(g.tolerance) {
+@@ -409,12 +418,12 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
+ 		return make(map[string]uint16), nil
+ 	}
+ 	defer g.checking.Store(false)
+-	var result map[string]uint16 //H
+-	if g.failover && !force {    //H: only the selected members, unless one failed
+-		result = g.failoverCheck(ctx) //H
+-	} else { //H
+-		result = g.testMembers(ctx, g.outbounds, force) //H
+-	} //H
++	var result map[string]uint16 // H
++	if g.failover && !force {    // H: only the selected members, unless one failed
++		result = g.failoverCheck(ctx) // H
++	} else { // H
++		result = g.testMembers(ctx, g.outbounds, force) // H
++	} // H
+ 	g.performUpdateCheck()
+ 	return result, nil
+ }
+@@ -437,10 +446,10 @@ type urlTestBatch struct {
+ }
+ 
+ func URLTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, force bool) map[string]uint16 {
+-	return urlTestOutbounds(ctx, outboundManager, history, logger, outbounds, testLinks(link, nil), interval, force) //H
++	return urlTestOutbounds(ctx, outboundManager, history, logger, outbounds, testLinks(link, nil), interval, force) // H
+ }
+ 
+-func urlTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, logger log.Logger, outbounds []adapter.Outbound, links []string, interval time.Duration, force bool) map[string]uint16 { //H: more test URLs
++func urlTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, logger log.Logger, outbounds []adapter.Outbound, links []string, interval time.Duration, force bool) map[string]uint16 { // H: more test URLs
+ 	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](10))
+ 	testBatch := &urlTestBatch{
+ 		ctx:      ctx,
+@@ -451,7 +460,7 @@ func urlTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManag
+ 		checked:  make(map[string]bool),
+ 		result:   make(map[string]uint16),
+ 	}
+-	testBatch.test(outbounds, links, interval, force) //H
++	testBatch.test(outbounds, links, interval, force) // H
+ 	b.Wait()
+ 	for _, outboundGroup := range testBatch.groups {
+ 		groupHistory := history.LoadURLTestHistory(RealTag(outboundGroup, N.NetworkTCP))
+@@ -462,7 +471,7 @@ func urlTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManag
+ 	return testBatch.result
+ }
+ 
+-func (b *urlTestBatch) test(outbounds []adapter.Outbound, links []string, interval time.Duration, force bool) { //H
++func (b *urlTestBatch) test(outbounds []adapter.Outbound, links []string, interval time.Duration, force bool) { // H
+ 	for _, detour := range outbounds {
+ 		tag := detour.Tag()
+ 		if b.checked[tag] {
+@@ -485,7 +494,7 @@ func (b *urlTestBatch) test(outbounds []adapter.Outbound, links []string, interv
+ 			b.test(common.FilterNotNil(common.Map(nested.All(), func(it string) adapter.Outbound {
+ 				member, _ := b.outbound.Outbound(it)
+ 				return member
+-			})), links, interval, force) //H
++			})), links, interval, force) // H
+ 		default:
+ 			history := b.history.LoadURLTestHistory(tag)
+ 			if !force && history != nil && time.Since(history.Time) < interval {
+@@ -497,7 +506,7 @@ func (b *urlTestBatch) test(outbounds []adapter.Outbound, links []string, interv
+ 				defer cancel()
+ 				testChan := make(chan urlTestResult, 1)
+ 				go func() {
+-					delay, testErr := urlTestLinks(testCtx, links, detour) //H
++					delay, testErr := urlTestLinks(testCtx, links, detour) // H
+ 					testChan <- urlTestResult{delay, testErr}
+ 				}()
+ 				var testResult urlTestResult
+@@ -551,7 +560,7 @@ func (g *URLTestGroup) performUpdateCheck() {
+ 	}
+ 	if updated {
+ 		g.interruptGroup.Interrupt(g.interruptExternalConnections)
+-		g.signalSelection() //H
++		g.signalSelection() // H
+ 	}
+ 	if selected {
+ 		g.history.NotifyUpdated()
+diff --git a/protocol/group/xui_balancer.go b/protocol/group/xui_balancer.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3fd93e25e753b0837115fe2f2a94f42ff961dba5
+--- /dev/null
++++ b/protocol/group/xui_balancer.go
+@@ -0,0 +1,441 @@
++package group
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"fmt"
++	"io"
++	"maps"
++	"math"
++	"math/rand"
++	"net"
++	"net/url"
++	"regexp"
++	"slices"
++	"sort"
++	"strconv"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/common/urltest"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/json/badoption"
++	M "github.com/sagernet/sing/common/metadata"
++	"github.com/sagernet/sing/service"
++)
++
++type probeSample struct {
++	delay  time.Duration
++	failed bool
++}
++
++type balanceReport struct {
++	alive    bool
++	delay    time.Duration
++	score    float64
++	total    int
++	failures int
++	updated  time.Time
++}
++
++type balanceCost struct {
++	match  string
++	regexp *regexp.Regexp
++	value  float64
++}
++
++type balanceState struct {
++	leastExpected  int
++	leastMaxRTT    time.Duration
++	leastTolerance float64
++	leastBaselines []time.Duration
++	ctx            context.Context
++	cancel         context.CancelFunc
++	config         option.XrayBalancerOptions
++	history        *urltest.HistoryStorage
++	mu             sync.RWMutex
++	wg             sync.WaitGroup
++	closed         bool
++	started        bool
++	next           uint64
++	costs          []balanceCost
++	reports        map[string]balanceReport
++	samples        map[string][]probeSample
++	targets        map[string]adapter.Outbound
++}
++
++func newBalanceState(ctx context.Context, options option.XrayBalancerOptions) (*balanceState, error) {
++	options.Strategy = strings.ToLower(strings.TrimSpace(options.Strategy))
++	if options.Strategy == "" {
++		options.Strategy = "random"
++	}
++	switch options.Strategy {
++	case "random", "roundrobin", "leastping", "leastload":
++	default:
++		return nil, fmt.Errorf("unsupported balancer strategy: %s", options.Strategy)
++	}
++	if options.Interval <= 0 {
++		options.Interval = badoption.Duration(300 * time.Second)
++	}
++	if options.Timeout <= 0 {
++		options.Timeout = badoption.Duration(10 * time.Second)
++	}
++	if options.Sampling == 0 {
++		options.Sampling = 5
++	}
++	interval := options.Interval.Build()
++	// Burst freshness checks multiply the interval by sampling and two.
++	// Reject values that would wrap a signed time.Duration and mark stale
++	// observations as healthy.
++	if options.Sampling > 64 || interval < time.Second ||
++		interval > time.Duration(math.MaxInt64)/time.Duration(options.Sampling)/2 ||
++		options.Timeout.Build() < time.Millisecond {
++		return nil, fmt.Errorf("invalid balancing probe limits")
++	}
++	for _, link := range []string{options.ProbeURL, options.Connectivity} {
++		if link == "" {
++			continue
++		}
++		u, err := url.Parse(link)
++		if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") {
++			return nil, fmt.Errorf("invalid balancing probe URL: %q", link)
++		}
++	}
++	if (options.Strategy == "leastping" || options.Strategy == "leastload" || options.Fallback != "") && options.ProbeURL == "" {
++		return nil, fmt.Errorf("health balancing requires a probe_url")
++	}
++	if options.Method != "" && options.Method != "GET" && options.Method != "HEAD" {
++		return nil, fmt.Errorf("unsupported balancer probe method: %q", options.Method)
++	}
++	var costs []balanceCost
++	var leastExpected int
++	var leastMaxRTT time.Duration
++	var leastTolerance float64
++	var leastBaselines []time.Duration
++	if options.Strategy == "leastload" && len(options.Settings) > 0 {
++		var settings struct {
++			Baselines []string `json:"baselines"`
++			Expected  int      `json:"expected"`
++			MaxRTT    string   `json:"maxRTT"`
++			Tolerance float64  `json:"tolerance"`
++			Costs     []*struct {
++				Match  string  `json:"match"`
++				Regexp bool    `json:"regexp"`
++				Value  float64 `json:"value"`
++			} `json:"costs"`
++		}
++		decoder := json.NewDecoder(bytes.NewReader(options.Settings))
++		decoder.DisallowUnknownFields()
++		if err := decoder.Decode(&settings); err != nil {
++			return nil, fmt.Errorf("invalid leastLoad settings: %w", err)
++		}
++		var trailing any
++		if err := decoder.Decode(&trailing); err != io.EOF {
++			return nil, fmt.Errorf("invalid leastLoad settings: trailing data")
++		}
++		leastExpected = max(settings.Expected, 0)
++		leastTolerance = min(max(settings.Tolerance, 0), 1)
++		if settings.MaxRTT != "" {
++			value, err := time.ParseDuration(settings.MaxRTT)
++			if err != nil {
++				return nil, fmt.Errorf("invalid leastLoad maxRTT: %w", err)
++			}
++			leastMaxRTT = max(value, 0)
++		}
++		for _, baseline := range settings.Baselines {
++			value, err := time.ParseDuration(baseline)
++			if err != nil {
++				return nil, fmt.Errorf("invalid leastLoad baseline: %w", err)
++			}
++			if value > 0 {
++				leastBaselines = append(leastBaselines, value)
++			}
++		}
++		for _, cost := range settings.Costs {
++			if cost == nil {
++				return nil, fmt.Errorf("leastLoad costs must be objects")
++			}
++			item := balanceCost{match: cost.Match, value: cost.Value}
++			if cost.Regexp {
++				expression, err := regexp.Compile(cost.Match)
++				if err != nil {
++					return nil, fmt.Errorf("invalid leastLoad cost regex: %w", err)
++				}
++				item.regexp = expression
++			}
++			costs = append(costs, item)
++		}
++	}
++	ctx, cancel := context.WithCancel(ctx)
++	return &balanceState{
++		leastExpected:  leastExpected,
++		leastMaxRTT:    leastMaxRTT,
++		leastTolerance: leastTolerance,
++		leastBaselines: leastBaselines,
++		ctx:            ctx,
++		cancel:         cancel,
++		config:         options,
++		history:        service.PtrFromContext[urltest.HistoryStorage](ctx),
++		costs:          costs,
++		reports:        make(map[string]balanceReport),
++		samples:        make(map[string][]probeSample),
++	}, nil
++}
++
++func (b *balanceState) scoreFor(tag string, delay time.Duration) float64 {
++	score := float64(delay)
++	for _, cost := range b.costs {
++		match := strings.Contains(tag, cost.match) && cost.match != ""
++		if cost.regexp != nil {
++			match = cost.regexp.MatchString(tag)
++		}
++		if match {
++			weight := cost.value
++			if weight <= 0 {
++				weight = 1
++				value := regexp.MustCompile(`[0-9]+(?:\.[0-9]+)?`).FindString(cost.match)
++				if value != "" {
++					if parsed, err := strconv.ParseFloat(value, 64); err == nil && parsed > 0 {
++						weight = parsed
++					}
++				}
++			}
++			score *= math.Sqrt(weight)
++			break
++		}
++	}
++	return score
++}
++
++func (b *balanceState) pick(tags []string) (string, error) {
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	var candidates []string
++	for _, tag := range tags {
++		report, observed := b.reports[tag]
++		if b.config.ProbeURL != "" {
++			if !observed || !report.alive {
++				continue
++			}
++			if b.config.Strategy == "leastload" {
++				if b.leastMaxRTT > 0 && report.delay >= b.leastMaxRTT {
++					continue
++				}
++				if b.leastTolerance > 0 && report.total > 0 && float64(report.failures)/float64(report.total) > b.leastTolerance {
++					continue
++				}
++			}
++			if b.config.Burst && time.Since(report.updated) > b.config.Interval.Build()*time.Duration(b.config.Sampling)*2 {
++				continue
++			}
++		}
++		candidates = append(candidates, tag)
++	}
++	if len(candidates) == 0 {
++		if b.config.Fallback != "" {
++			return b.config.Fallback, nil
++		}
++		return "", fmt.Errorf("balancer has no healthy outbound")
++	}
++	switch b.config.Strategy {
++	case "roundrobin":
++		tag := candidates[b.next%uint64(len(candidates))]
++		b.next++
++		return tag, nil
++	case "random":
++		return candidates[rand.Intn(len(candidates))], nil
++	case "leastping", "leastload":
++		sort.Slice(candidates, func(i, j int) bool {
++			left, right := b.reports[candidates[i]], b.reports[candidates[j]]
++			if b.config.Strategy == "leastload" {
++				if left.score != right.score {
++					return left.score < right.score
++				}
++			} else if left.delay != right.delay {
++				return left.delay < right.delay
++			}
++			return candidates[i] < candidates[j]
++		})
++		if b.config.Strategy == "leastload" {
++			count := min(max(b.leastExpected, 1), len(candidates))
++			if len(b.leastBaselines) > 0 {
++				count = 0
++				for _, baseline := range b.leastBaselines {
++					for count < len(candidates) && b.reports[candidates[count]].score < float64(baseline) {
++						count++
++					}
++					if count >= max(b.leastExpected, 1) {
++						break
++					}
++				}
++				if b.leastExpected > 0 {
++					count = max(count, min(b.leastExpected, len(candidates)))
++				}
++			}
++			if count == 0 {
++				if b.config.Fallback != "" {
++					return b.config.Fallback, nil
++				}
++				return "", fmt.Errorf("leastLoad has no qualifying outbound")
++			}
++			return candidates[rand.Intn(count)], nil
++		}
++		return candidates[0], nil
++	}
++	return "", fmt.Errorf("unsupported balancer strategy")
++}
++
++func (b *balanceState) Close() error {
++	b.mu.Lock()
++	if b.closed {
++		b.mu.Unlock()
++		return nil
++	}
++	b.closed = true
++	b.cancel()
++	b.mu.Unlock()
++	b.wg.Wait()
++	return nil
++}
++
++func (b *balanceState) postStart(targets map[string]adapter.Outbound) {
++	b.mu.Lock()
++	if b.started || b.closed {
++		b.mu.Unlock()
++		return
++	}
++	b.started = true
++	b.targets = make(map[string]adapter.Outbound, len(targets))
++	maps.Copy(b.targets, targets)
++	if b.config.ProbeURL == "" {
++		b.mu.Unlock()
++		return
++	}
++	b.wg.Add(1)
++	b.mu.Unlock()
++	go func() {
++		defer b.wg.Done()
++		b.probe()
++		ticker := time.NewTicker(b.config.Interval.Build())
++		defer ticker.Stop()
++		for {
++			select {
++			case <-b.ctx.Done():
++				return
++			case <-ticker.C:
++				b.probe()
++			}
++		}
++	}()
++}
++
++func (b *balanceState) probe() {
++	b.mu.RLock()
++	targets := make(map[string]adapter.Outbound, len(b.targets))
++	maps.Copy(targets, b.targets)
++	b.mu.RUnlock()
++	limit := 1
++	if b.config.Concurrent {
++		limit = 4
++	}
++	semaphore := make(chan struct{}, limit)
++	var group sync.WaitGroup
++	for tag, detour := range targets {
++		if tag == b.config.Fallback {
++			continue
++		}
++		if len(b.config.ProbeTags) > 0 && !slices.Contains(b.config.ProbeTags, tag) {
++			continue
++		}
++		select {
++		case semaphore <- struct{}{}:
++		case <-b.ctx.Done():
++			group.Wait()
++			return
++		}
++		group.Add(1)
++		go func(tag string, detour adapter.Outbound) {
++			defer group.Done()
++			defer func() { <-semaphore }()
++			ctx, cancel := context.WithTimeout(b.ctx, b.config.Timeout.Build())
++			delay, err := urltest.URLTestWithMethod(ctx, b.config.ProbeURL, b.config.Method, detour)
++			cancel()
++			if err != nil && b.config.Connectivity != "" {
++				ctx2, cancel2 := context.WithTimeout(b.ctx, b.config.Timeout.Build())
++				_, connErr := urltest.URLTestWithMethod(ctx2, b.config.Connectivity, b.config.Method, balanceDirectDialer{})
++				cancel2()
++				if connErr != nil {
++					return
++				}
++			}
++			b.record(tag, time.Duration(delay)*time.Millisecond, err)
++		}(tag, detour)
++	}
++	group.Wait()
++}
++
++type balanceDirectDialer struct{}
++
++func (balanceDirectDialer) DialContext(ctx context.Context, network string, address M.Socksaddr) (net.Conn, error) {
++	var dialer net.Dialer
++	return dialer.DialContext(ctx, network, address.String())
++}
++
++func (balanceDirectDialer) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
++	return nil, fmt.Errorf("packet probing is unsupported")
++}
++
++func (b *balanceState) record(tag string, delay time.Duration, err error) {
++	b.mu.Lock()
++	samples := append(b.samples[tag], probeSample{delay: delay, failed: err != nil})
++	if len(samples) > int(b.config.Sampling) {
++		samples = samples[len(samples)-int(b.config.Sampling):]
++	}
++	b.samples[tag] = samples
++	alive := err == nil
++	score := b.scoreFor(tag, delay)
++	failures := 0
++	for _, sample := range samples {
++		if sample.failed {
++			failures++
++		}
++	}
++	if b.config.Burst {
++		alive = failures < len(samples)
++		var good int
++		var sum time.Duration
++		for _, sample := range samples {
++			if !sample.failed {
++				good++
++				sum += sample.delay
++			}
++		}
++		if good > 0 {
++			delay = sum / time.Duration(good)
++			var variance float64
++			for _, sample := range samples {
++				if !sample.failed {
++					diff := float64(sample.delay - delay)
++					variance += diff * diff
++				}
++			}
++			deviation := float64(delay) / 2
++			if good > 1 {
++				deviation = math.Sqrt(variance / float64(good-1))
++			}
++			score = b.scoreFor(tag, time.Duration(deviation))
++		}
++	}
++	b.reports[tag] = balanceReport{alive: alive, delay: delay, score: score, total: len(samples), failures: failures, updated: time.Now()}
++	b.mu.Unlock()
++	if b.history != nil {
++		measured := uint16(min(max(delay.Milliseconds(), 0), 65535))
++		if !alive {
++			measured = 65535
++		}
++		b.history.StoreURLTestHistory(tag, &adapter.URLTestHistory{Time: time.Now(), Delay: measured})
++	}
++}
+diff --git a/protocol/group/xui_balancer_test.go b/protocol/group/xui_balancer_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f917327bcf7bd735b02f4c6e7389894eaffec61
+--- /dev/null
++++ b/protocol/group/xui_balancer_test.go
+@@ -0,0 +1,261 @@
++package group
++
++import (
++	"context"
++	"fmt"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/adapter/outbound"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/json/badoption"
++	M "github.com/sagernet/sing/common/metadata"
++)
++
++func TestXUIPanelDynamicBalancing(t *testing.T) {
++	targets := []string{"a", "b"}
++	for _, kind := range []string{"random", "roundRobin", "leastPing", "leastLoad"} {
++		t.Run(kind, func(t *testing.T) {
++			options := option.XrayBalancerOptions{Strategy: kind, Fallback: "backup", ProbeURL: "http://127.0.0.1:1/probe"}
++			state, err := newBalanceState(context.Background(), options)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer state.Close()
++			state.record("a", 10_000_000, nil)
++			state.record("b", 100_000_000, nil)
++			chosen := map[string]int{}
++			for range 100 {
++				tag, err := state.pick(targets)
++				if err != nil {
++					t.Fatal(err)
++				}
++				chosen[tag]++
++			}
++			if kind == "random" || kind == "roundRobin" {
++				if chosen["a"] == 0 || chosen["b"] == 0 {
++					t.Fatal("dynamic selection stayed static")
++				}
++			} else {
++				if chosen["a"] != 100 {
++					t.Fatalf("fast node not selected: %v", chosen)
++				}
++			}
++			state.record("a", 0, fmt.Errorf("offline"))
++			state.record("b", 0, fmt.Errorf("offline"))
++			tag, err := state.pick(targets)
++			if err != nil || tag != "backup" {
++				t.Fatalf("fallback: %s %v", tag, err)
++			}
++		})
++	}
++}
++
++// Probes use the selected outbound's dialer, never the system route.
++func TestXUIPanelBalancerProbeAndFallback(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != "GET" {
++			t.Errorf("probe method %s", r.Method)
++		}
++		w.WriteHeader(204)
++	}))
++	defer server.Close()
++	state, err := newBalanceState(context.Background(), option.XrayBalancerOptions{Strategy: "leastPing", Fallback: "backup", ProbeURL: server.URL, Method: "GET"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer state.Close()
++	fast := &probeOutbound{Adapter: outbound.NewAdapter("direct", "fast", nil, nil)}
++	dead := &probeOutbound{Adapter: outbound.NewAdapter("direct", "dead", nil, nil), fail: true}
++	state.targets = map[string]adapter.Outbound{"fast": fast, "dead": dead}
++	state.probe()
++	tag, err := state.pick([]string{"fast", "dead"})
++	if err != nil || tag != "fast" {
++		t.Fatalf("probe choice: %s %v", tag, err)
++	}
++	if fast.calls.Load() != 1 || dead.calls.Load() != 1 {
++		t.Fatal("probes bypassed outbound dialers")
++	}
++	fast.fail = true
++	state.probe()
++	tag, err = state.pick([]string{"fast", "dead"})
++	if err != nil || tag != "backup" {
++		t.Fatalf("probe fallback: %s %v", tag, err)
++	}
++}
++
++type probeOutbound struct {
++	outbound.Adapter
++	fail  bool
++	calls atomic.Int32
++}
++
++func (p *probeOutbound) DialContext(ctx context.Context, network string, address M.Socksaddr) (net.Conn, error) {
++	p.calls.Add(1)
++	if p.fail {
++		return nil, fmt.Errorf("offline")
++	}
++	var dialer net.Dialer
++	return dialer.DialContext(ctx, network, address.String())
++}
++
++func (p *probeOutbound) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
++	return nil, fmt.Errorf("unused")
++}
++
++func TestXUIPanelBalancerCloseBeforeStart(t *testing.T) {
++	state, err := newBalanceState(context.Background(), option.XrayBalancerOptions{Strategy: "random", ProbeURL: "http://127.0.0.1:1/"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	state.Close()
++	target := &probeOutbound{Adapter: outbound.NewAdapter("direct", "never", nil, nil), fail: true}
++	state.postStart(map[string]adapter.Outbound{"never": target})
++	state.Close()
++	if target.calls.Load() != 0 {
++		t.Fatal("probe after shutdown")
++	}
++}
++
++func TestXUIPanelBalancerRejectsNullCost(t *testing.T) {
++	_, err := newBalanceState(context.Background(), option.XrayBalancerOptions{Strategy: "leastLoad", ProbeURL: "http://127.0.0.1/probe", Settings: []byte(`{"costs":[null]}`)})
++	if err == nil {
++		t.Fatal("null cost accepted")
++	}
++}
++
++func TestXUIPanelLeastLoadAdvancedSettings(t *testing.T) {
++	ctx := context.Background()
++	state, err := newBalanceState(ctx, option.XrayBalancerOptions{
++		Strategy: "leastLoad",
++		ProbeURL: "https://example.org/",
++		Fallback: "backup",
++		Settings: []byte(`{"costs":[{"match":"a","value":9}],"maxRTT":"1s","expected":1,"tolerance":0.5}`),
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer state.Close()
++	state.record("a", 10*time.Millisecond, nil)
++	state.record("b", 20*time.Millisecond, nil)
++	tag, err := state.pick([]string{"a", "b"})
++	if err != nil || tag != "b" {
++		t.Fatalf("cost-weighted leastLoad should prefer b, got %q: %v", tag, err)
++	}
++	state.record("b", 0, fmt.Errorf("offline"))
++	tag, err = state.pick([]string{"a", "b"})
++	if err != nil || tag != "a" {
++		t.Fatalf("failed outbound still selected: %q: %v", tag, err)
++	}
++
++	baselines, err := newBalanceState(ctx, option.XrayBalancerOptions{
++		Strategy: "leastLoad",
++		ProbeURL: "https://example.org/",
++		Fallback: "backup",
++		Settings: []byte(`{"baselines":["1ms"]}`),
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer baselines.Close()
++	baselines.record("a", 40*time.Millisecond, nil)
++	tag, err = baselines.pick([]string{"a"})
++	if err != nil || tag != "backup" {
++		t.Fatalf("fallback must handle rejected baseline: %q: %v", tag, err)
++	}
++}
++
++func TestXUIPanelLeastLoadRejectsMalformedSettings(t *testing.T) {
++	for _, settings := range []string{
++		`{"costs":[null]}`,
++		`{"costs":[{"match":"(","regexp":true}]}`,
++		`{"maxRTT":"nonsense"}`,
++		`{"baselines":["not-duration"]}`,
++		`{"unknown":1}`,
++	} {
++		if _, err := newBalanceState(context.Background(), option.XrayBalancerOptions{
++			Strategy: "leastLoad",
++			ProbeURL: "https://example.org/",
++			Settings: []byte(settings),
++		}); err == nil {
++			t.Fatalf("accepted malformed settings: %s", settings)
++		}
++	}
++}
++
++func TestXUIPanelBalancerBurstSampling(t *testing.T) {
++	state, err := newBalanceState(context.Background(), option.XrayBalancerOptions{
++		Strategy: "leastLoad",
++		ProbeURL: "http://127.0.0.1:1/probe",
++		Fallback: "backup",
++		Burst:    true,
++		Sampling: 3,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer state.Close()
++	state.record("node", 10*time.Millisecond, nil)
++	state.record("node", 0, fmt.Errorf("temporary probe failure"))
++	selected, err := state.pick([]string{"node"})
++	if err != nil || selected != "node" {
++		t.Fatalf("a single failed sample must not mark burst node offline: %q %v", selected, err)
++	}
++	state.record("node", 0, fmt.Errorf("second probe failure"))
++	selected, err = state.pick([]string{"node"})
++	if err != nil || selected != "node" {
++		t.Fatalf("one successful sample must keep burst node alive: %q %v", selected, err)
++	}
++	state.record("node", 0, fmt.Errorf("third probe failure"))
++	selected, err = state.pick([]string{"node"})
++	if err != nil || selected != "backup" {
++		t.Fatalf("all failed samples must trigger fallback: %q %v", selected, err)
++	}
++}
++
++func TestXUIPanelBalancerConnectivityOutageDoesNotEvictHealthySnapshot(t *testing.T) {
++	// If the probe target AND the independent connectivity URL are
++	// unreachable, do not interpret the local network outage as evidence
++	// that a previously healthy outbound has gone offline.
++	state, err := newBalanceState(context.Background(), option.XrayBalancerOptions{
++		Strategy:     "leastPing",
++		ProbeURL:     "http://127.0.0.1:1/probe",
++		Connectivity: "http://127.0.0.1:1/connectivity",
++		Fallback:     "backup",
++		Timeout:      100000000, // 100ms
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer state.Close()
++	state.record("node", 15*time.Millisecond, nil)
++	dead := &probeOutbound{Adapter: outbound.NewAdapter("direct", "node", nil, nil), fail: true}
++	state.targets = map[string]adapter.Outbound{"node": dead}
++	state.probe()
++	if dead.calls.Load() != 1 {
++		t.Fatalf("expected exactly one outbound probe, got %d", dead.calls.Load())
++	}
++	selected, err := state.pick([]string{"node"})
++	if err != nil || selected != "node" {
++		t.Fatalf("local connectivity outage must preserve last healthy snapshot: %q %v", selected, err)
++	}
++}
++
++func TestXUIPanelBalancerRejectsOverflowingFreshnessWindow(t *testing.T) {
++	// Burst freshness multiplies interval * samples * 2. A wrapped
++	// negative duration could keep a stale proxy marked healthy.
++	_, err := newBalanceState(context.Background(), option.XrayBalancerOptions{
++		Strategy: "leastPing",
++		ProbeURL: "http://127.0.0.1:1/probe",
++		Interval: badoption.Duration(1 << 62),
++		Sampling: 2,
++	})
++	if err == nil {
++		t.Fatal("accepted an overflowing probe observation horizon")
++	}
++}

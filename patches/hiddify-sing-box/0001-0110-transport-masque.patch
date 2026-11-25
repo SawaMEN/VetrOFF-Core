@@ -1,0 +1,481 @@
+diff --git a/transport/masque/adapter.go b/transport/masque/adapter.go
+index f72748f7e2be58604fc2aced2aea4c1f36fbcc38..bcb46b54483b12995965b0bb1f1d556a439a746b 100644
+--- a/transport/masque/adapter.go
++++ b/transport/masque/adapter.go
+@@ -4,6 +4,7 @@ import (
+ 	"sync"
+ 
+ 	"github.com/sagernet/wireguard-go/tun"
++
+ 	"github.com/songgao/water"
+ )
+ 
+@@ -45,13 +46,13 @@ func NewNetstackAdapter(dev tun.Device) TunnelDevice {
+ 	return &NetstackAdapter{
+ 		dev: dev,
+ 		tunnelBufPool: sync.Pool{
+-			New: func() interface{} {
++			New: func() any {
+ 				buf := make([][]byte, 1)
+ 				return &buf
+ 			},
+ 		},
+ 		tunnelSizesPool: sync.Pool{
+-			New: func() interface{} {
++			New: func() any {
+ 				sizes := make([]int, 1)
+ 				return &sizes
+ 			},
+diff --git a/transport/masque/device_stack.go b/transport/masque/device_stack.go
+index 7aba16841a495b8ebd53df2d39e015f09a890825..5c5ef11649d1aa98ca0d6978dcf738249aace473 100644
+--- a/transport/masque/device_stack.go
++++ b/transport/masque/device_stack.go
+@@ -43,6 +43,8 @@ type stackDevice struct {
+ 	inet4Address   netip.Addr
+ 	inet6Address   netip.Addr
+ 	closeOnce      sync.Once
++	udpForwarder   *tun.UDPForwarder  //H
++	icmpForwarder  *tun.ICMPForwarder //H
+ }
+ 
+ func newStackDevice(options DeviceOptions) (*stackDevice, error) {
+@@ -88,8 +90,11 @@ func newStackDevice(options DeviceOptions) (*stackDevice, error) {
+ 	tunDevice.stack = ipStack
+ 	if options.Handler != nil {
+ 		ipStack.SetTransportProtocolHandler(tcp.ProtocolNumber, tun.NewTCPForwarder(options.Context, ipStack, options.Handler).HandlePacket)
+-		ipStack.SetTransportProtocolHandler(udp.ProtocolNumber, tun.NewUDPForwarder(options.Context, ipStack, options.Handler, nil, tun.UDPNatOptions{Timeout: options.UDPTimeout}).HandlePacket)
+-		icmpForwarder := tun.NewICMPForwarder(ipStack, options.Handler, nil, options.Logger)
++		udpForwarder := tun.NewUDPForwarder(options.Context, ipStack, options.Handler, nil, tun.UDPNatOptions{Timeout: options.UDPTimeout}) //H
++		tunDevice.udpForwarder = udpForwarder                                                                                               //H
++		ipStack.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder.HandlePacket)                                                  //H
++		icmpForwarder := tun.NewICMPForwarder(ipStack, options.Handler, nil, options.Logger)                                                //H
++		tunDevice.icmpForwarder = icmpForwarder                                                                                             //H
+ 		ipStack.SetTransportProtocolHandler(icmp.ProtocolNumber4, icmpForwarder.HandlePacket)
+ 		ipStack.SetTransportProtocolHandler(icmp.ProtocolNumber6, icmpForwarder.HandlePacket)
+ 	}
+@@ -163,6 +168,11 @@ func (w *stackDevice) ListenPacket(ctx context.Context, destination M.Socksaddr)
+ }
+ 
+ func (w *stackDevice) Start() error {
++	if w.udpForwarder != nil { //H
++		if err := w.udpForwarder.Start(); err != nil {
++			return err
++		} //H
++	} //H
+ 	w.events <- wgTun.EventUp
+ 	return nil
+ }
+@@ -236,7 +246,13 @@ func (w *stackDevice) Events() <-chan wgTun.Event {
+ }
+ 
+ func (w *stackDevice) Close() error {
+-	w.closeOnce.Do(func() { // a second Close closed the channels twice, a panic
++	w.closeOnce.Do(func() {
++		if w.udpForwarder != nil {
++			_ = w.udpForwarder.Close()
++		} //H
++		if w.icmpForwarder != nil {
++			_ = w.icmpForwarder.Close()
++		} //H
+ 		close(w.done)
+ 		close(w.events)
+ 		w.stack.Close()
+diff --git a/transport/masque/device_stack_stub.go b/transport/masque/device_stack_stub.go
+index 476a1f58d3cfc583c295c95732bb143473508e0b..073b903b0e231c0a4a0f604fc741425fced853ab 100644
+--- a/transport/masque/device_stack_stub.go
++++ b/transport/masque/device_stack_stub.go
+@@ -7,7 +7,3 @@ import "github.com/sagernet/sing-tun"
+ func newStackDevice(options DeviceOptions) (Device, error) {
+ 	return nil, tun.ErrGVisorNotIncluded
+ }
+-
+-func newSystemStackDevice(options DeviceOptions) (Device, error) {
+-	return nil, tun.ErrGVisorNotIncluded
+-}
+diff --git a/transport/masque/h_connect.go b/transport/masque/h_connect.go
+index 92cf8da8767029700a2291930db03c1b971d02ec..a4c8f8fa486f66db85f5a59d180e2cfb4ecaf9a5 100644
+--- a/transport/masque/h_connect.go
++++ b/transport/masque/h_connect.go
+@@ -7,9 +7,10 @@ import (
+ 	"net/http"
+ 	"time"
+ 
+-	connectip "github.com/Diniboy1123/connect-ip-go"
+ 	"github.com/sagernet/quic-go/http3"
+ 	E "github.com/sagernet/sing/common/exceptions"
++
++	connectip "github.com/Diniboy1123/connect-ip-go"
+ )
+ 
+ // HTTP versions of the tunnel (vhttp).
+diff --git a/transport/masque/h_connect_test.go b/transport/masque/h_connect_test.go
+index c315b2d75c81548884eef69307d2cec25ac943e8..ce7a956526d6c645c46942334ebff998ce4d864c 100644
+--- a/transport/masque/h_connect_test.go
++++ b/transport/masque/h_connect_test.go
+@@ -9,13 +9,13 @@ import (
+ 	"testing"
+ 	"time"
+ 
+-	connectip "github.com/Diniboy1123/connect-ip-go"
+ 	"github.com/sagernet/quic-go"
+ 	"github.com/sagernet/quic-go/http3"
+ 	"github.com/sagernet/sing-box/log"
+ 	N "github.com/sagernet/sing/common/network"
+ 	aTLS "github.com/sagernet/sing/common/tls"
+ 
++	connectip "github.com/Diniboy1123/connect-ip-go"
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+@@ -116,7 +116,7 @@ func TestH_AutoMemory(t *testing.T) {
+ 	require.NoError(t, err)
+ 	require.Equal(t, []bool{false, true}, legs.reset())
+ 	require.Equal(t, 2, tunnel.http2Step)
+-	require.Greater(t, tunnel.http2Until.Sub(time.Now()), firstUntil.Sub(time.Now()))
++	require.Greater(t, time.Until(tunnel.http2Until), time.Until(firstUntil))
+ 
+ 	// HTTP/3 works again after the window: memory cleared
+ 	tunnel.http2Until = time.Now().Add(-time.Second)
+diff --git a/transport/masque/h_reject.go b/transport/masque/h_reject.go
+index 871c2c23aab9e42ab02d8fc09d4ae19da08907e2..b06c5551fefddca64074573ebe6aee6631c354f7 100644
+--- a/transport/masque/h_reject.go
++++ b/transport/masque/h_reject.go
+@@ -37,8 +37,7 @@ func IsRejected(err error) bool {
+ 	if err == nil {
+ 		return false
+ 	}
+-	var status *StatusError
+-	if errors.As(err, &status) {
++	if status, ok := errors.AsType[*StatusError](err); ok {
+ 		return status.Status == http.StatusUnauthorized || status.Status == http.StatusForbidden
+ 	}
+ 	message := err.Error()
+diff --git a/transport/masque/h_tunnel_stub_test.go b/transport/masque/h_tunnel_stub_test.go
+index 34609ce29dfd41bbf3821d7ca079ac0f48f707cf..7dfc6a140caa77d0600f1dd6d81071a57ccafc50 100644
+--- a/transport/masque/h_tunnel_stub_test.go
++++ b/transport/masque/h_tunnel_stub_test.go
+@@ -9,6 +9,7 @@ import (
+ 
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-tun"
++
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+diff --git a/transport/masque/h_utils_test.go b/transport/masque/h_utils_test.go
+index 9218297cdc8596a43e2d9aa389144f2dd996985c..0b12e6fdd14bc946529e2665ac2edd652ed4abec 100644
+--- a/transport/masque/h_utils_test.go
++++ b/transport/masque/h_utils_test.go
+@@ -14,9 +14,9 @@ import (
+ 	"testing"
+ 	"time"
+ 
+-	"github.com/sagernet/quic-go"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	wgTun "github.com/sagernet/wireguard-go/tun"
++
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+@@ -92,7 +92,6 @@ func TestH_DefaultQuicConfig(t *testing.T) {
+ 	config = DefaultQuicConfig(0, 1242)
+ 	require.Equal(t, uint16(1242), config.InitialPacketSize)
+ 	require.True(t, config.DisablePathMTUDiscovery)
+-	var _ *quic.Config = config
+ }
+ 
+ func TestH_ParsePortMapping(t *testing.T) {
+diff --git a/transport/masque/masque.go b/transport/masque/masque.go
+index 78c96234851aaaeabbc6543171a3867ac49f0ee5..747f4e8bf3851163dcc89a315606b7fd165eb296 100644
+--- a/transport/masque/masque.go
++++ b/transport/masque/masque.go
+@@ -10,7 +10,6 @@ import (
+ 	"net/netip"
+ 	"strings"
+ 
+-	connectip "github.com/Diniboy1123/connect-ip-go"
+ 	"github.com/sagernet/quic-go"
+ 	"github.com/sagernet/quic-go/http3"
+ 	qtls "github.com/sagernet/sing-quic"
+@@ -18,6 +17,8 @@ import (
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
+ 	aTLS "github.com/sagernet/sing/common/tls"
++
++	connectip "github.com/Diniboy1123/connect-ip-go"
+ 	"github.com/yosida95/uritemplate/v3"
+ 	"golang.org/x/net/http2"
+ )
+@@ -61,15 +62,14 @@ func ConnectTunnel(ctx context.Context, dialer N.Dialer, tlsConfig aTLS.Config,
+ 	if err != nil {
+ 		return nil, nil, nil, nil, err
+ 	}
+-	udpConn = WholePacketConn(udpConn) //H: a full QUIC packet was cut off through Shadowsocks
++	udpConn = WholePacketConn(udpConn) // H: a full QUIC packet was cut off through Shadowsocks
+ 	conn, err := qtls.Dial(
+ 		ctx,
+ 		bufio.NewBindPacketConn(udpConn, quicEndpoint),
+ 		tlsConfig,
+ 		quicConfig,
+ 	)
+-	var rejection *tls.ECHRejectionError //H: as in newHTTP2Client, once without ECH when the peer rejects it
+-	if errors.As(err, &rejection) {
++	if _, ok := errors.AsType[*tls.ECHRejectionError](err); ok {
+ 		if capable, ok := tlsConfig.(interface{ SetECHConfigList([]byte) }); ok {
+ 			capable.SetECHConfigList(nil)
+ 		}
+@@ -148,8 +148,7 @@ func newHTTP2Client(dialer N.Dialer, baseTLSConfig aTLS.Config, endpoint *net.TC
+ 		Transport: &http2.Transport{
+ 			DialTLSContext: func(ctx context.Context, network, _ string, _ *tls.Config) (net.Conn, error) {
+ 				conn, err := dialTLS(ctx)
+-				var rejection *tls.ECHRejectionError
+-				if errors.As(err, &rejection) {
++				if _, ok := errors.AsType[*tls.ECHRejectionError](err); ok {
+ 					// The peer does not accept the offered ECH config (WARP does not). Drop it and
+ 					// retry once rather than failing the tunnel. //H
+ 					if capable, ok := tlsConfig.(interface{ SetECHConfigList([]byte) }); ok {
+diff --git a/transport/masque/options.go b/transport/masque/options.go
+index d9c6ef1f5ce2b7cd618152e20dba66fdc01b3753..993307569b57e80753b55a3b475160d1c4b34d8d 100644
+--- a/transport/masque/options.go
++++ b/transport/masque/options.go
+@@ -31,7 +31,7 @@ type TunnelOptions struct {
+ 	// NextEndpoint is asked for another endpoint after failed connects; nil keeps the endpoint.
+ 	NextEndpoint func(failed net.Addr, http2 bool) net.Addr
+ 	// OnRejected reports a connect the server refused because of the device (IsRejected). //H
+-	OnRejected func(err error) //H
++	OnRejected func(err error) // H
+ 	// ConnectURI is the URI template of the CONNECT-IP request; DefaultConnectURI when empty.
+ 	ConnectURI string
+ }
+diff --git a/transport/masque/server.go b/transport/masque/server.go
+index 422549cfc17ebd30d917bd0d7ac6fd4d33728531..56076650509ea1336735726e8060cb5c73a854e0 100644
+--- a/transport/masque/server.go
++++ b/transport/masque/server.go
+@@ -9,6 +9,7 @@ import (
+ 	"strings"
+ 	"sync"
+ 
++	"github.com/sagernet/sing-box/internal/xuispeed"
+ 	transportHTTP "github.com/sagernet/sing-box/transport/http"
+ 	"github.com/sagernet/sing-tun"
+ 	"github.com/sagernet/sing/common"
+@@ -28,6 +29,7 @@ type ServerHandler interface {
+ }
+ 
+ type ServerOptions struct {
++	SpeedScope      string
+ 	Context         context.Context
+ 	Logger          logger.ContextLogger
+ 	Path            string
+@@ -38,6 +40,7 @@ type ServerOptions struct {
+ }
+ 
+ type Server struct {
++	speedScope      string
+ 	ctx             context.Context
+ 	logger          logger.ContextLogger
+ 	template        *Template
+@@ -53,6 +56,7 @@ type Server struct {
+ }
+ 
+ type serverSession struct {
++	speed *xuispeed.Client
+ 	*session
+ 	queue            *tun.OutboundQueue
+ 	server           *Server
+@@ -72,12 +76,13 @@ func NewServer(options ServerOptions) (*Server, error) {
+ 		return nil, E.New("missing address")
+ 	}
+ 	server := &Server{
+-		ctx:       options.Context,
+-		logger:    options.Logger,
+-		template:  template,
+-		resolve:   options.Resolve,
+-		handler:   options.Handler,
+-		addresses: make(map[netip.Addr]*serverSession),
++		speedScope: options.SpeedScope,
++		ctx:        options.Context,
++		logger:     options.Logger,
++		template:   template,
++		resolve:    options.Resolve,
++		handler:    options.Handler,
++		addresses:  make(map[netip.Addr]*serverSession),
+ 	}
+ 	var builder netipx.IPSetBuilder
+ 	for _, address := range options.Address {
+@@ -152,6 +157,13 @@ func (s *Server) NewTunnelRequest(ctx context.Context, request transportHTTP.Tun
+ 		ctx:    ctx,
+ 	}
+ 	current.user, _ = auth.UserFromContext[string](ctx)
++	current.speed, err = xuispeed.New("masque:" + s.speedScope + ":" + current.user)
++	if err != nil {
++		s.logger.ErrorContext(ctx, E.Cause(err, "MASQUE speed budget unavailable"))
++		request.Reject(http.StatusServiceUnavailable, nil)
++		return
++	}
++	defer current.speed.Close()
+ 	for _, pool := range s.pools {
+ 		address, allocated := pool.allocate()
+ 		if !allocated {
+@@ -409,7 +421,16 @@ func (s *serverSession) handleRouteAdvertisement(routes []AddressRange) error {
+ 	return nil
+ }
+ 
++func (s *serverSession) waitDownload(n int) error {
++	return s.speed.Wait(s.session.ctx, 1, n)
++}
++
+ func (s *serverSession) handlePacket(buffer *buf.Buffer) {
++	if err := s.speed.Wait(s.ctx, 0, buffer.Len()); err != nil {
++		buffer.Release()
++		s.cancel(err)
++		return
++	}
+ 	source, destination, protocol, valid := packetAddresses(buffer.Bytes())
+ 	if !valid {
+ 		buffer.Release()
+diff --git a/transport/masque/session.go b/transport/masque/session.go
+index 0dc3fd6e4f9fafbcbe8c9e437af84f4f263afa3e..712f26f99eb17f86131074e674760ce154608b38 100644
+--- a/transport/masque/session.go
++++ b/transport/masque/session.go
+@@ -190,6 +190,14 @@ func (s *session) writeCapsule(capsule *buf.Buffer) error {
+ func (s *session) writePackets(buffers []*buf.Buffer) error {
+ 	capsules := buffers[:0]
+ 	for i, buffer := range buffers {
++		if limiter, ok := s.handler.(interface{ waitDownload(int) error }); ok {
++			if err := limiter.waitDownload(buffer.Len()); err != nil {
++				buffer.Release()
++				buf.ReleaseMulti(capsules)
++				buf.ReleaseMulti(buffers[i+1:])
++				return err
++			}
++		}
+ 		datagram := transportHTTP.PrependContextID(buffer)
+ 		if s.datagrams != nil {
+ 			err := s.datagrams.SendDatagram(datagram.Bytes())
+diff --git a/transport/masque/tunnel.go b/transport/masque/tunnel.go
+index be6b01e9bc22fbcfff71c58ff797d18db4a9e27f..518e8de65f11d1ccdfd5b525a22b07ba0520da8f 100644
+--- a/transport/masque/tunnel.go
++++ b/transport/masque/tunnel.go
+@@ -10,11 +10,12 @@ import (
+ 	"sync/atomic"
+ 	"time"
+ 
+-	connectip "github.com/Diniboy1123/connect-ip-go"
+ 	"github.com/sagernet/quic-go/http3"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	"github.com/sagernet/sing/common/logger"
+ 	M "github.com/sagernet/sing/common/metadata"
++
++	connectip "github.com/Diniboy1123/connect-ip-go"
+ )
+ 
+ type TunnelDevice interface {
+@@ -54,18 +55,18 @@ func (e *Tunnel) IsConnected() bool {
+ }
+ 
+ func NewTunnel(ctx context.Context, logger logger.ContextLogger, options TunnelOptions) (*Tunnel, error) {
+-	if options.MTU == 0 { //H
+-		options.MTU = DefaultMTU //H
+-	} //H
+-	if options.MTU < DefaultMTU || options.MTU > 9000 { //H
+-		return nil, E.New("MASQUE mtu must be between ", DefaultMTU, " and 9000") //H
+-	} //H
++	if options.MTU == 0 { // H
++		options.MTU = DefaultMTU // H
++	} // H
++	if options.MTU < DefaultMTU || options.MTU > 9000 { // H
++		return nil, E.New("MASQUE mtu must be between ", DefaultMTU, " and 9000") // H
++	} // H
+ 	deviceOptions := DeviceOptions{
+ 		Context:    ctx,
+ 		Logger:     logger,
+ 		Handler:    options.Handler,
+ 		UDPTimeout: options.UDPTimeout,
+-		MTU:        options.MTU, //H
++		MTU:        options.MTU, // H
+ 		Address:    options.Address,
+ 	}
+ 	tunDevice, err := NewDevice(deviceOptions)
+@@ -129,7 +130,7 @@ func (e *Tunnel) Close() error {
+ 
+ func (e *Tunnel) maintainTunnel() {
+ 	go func() {
+-		buf := make([]byte, e.options.MTU) //H: a packet as large as the MTU, not cut at 1280
++		buf := make([]byte, e.options.MTU) // H: a packet as large as the MTU, not cut at 1280
+ 		for e.ctx.Err() == nil {
+ 			n, err := e.tunnelDevice.ReadPacket(buf)
+ 			if err != nil {
+@@ -152,7 +153,7 @@ func (e *Tunnel) maintainTunnel() {
+ 					}
+ 					continue
+ 				}
+-				e.logger.ErrorContext(e.ctx, fmt.Errorf("Error writing to IP connection: %v, continuing...", err))
++				e.logger.ErrorContext(e.ctx, fmt.Errorf("write to IP connection: %v", err))
+ 				continue
+ 			}
+ 			if len(icmp) > 0 {
+@@ -161,13 +162,13 @@ func (e *Tunnel) maintainTunnel() {
+ 						e.logger.ErrorContext(e.ctx, fmt.Errorf("connection closed while writing ICMP to TUN device: %v", err))
+ 						continue
+ 					}
+-					e.logger.ErrorContext(e.ctx, fmt.Errorf("Error writing ICMP to TUN device: %v, continuing...", err))
++					e.logger.ErrorContext(e.ctx, fmt.Errorf("write ICMP to TUN device: %v", err))
+ 				}
+ 			}
+ 		}
+ 	}()
+ 	go func() {
+-		buf := make([]byte, e.options.MTU) //H: a packet as large as the MTU, not cut at 1280
++		buf := make([]byte, e.options.MTU) // H: a packet as large as the MTU, not cut at 1280
+ 		for e.ctx.Err() == nil {
+ 			ipConn, err := e.getIpConn()
+ 			if err != nil {
+@@ -181,7 +182,7 @@ func (e *Tunnel) maintainTunnel() {
+ 					}
+ 					continue
+ 				}
+-				e.logger.ErrorContext(e.ctx, fmt.Errorf("Error reading from IP connection: %v, continuine...", err))
++				e.logger.ErrorContext(e.ctx, fmt.Errorf("read from IP connection: %v", err))
+ 				continue
+ 			}
+ 			if err := e.tunnelDevice.WritePacket(buf[:n]); err != nil {
+@@ -203,15 +204,15 @@ func (e *Tunnel) getIpConn() (*connectip.Conn, error) {
+ 	}
+ 	timer := time.NewTimer(0)
+ 	defer timer.Stop()
+-	for failures := 1; ; failures++ { //H
++	for failures := 1; ; failures++ { // H
+ 		conn, err := e.connect()
+ 		if err == nil {
+ 			e.udpConn = conn.udpConn
+ 			e.tr = conn.tr
+ 			e.ipConn = conn.ipConn
+ 			e.activeHTTP2.Store(conn.http2)
+-			e.connected.Store(true) //H
+-			e.lastError.Store(nil)  //H
++			e.connected.Store(true) // H
++			e.lastError.Store(nil)  // H
+ 			e.logger.InfoContext(e.ctx, "connected to MASQUE server over ", map[bool]string{true: "HTTP/2", false: "HTTP/3"}[conn.http2])
+ 			return conn.ipConn, nil
+ 		}
+@@ -219,8 +220,8 @@ func (e *Tunnel) getIpConn() (*connectip.Conn, error) {
+ 			return nil, e.ctx.Err()
+ 		}
+ 		e.logger.ErrorContext(e.ctx, E.Cause(err, "connect MASQUE tunnel"))
+-		e.lastError.Store(&err)                                           //H
+-		timer.Reset(reconnectBackoff(e.options.ReconnectDelay, failures)) //H
++		e.lastError.Store(&err)                                           // H
++		timer.Reset(reconnectBackoff(e.options.ReconnectDelay, failures)) // H
+ 		select {
+ 		case <-e.ctx.Done():
+ 			return nil, e.ctx.Err()
+@@ -233,7 +234,7 @@ func (e *Tunnel) closeIpConn(ipConn *connectip.Conn) bool {
+ 	e.mtx.Lock()
+ 	defer e.mtx.Unlock()
+ 	if ipConn == e.ipConn {
+-		e.connected.Store(false) //H
++		e.connected.Store(false) // H
+ 		e.ipConn.Close()
+ 		if e.udpConn != nil {
+ 			e.udpConn.Close()

@@ -1,0 +1,348 @@
+diff --git a/transport/awg/bind.go b/transport/awg/bind.go
+index 4c3c6ea83e56a0e2a78a1b87a88aead1449e8030..4afbc4dc18e831d6d51e834e35a893874d9d1127 100644
+--- a/transport/awg/bind.go
++++ b/transport/awg/bind.go
+@@ -37,7 +37,15 @@ type bind_adapter struct {
+ 	failedTx atomic.Uint64        //H: bytes of the sends that failed, see h_path.go
+ }
+ 
+-func newBind(ctx context.Context, dial N.Dialer, peer netip.AddrPort, reserved *Reserved) conn.Bind {
++func newBind(ctx context.Context, dial N.Dialer, peerOptions ...any) conn.Bind {
++	var peer netip.AddrPort
++	var reserved *Reserved
++	if len(peerOptions) > 0 {
++		peer, _ = peerOptions[0].(netip.AddrPort)
++	}
++	if len(peerOptions) > 1 {
++		reserved, _ = peerOptions[1].(*Reserved)
++	}
+ 	return &bind_adapter{
+ 		ctx:      ctx,
+ 		dialer:   dial,
+diff --git a/transport/awg/device.go b/transport/awg/device.go
+index 9db4d7b5232a6fd3ceeba6fe9350286c80dec593..4530132b68b8dece230fb8a5d98f38d550bb87ea 100644
+--- a/transport/awg/device.go
++++ b/transport/awg/device.go
+@@ -125,6 +125,8 @@ func (d *Device) Close() error {
+ 	d.path.close() //H
+ 	if d.awgDevice != nil {
+ 		d.awgDevice.Close()
++	} else if d.tun != nil {
++		return d.tun.Close()
+ 	}
+ 	return nil
+ }
+@@ -147,7 +149,7 @@ func (d *Device) ListenPacket(ctx context.Context, destination metadata.Socksadd
+ // IpcGet returns the device's state in the UAPI format; WARP reads handshakes and traffic from it.
+ func (d *Device) IpcGet() (string, error) {
+ 	if d.awgDevice == nil {
+-		return "", os.ErrInvalid
++		return "", net.ErrClosed
+ 	}
+ 	return d.awgDevice.IpcGet()
+ }
+diff --git a/transport/awg/h_bind_later_test.go b/transport/awg/h_bind_later_test.go
+index 360606b805173c13af3f19535a07b05b3a36eaa1..4e47ccc787596c69d7466e8e4bba14c71b3fb475 100644
+--- a/transport/awg/h_bind_later_test.go
++++ b/transport/awg/h_bind_later_test.go
+@@ -9,9 +9,10 @@ import (
+ 	"testing"
+ 	"time"
+ 
+-	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
++
++	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+diff --git a/transport/awg/h_device_close_test.go b/transport/awg/h_device_close_test.go
+index 14eee29462103cf93e9e85b5d024745eaddaf4be..63d1023a0505f40c3dd18721165f199c73643fb1 100644
+--- a/transport/awg/h_device_close_test.go
++++ b/transport/awg/h_device_close_test.go
+@@ -13,6 +13,7 @@ import (
+ 	"github.com/sagernet/sing/common/logger"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 
++	"github.com/amnezia-vpn/amneziawg-go/v3/device"
+ 	"github.com/stretchr/testify/require"
+ 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+ )
+@@ -62,16 +63,25 @@ func TestH_DeviceCloseWithStalledDetour(t *testing.T) {
+ 	require.NoError(t, err)
+ 	peer := netip.MustParseAddrPort("127.0.0.1:" + strconv.Itoa(int(hFreeUDPPort(t))))
+ 	stalled := &hStalledConn{closed: make(chan struct{}), writing: make(chan struct{}, 1)}
++	defer stalled.Close()
+ 	ipc := "private_key=" + hKeyHex(key) +
+ 		"\npublic_key=" + hKeyHex(peerKey.PublicKey()) +
+ 		"\nendpoint=" + peer.String() +
+-		"\npersistent_keepalive_interval=1" +
+ 		"\nallowed_ip=0.0.0.0/0"
+-	device, err := NewDevice(context.Background(), logger.NOP(), &hStalledDialer{conn: stalled}, ipc, DeviceOpts{
++	tunnel, err := NewDevice(context.Background(), logger.NOP(), &hStalledDialer{conn: stalled}, ipc, DeviceOpts{
+ 		Address: []netip.Prefix{netip.MustParsePrefix("10.78.0.2/32")}, MTU: 1408, Peer: peer,
+ 	})
+ 	require.NoError(t, err)
+-	go device.Start(adapter.StartStateStart) // its first keepalive is sent at once, and stalls
++	require.NoError(t, tunnel.Start(adapter.StartStateStart))
++	bind := tunnel.bind.(*bind_adapter)
++	require.Eventually(t, func() bool {
++		bind.mutex.Lock()
++		defer bind.mutex.Unlock()
++		return bind.conn4 != nil
++	}, 3*time.Second, 10*time.Millisecond, "deferred bind must connect before sending")
++	peerDevice := tunnel.awgDevice.LookupPeer(device.NoisePublicKey(peerKey.PublicKey()))
++	require.NotNil(t, peerDevice)
++	go peerDevice.SendHandshakeInitiation(false)
+ 	select {
+ 	case <-stalled.writing:
+ 	case <-time.After(5 * time.Second):
+@@ -80,7 +90,7 @@ func TestH_DeviceCloseWithStalledDetour(t *testing.T) {
+ 
+ 	closed := make(chan struct{})
+ 	go func() {
+-		device.Close()
++		tunnel.Close()
+ 		close(closed)
+ 	}()
+ 	select {
+diff --git a/transport/awg/h_device_test.go b/transport/awg/h_device_test.go
+index ee62b22de451c1c72040082846680566c477912b..a42099fe241fa3575771c4b48a4b3ee33d61deb4 100644
+--- a/transport/awg/h_device_test.go
++++ b/transport/awg/h_device_test.go
+@@ -8,16 +8,18 @@ import (
+ 	"net"
+ 	"net/netip"
+ 	"strconv"
++	"strings"
+ 	"sync"
+ 	"syscall"
+ 	"testing"
+ 	"time"
+ 
+-	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing/common/logger"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
++
++	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
+ 	"github.com/stretchr/testify/require"
+ 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+ )
+@@ -70,7 +72,7 @@ func hFreeUDPPort(t *testing.T) uint16 {
+ 
+ func TestH_BindOpenSendReceive(t *testing.T) {
+ 	dialer := &hLoopbackDialer{}
+-	b := newBind(context.Background(), dialer, netip.AddrPort{}, nil)
++	b := newBind(context.Background(), dialer)
+ 	fns, port, err := b.Open(0)
+ 	require.NoError(t, err)
+ 	require.Equal(t, uint16(0), port)
+@@ -222,9 +224,17 @@ func hStartTunnelPairWithRelay(t *testing.T, ctx context.Context, obfuscation st
+ }
+ 
+ func TestH_DeviceLoopbackTunnel(t *testing.T) {
++	hLoopbackTunnel(t, hObfuscation)
++}
++
++func TestH_DeviceAWG3LoopbackTunnel(t *testing.T) {
++	hLoopbackTunnel(t, hObfuscation+"\ns3=20\ns4=20\nheader_protection_key="+strings.Repeat("11", 32)+"\ncontent_padding_addition=5-10")
++}
++
++func hLoopbackTunnel(t *testing.T, obfuscation string) {
+ 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+ 	defer cancel()
+-	server, client, serverAddress := hStartTunnelPair(t, ctx, hObfuscation)
++	server, client, serverAddress := hStartTunnelPair(t, ctx, obfuscation)
+ 
+ 	tcpConn, err := client.DialContext(ctx, N.NetworkTCP, M.SocksaddrFrom(serverAddress.Addr(), 8080))
+ 	require.NoError(t, err)
+diff --git a/transport/awg/h_path.go b/transport/awg/h_path.go
+index fcafcc6545713ac349255cd486518e7f48133ca6..38f201e3bf1c40af5899d47ce492d36f5f455b1e 100644
+--- a/transport/awg/h_path.go
++++ b/transport/awg/h_path.go
+@@ -283,7 +283,7 @@ func peerPublicKey(ipcConfig string) (device.NoisePublicKey, bool) {
+ 		key   device.NoisePublicKey
+ 		count int
+ 	)
+-	for _, line := range strings.Split(ipcConfig, "\n") {
++	for line := range strings.SplitSeq(ipcConfig, "\n") {
+ 		if value, found := strings.CutPrefix(line, "public_key="); found {
+ 			count++
+ 			if decoded, err := hex.DecodeString(value); err == nil && len(decoded) == len(key) {
+diff --git a/transport/awg/h_path_test.go b/transport/awg/h_path_test.go
+index 0674856118733ea57d638832773ebc51a7d46db8..534af6ec243204163acb1af639e11b5e149662b2 100644
+--- a/transport/awg/h_path_test.go
++++ b/transport/awg/h_path_test.go
+@@ -13,6 +13,7 @@ import (
+ 	"github.com/sagernet/sing/common/logger"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
++
+ 	"github.com/stretchr/testify/require"
+ 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+ )
+@@ -43,7 +44,7 @@ func hStartPathPairWith(t *testing.T, ctx context.Context, dialer N.Dialer, serv
+ 	server, err := NewDevice(ctx, logger.NOP(), &hLoopbackDialer{}, "private_key="+hKeyHex(serverKey)+
+ 		"\nlisten_port="+strconv.Itoa(int(serverPort))+
+ 		"\npublic_key="+hKeyHex(clientKey.PublicKey())+"\nallowed_ip="+clientAddress.String(),
+-		DeviceOpts{Address: []netip.Prefix{serverAddress}, MTU: 1500})
++		DeviceOpts{Address: []netip.Prefix{serverAddress}, MTU: 1500, ListenPort: serverPort})
+ 	require.NoError(t, err)
+ 	t.Cleanup(func() { server.Close() })
+ 	require.NoError(t, server.Start(adapter.StartStateStart))
+@@ -73,9 +74,7 @@ func TestH_PathFallback(t *testing.T) {
+ 		real = netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), serverPort)
+ 		return dead
+ 	}, DeviceOpts{MTU: 1408})
+-	client.path.opts.Fallback = []netip.AddrPort{real}
+-	client.path.close()
+-	client.path.start(client) // with the fallback, as NewDevice would set it
++	client.path.setAddresses([]netip.AddrPort{dead, real})
+ 
+ 	listener, err := server.tun.(*networkTun).conn.ListenTCPAddrPort(netip.AddrPortFrom(serverAddress.Addr(), 8080))
+ 	require.NoError(t, err)
+diff --git a/transport/awg/tun.go b/transport/awg/tun.go
+index be6fdd179174a09b9942e1b350f3e4bcce00c520..3099ac63c8201d5c4cca513ef7b9ae256e010980 100644
+--- a/transport/awg/tun.go
++++ b/transport/awg/tun.go
+@@ -1,9 +1,10 @@
+ package awg
+ 
+ import (
+-	awgTun "github.com/amnezia-vpn/amneziawg-go/v3/tun"
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing/common/network"
++
++	awgTun "github.com/amnezia-vpn/amneziawg-go/v3/tun"
+ )
+ 
+ type tunAdapter interface {
+diff --git a/transport/awg/tun_network.go b/transport/awg/tun_network.go
+index c66d5f0278b1f3c0bb67a0a3545b838e68cb7082..fab8b6ed5dcd6a078916a90106bad5ca84564ff1 100644
+--- a/transport/awg/tun_network.go
++++ b/transport/awg/tun_network.go
+@@ -4,16 +4,21 @@ import (
+ 	"context"
+ 	"net"
+ 	"net/netip"
++	"sync"
++
++	"github.com/sagernet/sing/common/metadata"
+ 
+ 	"github.com/amnezia-vpn/amneziawg-go/v3/tun"
+ 	"github.com/amnezia-vpn/amneziawg-go/v3/tun/netstack"
+-	C "github.com/sagernet/sing-box/constant"
+-	"github.com/sagernet/sing/common/metadata"
+ )
+ 
+ type networkTun struct {
+ 	tun.Device
+-	conn *netstack.Net
++	conn      *netstack.Net
++	events    chan tun.Event
++	done      chan struct{}
++	closeOnce sync.Once
++	closeErr  error
+ }
+ 
+ func newNetworkTun(address []netip.Prefix, mtu uint32) (tunAdapter, error) {
+@@ -22,15 +27,38 @@ func newNetworkTun(address []netip.Prefix, mtu uint32) (tunAdapter, error) {
+ 		localAddresses = append(localAddresses, prefix.Addr())
+ 	}
+ 
+-	tun, conn, err := netstack.CreateNetTUN(localAddresses, []netip.Addr{}, int(mtu))
++	device, conn, err := netstack.CreateNetTUN(localAddresses, []netip.Addr{}, int(mtu))
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 
+-	return &networkTun{
+-		Device: tun,
+-		conn:   conn,
+-	}, nil
++	// Use the same v3 netstack and device types as the AWG engine and MTU discovery.
++	result := &networkTun{Device: device, conn: conn, events: make(chan tun.Event, 1), done: make(chan struct{})}
++	go func() {
++		defer close(result.events)
++		for {
++			select {
++			case <-result.done:
++				return
++			case event, ok := <-device.Events():
++				if !ok {
++					return
++				}
++				select {
++				case result.events <- tun.Event(event):
++				case <-result.done:
++					return
++				}
++			}
++		}
++	}()
++	return result, nil
++}
++
++func (t *networkTun) Events() <-chan tun.Event { return t.events }
++func (t *networkTun) Close() error {
++	t.closeOnce.Do(func() { close(t.done); t.closeErr = t.Device.Close() })
++	return t.closeErr
+ }
+ 
+ func (t *networkTun) Start() error {
+@@ -38,10 +66,6 @@ func (t *networkTun) Start() error {
+ }
+ 
+ func (t *networkTun) DialContext(ctx context.Context, network string, destination metadata.Socksaddr) (net.Conn, error) {
+-	// the netstack retries SYN for about two minutes; give up after the TCP timeout, as a
+-	// direct dial does
+-	ctx, cancel := context.WithTimeout(ctx, C.TCPTimeout)
+-	defer cancel()
+ 	return t.conn.DialContext(ctx, network, destination.String())
+ }
+ 
+diff --git a/transport/awg/tun_system.go b/transport/awg/tun_system.go
+index 5bc177dd8ab035e76fec7707de8963bf642ebb48..0d636204e681e63c18ffc002316cfb3ec6a43c68 100644
+--- a/transport/awg/tun_system.go
++++ b/transport/awg/tun_system.go
+@@ -7,8 +7,6 @@ import (
+ 	"os"
+ 	"sync"
+ 
+-	awgTun "github.com/amnezia-vpn/amneziawg-go/v3/tun"
+-
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/common/dialer"
+ 	"github.com/sagernet/sing-box/option"
+@@ -19,6 +17,8 @@ import (
+ 	"github.com/sagernet/sing/common/metadata"
+ 	"github.com/sagernet/sing/common/network"
+ 	"github.com/sagernet/sing/service"
++
++	awgTun "github.com/amnezia-vpn/amneziawg-go/v3/tun"
+ )
+ 
+ type systemTun struct {
+@@ -36,9 +36,7 @@ func newSystemTun(ctx context.Context, address []netip.Prefix, allowedIps []neti
+ 	events := make(chan awgTun.Event)
+ 
+ 	dial, err := dialer.NewDefault(ctx, option.DialerOptions{
+-		AbstractDialerOptions: option.AbstractDialerOptions{
+-			BindInterface: name,
+-		},
++		BindInterface: name,
+ 	})
+ 	if err != nil {
+ 		return nil, exceptions.Cause(err, "get in-tunnel dialer")
+@@ -107,7 +105,7 @@ func (t *systemTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+ 
+ func (t *systemTun) Write(bufs [][]byte, offset int) (int, error) {
+ 	for _, buf := range bufs {
+-		common.ClearArray(buf[offset-tun.PacketOffset : offset])
++		clear(buf[offset-tun.PacketOffset : offset])
+ 		tun.PacketFillHeader(buf[offset-tun.PacketOffset:], tun.PacketIPVersion(buf[offset:]))
+ 
+ 		if _, err := t.singtun.Write(buf[offset-tun.PacketOffset:]); err != nil {

@@ -1,0 +1,30 @@
+diff --git a/hiddify/edgescan/h_search_test.go b/hiddify/edgescan/h_search_test.go
+index 8748ec2b5f77c2333a08041d25f5de5a6c1a205d..eae57571e78c583eda0533cf88fc8608ad5b639d 100644
+--- a/hiddify/edgescan/h_search_test.go
++++ b/hiddify/edgescan/h_search_test.go
+@@ -148,15 +148,22 @@ func TestH_ScanRatesBlocks(t *testing.T) {
+ 		return 0, errors.New("no answer")
+ 	}
+ 	request := Request{
+-		Options: &option.WARPScannerOptions{Concurrency: 1, Count: 16, CIDRs: badoption.Listable[netip.Prefix]{netip.MustParsePrefix("192.0.2.0/23")}, Ports: badoption.Listable[uint16]{1}},
++		Options: &option.WARPScannerOptions{Concurrency: 1, Count: 2, CIDRs: badoption.Listable[netip.Prefix]{netip.MustParsePrefix("192.0.2.0/23")}, Ports: badoption.Listable[uint16]{1}},
+ 		IPv4:    true,
+ 		Book:    book,
+ 		Network: "home",
+ 		Probe:   probe,
+-		Enough:  16,
++		// Explicitly exercise one successful and one failed probe. No random
++		// candidate is required to test how the two blocks are rated.
++		Seeds: []Target{
++			{AddrPort: netip.MustParseAddrPort("192.0.2.1:1")},
++			{AddrPort: netip.MustParseAddrPort("192.0.3.1:1")},
++		},
++		Enough: 2,
+ 	}
+-	_, err := Scan(context.Background(), log.NewNOPFactory().Logger(), request)
++	results, err := Scan(context.Background(), log.NewNOPFactory().Logger(), request)
+ 	require.NoError(t, err)
++	require.Len(t, results, 1)
+ 	require.Positive(t, book.BlockScore("home", answering))
+ 	require.Negative(t, book.BlockScore("home", netip.MustParsePrefix("192.0.3.0/24")))
+ }

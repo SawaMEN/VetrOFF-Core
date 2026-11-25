@@ -40,8 +40,38 @@ index a8104ceb09980b5dba2c9a9788632f4d321a8c93..71468ded441478a06e4d3df3ca20ca49
 +		require.True(t, adapter.IsReady())
  	}
  }
+diff --git a/adapter/outbound/h_lazy.go b/adapter/outbound/h_lazy.go
+index 5d2a5a8a7ec2d27f78755abde04ba70da557f4e0..e39eb445fdfe7ef25de9a393d42c04f073572e2d 100644
+--- a/adapter/outbound/h_lazy.go
++++ b/adapter/outbound/h_lazy.go
+@@ -171,13 +171,15 @@ func (l *Lazy) DisplayType() string {
+ 
+ // Status is the real outbound's; without one, ready, as a connection creates it, or failed when
+ // it could not be created the last time.
++func (l *Lazy) IsReady() bool { return l.Status() == adapter.StatusReady }
++
+ func (l *Lazy) Status() adapter.Status {
+ 	l.access.Lock()
+ 	inner, failure := l.inner, l.failure
+ 	l.access.Unlock()
+ 	switch {
+ 	case inner != nil:
+-		return inner.Status()
++		return adapter.OutboundStatus(inner)
+ 	case failure != nil:
+ 		return adapter.StatusFailed
+ 	}
+@@ -524,7 +526,7 @@ func (l *Lazy) unload(now bool) {
+ 	}
+ 	// still registering or searching (WARP): closing it would start that over, so it stays
+ 	// until it is through, or until it is unloaded on purpose (keep top puts it to rest)
+-	if !now && adapter.IsWarming(l.inner.Status()) {
++	if !now && adapter.IsWarming(adapter.OutboundStatus(l.inner)) {
+ 		l.armLocked(lazyLinger)
+ 		l.access.Unlock()
+ 		return
 diff --git a/adapter/outbound/manager.go b/adapter/outbound/manager.go
-index 976de50193a1735f9b7bd7a3575ac9ec741b49df..a56075c31237362da68b492af744061c5f337c58 100644
+index 46d31bc9d9c62e5bfd598a2861300bc42fb977ed..2b727cbe6e4fc146fe01485a873ac9a4f8addfad 100644
 --- a/adapter/outbound/manager.go
 +++ b/adapter/outbound/manager.go
 @@ -2,7 +2,6 @@ package outbound
@@ -60,24 +90,37 @@ index 976de50193a1735f9b7bd7a3575ac9ec741b49df..a56075c31237362da68b492af744061c
  	"github.com/sagernet/sing/common"
  	E "github.com/sagernet/sing/common/exceptions"
  )
-@@ -194,94 +194,76 @@ func (m *Manager) remove(tag string, ignoreDependents bool) error {
- 		return os.ErrInvalid
+@@ -27,8 +27,7 @@ type Manager struct {
+ 	defaultOutboundFallback func() (adapter.Outbound, error)
+ 	scope                   *adapter.Scope // H: where outbounds created by hot reload are started
+ 	started                 bool
+-
+-	insecure map[string]string // H: why each outbound is not secure (option.InsecureReason)
++	insecure                map[string]string
+ }
+ 
+ func NewManager(registry adapter.OutboundRegistry, endpoint adapter.EndpointManager, defaultTag string) *Manager {
+@@ -37,7 +36,7 @@ func NewManager(registry adapter.OutboundRegistry, endpoint adapter.EndpointMana
+ 		endpoint:      endpoint,
+ 		defaultTag:    defaultTag,
+ 		outboundByTag: make(map[string]adapter.Outbound),
+-		insecure:      make(map[string]string), //H
++		insecure:      make(map[string]string),
+ 	}
+ }
+ 
+@@ -198,29 +197,29 @@ func (m *Manager) remove(tag string, ignoreDependents bool) error {
  	}
  	if !ignoreDependents {
--		dependBy := m.dependents(tag)
+ 		dependBy := m.dependents(tag)
 -		if len(dependBy) > 0 {
-+		var dependBy []string
-+		for _, candidate := range m.outbounds {
-+			if candidate.Tag() != tag && slices.Contains(candidate.Dependencies(), tag) {
-+				dependBy = append(dependBy, candidate.Tag())
-+			}
-+		}
 +		if len(dependBy) != 0 {
  			m.access.Unlock()
  			return E.New("outbound[", tag, "] is depended by ", strings.Join(dependBy, ", "))
  		}
  	}
 -	delete(m.outboundByTag, tag)
+-	delete(m.insecure, tag) //H
  	index := slices.Index(m.outbounds, outbound)
 -	if index == -1 {
 -		panic("invalid outbound index")
@@ -88,6 +131,7 @@ index 976de50193a1735f9b7bd7a3575ac9ec741b49df..a56075c31237362da68b492af744061c
 -	m.outbounds = slices.Delete(slices.Clone(m.outbounds), index, index+1) // H: never change a slice already handed out
 +	m.outbounds = slices.Delete(slices.Clone(m.outbounds), index, index+1)
 +	delete(m.outboundByTag, tag)
++	delete(m.insecure, tag)
  	if m.defaultOutbound == outbound {
 +		m.defaultOutbound = nil
  		if len(m.outbounds) > 0 {
@@ -105,28 +149,27 @@ index 976de50193a1735f9b7bd7a3575ac9ec741b49df..a56075c31237362da68b492af744061c
  	}
  	return nil
  }
- 
--// dependents lists the outbounds and endpoints that depend on tag. Call with access held.
--func (m *Manager) dependents(tag string) []string {
--	var dependBy []string
--	for _, outbound := range m.outbounds {
+@@ -229,7 +228,7 @@ func (m *Manager) remove(tag string, ignoreDependents bool) error {
+ func (m *Manager) dependents(tag string) []string {
+ 	var dependBy []string
+ 	for _, outbound := range m.outbounds {
 -		if common.Contains(outbound.Dependencies(), tag) {
--			dependBy = append(dependBy, outbound.Tag())
--		}
--	}
--	for _, endpoint := range m.endpoint.Endpoints() {
--		if common.Contains(endpoint.Dependencies(), tag) {
--			dependBy = append(dependBy, endpoint.Tag())
--		}
--	}
--	return dependBy
--}
--
- func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, inboundType string, options any) error {
++		if outbound.Tag() != tag && slices.Contains(outbound.Dependencies(), tag) {
+ 			dependBy = append(dependBy, outbound.Tag())
+ 		}
+ 	}
+@@ -245,48 +244,48 @@ func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.
  	if tag == "" {
  		return os.ErrInvalid
  	}
 -	option.MigrateTLSFragment(options) //H: a tls_fragment in the tls block applies like the dialer's
++	m.access.RLock()
++	_, duplicate := m.outboundByTag[tag]
++	started := m.started
++	m.access.RUnlock()
++	if duplicate && !started {
++		return E.New("duplicate outbound tag: ", tag)
++	}
 +	option.MigrateTLSFragment(options) // H
  	outbound, err := m.registry.CreateOutbound(ctx, router, logger, tag, inboundType, options)
  	if err != nil {
@@ -172,7 +215,9 @@ index 976de50193a1735f9b7bd7a3575ac9ec741b49df..a56075c31237362da68b492af744061c
 +		m.outbounds = append(slices.Clone(m.outbounds), outbound)
  	}
  	m.outboundByTag[tag] = outbound
+-	m.insecure[tag] = option.InsecureReason(options) //H
 -	if tag == m.defaultTag || (m.defaultTag == "" && m.defaultOutbound == nil) || m.defaultOutbound == existsOutbound && replaced {
++	m.insecure[tag] = option.InsecureReason(options)
 +	if tag == m.defaultTag || (m.defaultTag == "" && m.defaultOutbound == nil) || (replaced && m.defaultOutbound == old) {
  		m.defaultOutbound = outbound
  	}
@@ -186,13 +231,24 @@ index 976de50193a1735f9b7bd7a3575ac9ec741b49df..a56075c31237362da68b492af744061c
  		}
  	}
  	return nil
-@@ -305,7 +287,9 @@ func (m *Manager) SetDefaultTag(tag string) error {
+@@ -295,8 +294,8 @@ func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.
+ // SetDefaultTag changes the default outbound (route.final); used by hot reload. //H
+ func (m *Manager) SetDefaultTag(tag string) error {
+ 	m.access.Lock()
+-	m.defaultTag = tag
+ 	if tag == "" {
++		m.defaultTag = tag
+ 		m.access.Unlock()
+ 		return nil
+ 	}
+@@ -310,7 +309,10 @@ func (m *Manager) SetDefaultTag(tag string) error {
  		outbound = endpoint
  	}
  	m.access.Lock()
 -	m.defaultOutbound = outbound
 -	m.access.Unlock()
 +	defer m.access.Unlock()
++	m.defaultTag = tag
 +	if m.defaultOutbound != outbound {
 +		m.defaultOutbound = outbound
 +	}

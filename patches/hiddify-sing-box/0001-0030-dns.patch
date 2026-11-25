@@ -242,128 +242,6 @@ index 755684621c64a3e2337787bdc6e8870e2b3f9fca..04da21400c7a7a9c6c6dc6bb74da15e3
  	}
  	for _, record := range records {
  		response.Answer = append(response.Answer, &dns.MX{
-diff --git a/dns/h_ipv6_by_outbound.go b/dns/h_ipv6_by_outbound.go
-index a0ba12e81e908b27036746bb603e68710e3a71d9..11691d32e46c157933562014512279499dad261d 100644
---- a/dns/h_ipv6_by_outbound.go
-+++ b/dns/h_ipv6_by_outbound.go
-@@ -7,10 +7,11 @@ import (
- )
- 
- // ipv6ByOutbound is the strategy of a rule naming an outbound in ipv6_by_outbound: ipv4_only,
--// which leaves AAAA questions unanswered, while the monitoring knows the outbound (a group: its
--// selected member) cannot carry IPv6; the rule's own strategy otherwise, so a client is handed
--// IPv6 addresses only where they lead somewhere. An IPv6-first site through a proxy without
--// IPv6 used to get its AAAA answer, connect, and have the connection closed by the proxy.
-+// which leaves AAAA questions unanswered, while the monitoring knows the outbound (a group: the
-+// member it leads to) does not carry IPv6, as its connections showed (route option
-+// ipv6_fallback); the rule's own strategy otherwise, so a client is handed IPv6 addresses only
-+// where they lead somewhere. An outbound not observed yet changes nothing: its first IPv6
-+// connections teach, carried over IPv4 when needed. Without the monitoring nothing changes.
- func (r *Router) ipv6ByOutbound(strategy C.DomainStrategy, outbound string) C.DomainStrategy {
- 	if outbound == "" {
- 		return strategy
-diff --git a/dns/h_ipv6_by_outbound_test.go b/dns/h_ipv6_by_outbound_test.go
-index 40550cdc5757ac0c4b1951c3b7960a33d38a3796..6daa875b78d0ba83d2242a0d894796625da9f5f7 100644
---- a/dns/h_ipv6_by_outbound_test.go
-+++ b/dns/h_ipv6_by_outbound_test.go
-@@ -18,15 +18,18 @@ func (c hIPv6Capability) OutboundIPv6(tag string) (bool, bool) {
- 	return supported, known
- }
- 
--// A rule naming an outbound in ipv6_by_outbound answers AAAA only while the outbound carries
--// IPv6, or is not known either way yet; the rule's own strategy stays otherwise.
-+func (c hIPv6Capability) ObserveIPv6(tag string, carried bool) { c[tag] = carried }
-+
-+// A rule naming an outbound in ipv6_by_outbound answers AAAA unless the outbound is known to lack
-+// IPv6; one not observed yet keeps the rule's strategy, so its connections can teach. Nothing
-+// changes without the monitoring.
- func TestH_DNSRouterIPv6ByOutbound(t *testing.T) {
- 	ctx := service.ContextWithDefaultRegistry(context.Background())
- 	service.MustRegister[adapter.IPv6Capability](ctx, hIPv6Capability{"with6": true, "without6": false})
- 	router := &Router{ctx: ctx}
- 	require.Equal(t, C.DomainStrategyPreferIPv4, router.ipv6ByOutbound(C.DomainStrategyPreferIPv4, ""))
- 	require.Equal(t, C.DomainStrategyPreferIPv4, router.ipv6ByOutbound(C.DomainStrategyPreferIPv4, "with6"))
--	require.Equal(t, C.DomainStrategyPreferIPv4, router.ipv6ByOutbound(C.DomainStrategyPreferIPv4, "unknown"))
-+	require.Equal(t, C.DomainStrategyPreferIPv4, router.ipv6ByOutbound(C.DomainStrategyPreferIPv4, "unknown"), "not observed yet: its connections teach")
- 	require.Equal(t, C.DomainStrategyIPv4Only, router.ipv6ByOutbound(C.DomainStrategyPreferIPv4, "without6"))
- 	require.Equal(t, C.DomainStrategyIPv4Only, router.ipv6ByOutbound(C.DomainStrategyPreferIPv6, "without6"))
- 
-diff --git a/dns/h_router_bypass_log_test.go b/dns/h_router_bypass_log_test.go
-new file mode 100644
-index 0000000000000000000000000000000000000000..19acab96e6cd4e00c3c63c84af6e083bcf39b706
---- /dev/null
-+++ b/dns/h_router_bypass_log_test.go
-@@ -0,0 +1,70 @@
-+package dns
-+
-+import (
-+	"context"
-+	"fmt"
-+	"net/netip"
-+	"sync"
-+	"testing"
-+
-+	"github.com/sagernet/sing-box/adapter"
-+	"github.com/sagernet/sing-box/log"
-+	"github.com/sagernet/sing-box/option"
-+
-+	"github.com/stretchr/testify/require"
-+)
-+
-+// hLevelLogger records the error and debug messages a router logs.
-+type hLevelLogger struct {
-+	log.ContextLogger
-+	access sync.Mutex
-+	errors []string
-+	debugs []string
-+}
-+
-+func (l *hLevelLogger) ErrorContext(_ context.Context, args ...any) {
-+	l.access.Lock()
-+	l.errors = append(l.errors, fmt.Sprint(args...))
-+	l.access.Unlock()
-+}
-+
-+func (l *hLevelLogger) DebugContext(_ context.Context, args ...any) {
-+	l.access.Lock()
-+	l.debugs = append(l.debugs, fmt.Sprint(args...))
-+	l.access.Unlock()
-+}
-+
-+// A server failure that bypass_if_failed passes on is not an error: the next rule answers. A Fake
-+// DNS rule fails every non-address query (HTTPS, TXT, ...) and falls through, and logging each of
-+// those at error level filled the log.
-+func TestH_ExchangeBypassIfFailedLogsAtDebug(t *testing.T) {
-+	t.Parallel()
-+	logger := &hLevelLogger{ContextLogger: log.NewNOPFactory().NewLogger("dns")}
-+	router := newTestRouterWithContextAndLogger(t, context.Background(), []option.DNSRule{
-+		hRouteRule("example.com", "primary", true),
-+		hRouteRule("example.com", "secondary", false),
-+		hLegacyModeRule(),
-+	}, hTransportManager("default", "primary", "secondary"), hExchangeClient(&hTagRecorder{}, map[string]string{
-+		"secondary": "1.2.3.4",
-+	}), logger)
-+
-+	response, err := router.Exchange(context.Background(), hQuery("example.com"), adapter.DNSQueryOptions{})
-+	require.NoError(t, err)
-+	require.Equal(t, []netip.Addr{netip.MustParseAddr("1.2.3.4")}, MessageToAddresses(response))
-+	require.Empty(t, logger.errors)
-+	require.NotEmpty(t, logger.debugs)
-+}
-+
-+// A failure with no bypass is still an error.
-+func TestH_ExchangeFailureWithoutBypassLogsError(t *testing.T) {
-+	t.Parallel()
-+	logger := &hLevelLogger{ContextLogger: log.NewNOPFactory().NewLogger("dns")}
-+	router := newTestRouterWithContextAndLogger(t, context.Background(), []option.DNSRule{
-+		hRouteRule("example.com", "primary", false),
-+		hLegacyModeRule(),
-+	}, hTransportManager("default", "primary"), hExchangeClient(&hTagRecorder{}, map[string]string{}), logger)
-+
-+	_, err := router.Exchange(context.Background(), hQuery("example.com"), adapter.DNSQueryOptions{})
-+	require.Error(t, err)
-+	require.NotEmpty(t, logger.errors)
-+}
 diff --git a/dns/h_router_bypass_test.go b/dns/h_router_bypass_test.go
 index f28e46f6e2f18b174f63662064b28f28352b4f23..644b3dd1b8299635949eb8393c95cd9349d21535 100644
 --- a/dns/h_router_bypass_test.go
@@ -737,18 +615,10 @@ index db5f41ebb3c7ccab5424026838607fea8feccf89..2e097c902c3770021158e695d442cdd1
  						},
  					}},
 diff --git a/dns/router.go b/dns/router.go
-index 11d7655a358f499cf19b5701969a2a788ba4a2ca..456cdd63dcc601186354d9cdb71c178ae67b5826 100644
+index 97e777025d636bbbd2011b02d49ef070dbd78e0a..c37fdc8d36d55c1c25dd850a90c6864aa864af05 100644
 --- a/dns/router.go
 +++ b/dns/router.go
-@@ -83,7 +83,6 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
- 	}
- 	router.client = NewClient(ClientOptions{
- 		Context:           ctx,
--		Timeout:           time.Duration(options.DNSClientOptions.Timeout),
- 		DisableCache:      options.DNSClientOptions.DisableCache,
- 		DisableExpire:     options.DNSClientOptions.DisableExpire,
- 		OptimisticTimeout: optimisticTimeout,
-@@ -133,15 +132,7 @@ func (r *Router) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+@@ -133,15 +133,7 @@ func (r *Router) Start(stage adapter.StartStage, scope *adapter.Scope) error {
  	monitor := taskmonitor.New(r.logger, C.StartTimeout)
  	switch stage {
  	case adapter.StartStateStart:
@@ -765,7 +635,7 @@ index 11d7655a358f499cf19b5701969a2a788ba4a2ca..456cdd63dcc601186354d9cdb71c178a
  		monitor.Start("initialize DNS client")
  		r.client.Start()
  		monitor.Finish()
-@@ -313,16 +304,13 @@ func (r *Router) matchDNS(ctx context.Context, rules []adapter.DNSRule, allowFak
+@@ -313,7 +305,7 @@ func (r *Router) matchDNS(ctx context.Context, rules []adapter.DNSRule, allowFak
  				if action.Strategy != C.DomainStrategyAsIS {
  					options.Strategy = action.Strategy
  				}
@@ -774,16 +644,7 @@ index 11d7655a358f499cf19b5701969a2a788ba4a2ca..456cdd63dcc601186354d9cdb71c178a
  				if isFakeIP || action.DisableCache {
  					options.DisableCache = true
  				}
- 				if action.RewriteTTL != nil {
- 					options.RewriteTTL = action.RewriteTTL
- 				}
--				if action.Timeout > 0 {
--					options.Timeout = action.Timeout
--				}
- 				if action.ClientSubnet.IsValid() {
- 					options.ClientSubnet = action.ClientSubnet
- 					options.RemoveClientSubnet = false
-@@ -336,16 +324,13 @@ func (r *Router) matchDNS(ctx context.Context, rules []adapter.DNSRule, allowFak
+@@ -336,7 +328,7 @@ func (r *Router) matchDNS(ctx context.Context, rules []adapter.DNSRule, allowFak
  				if action.Strategy != C.DomainStrategyAsIS {
  					options.Strategy = action.Strategy
  				}
@@ -792,26 +653,7 @@ index 11d7655a358f499cf19b5701969a2a788ba4a2ca..456cdd63dcc601186354d9cdb71c178a
  				if action.DisableCache {
  					options.DisableCache = true
  				}
- 				if action.RewriteTTL != nil {
- 					options.RewriteTTL = action.RewriteTTL
- 				}
--				if action.Timeout > 0 {
--					options.Timeout = action.Timeout
--				}
- 				if action.ClientSubnet.IsValid() {
- 					options.ClientSubnet = action.ClientSubnet
- 					options.RemoveClientSubnet = false
-@@ -378,9 +363,6 @@ func (r *Router) applyDNSRouteOptions(options *adapter.DNSQueryOptions, routeOpt
- 	if routeOptions.RewriteTTL != nil {
- 		options.RewriteTTL = routeOptions.RewriteTTL
- 	}
--	if routeOptions.Timeout > 0 {
--		options.Timeout = routeOptions.Timeout
--	}
- 	if routeOptions.ClientSubnet.IsValid() {
- 		options.ClientSubnet = routeOptions.ClientSubnet
- 		options.RemoveClientSubnet = false
-@@ -558,11 +540,9 @@ func cancelDNSFutures(state *dnsRuleWalkState) {
+@@ -558,11 +550,9 @@ func cancelDNSFutures(state *dnsRuleWalkState) {
  
  func dnsRefusedResponse(message *mDNS.Msg) *mDNS.Msg {
  	return &mDNS.Msg{
@@ -826,7 +668,7 @@ index 11d7655a358f499cf19b5701969a2a788ba4a2ca..456cdd63dcc601186354d9cdb71c178a
  		Question: []mDNS.Question{message.Question[0]},
  	}
  }
-@@ -1023,9 +1003,7 @@ func (r *Router) lookupWithRules(ctx context.Context, rules []adapter.DNSRule, d
+@@ -1023,9 +1013,7 @@ func (r *Router) lookupWithRules(ctx context.Context, rules []adapter.DNSRule, d
  
  func (r *Router) lookupWithRulesType(ctx context.Context, rules []adapter.DNSRule, domain string, qType uint16, options adapter.DNSQueryOptions) ([]netip.Addr, error) {
  	request := &mDNS.Msg{
@@ -837,7 +679,7 @@ index 11d7655a358f499cf19b5701969a2a788ba4a2ca..456cdd63dcc601186354d9cdb71c178a
  		Question: []mDNS.Question{{
  			Name:   mDNS.Fqdn(domain),
  			Qtype:  qType,
-@@ -1066,25 +1044,21 @@ func (r *Router) prepareExchange(ctx context.Context, message *mDNS.Msg) (*dnsEx
+@@ -1066,25 +1054,21 @@ func (r *Router) prepareExchange(ctx context.Context, message *mDNS.Msg) (*dnsEx
  	if len(message.Question) != 1 {
  		r.logger.WarnContext(ctx, "bad question size: ", len(message.Question))
  		return nil, &mDNS.Msg{
@@ -872,7 +714,7 @@ index 11d7655a358f499cf19b5701969a2a788ba4a2ca..456cdd63dcc601186354d9cdb71c178a
  		}, nil
  	}
  	r.rulesAccess.RLock()
-@@ -1152,11 +1126,9 @@ func (r *Router) exchangeLegacy(ctx context.Context, exchangeCtx *dnsExchangeCon
+@@ -1152,11 +1136,9 @@ func (r *Router) exchangeLegacy(ctx context.Context, exchangeCtx *dnsExchangeCon
  				switch action.Method {
  				case C.RuleActionRejectMethodDefault:
  					return &mDNS.Msg{
@@ -887,16 +729,18 @@ index 11d7655a358f499cf19b5701969a2a788ba4a2ca..456cdd63dcc601186354d9cdb71c178a
  						Question: []mDNS.Question{message.Question[0]},
  					}, nil, nil
  				case C.RuleActionRejectMethodDrop:
-@@ -1177,6 +1149,8 @@ func (r *Router) exchangeLegacy(ctx context.Context, exchangeCtx *dnsExchangeCon
+@@ -1177,8 +1159,8 @@ func (r *Router) exchangeLegacy(ctx context.Context, exchangeCtx *dnsExchangeCon
  			} else if errors.Is(err, ErrResponseRejected) {
  				rejected = true
  				r.logger.DebugContext(ctx, E.Cause(err, "response rejected for ", FormatQuestion(message.Question[0].String())))
+-			} else if len(message.Question) > 0 && rule != nil && rule.BypassIfFailed() && ruleIndex != -1 { //H: the next rule answers, so not an error
+-				r.logger.DebugContext(ctx, E.Cause(err, "exchange failed for ", FormatQuestion(message.Question[0].String())), ", trying the next rule") //H
 +			} else if len(message.Question) > 0 && rule != nil && rule.BypassIfFailed() && ruleIndex != -1 { // H: the next rule answers, so not an error
 +				r.logger.DebugContext(ctx, E.Cause(err, "exchange failed for ", FormatQuestion(message.Question[0].String())), ", trying the next rule") // H
  			} else if len(message.Question) > 0 {
  				r.logger.ErrorContext(ctx, E.Cause(err, "exchange failed for ", FormatQuestion(message.Question[0].String())))
  			} else {
-@@ -1190,13 +1164,13 @@ func (r *Router) exchangeLegacy(ctx context.Context, exchangeCtx *dnsExchangeCon
+@@ -1192,13 +1174,13 @@ func (r *Router) exchangeLegacy(ctx context.Context, exchangeCtx *dnsExchangeCon
  				}
  			}
  		}
@@ -917,27 +761,18 @@ index 11d7655a358f499cf19b5701969a2a788ba4a2ca..456cdd63dcc601186354d9cdb71c178a
  		if responseCheck != nil && rejected {
  			continue
  		}
-@@ -1290,8 +1264,6 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
- 				r.logger.DebugContext(ctx, "response rejected for ", domain)
- 			} else if R.IsRejected(err) {
- 				r.logger.DebugContext(ctx, "lookup rejected for ", domain)
--			} else if errors.Is(err, ErrNotCached) {
--				r.logger.DebugContext(ctx, "cache-only lookup missed for ", domain)
- 			} else {
- 				r.logger.ErrorContext(ctx, E.Cause(err, "lookup failed for ", domain))
- 			}
-@@ -1401,10 +1373,6 @@ func (r *Router) ClearCache() {
+@@ -1403,7 +1385,9 @@ func (r *Router) ClearCache() {
  	if r.platformInterface != nil {
  		r.platformInterface.ClearDNSCache()
  	}
 -	service.FromContext[adapter.NetworkManager](r.ctx).FlushSystemDNSCache()
--	if r.dnsReverseMapping != nil {
--		r.dnsReverseMapping.Purge()
--	}
- }
- 
- func (r *Router) LookupReverseMapping(ip netip.Addr) (string, bool) {
-@@ -1798,3 +1766,15 @@ func dnsRuleRace(rule option.DNSRule) bool {
++	if networkManager := service.FromContext[adapter.NetworkManager](r.ctx); networkManager != nil {
++		networkManager.FlushSystemDNSCache()
++	}
+ 	if r.dnsReverseMapping != nil {
+ 		r.dnsReverseMapping.Purge()
+ 	}
+@@ -1800,3 +1784,15 @@ func dnsRuleRace(rule option.DNSRule) bool {
  		return false
  	}
  }

@@ -114,6 +114,14 @@ ray_tree=$(verify_patched_tree "$WORK/ray2sing" "$ray" "$RAY_SHA" "$RAY_TREE")
 git -C "$WORK/hiddify-sing-box" -c 'url.https://github.com/.insteadOf=git@github.com:' \
   submodule update --init --recursive --jobs 4
 
+# The nested dependency overlay is part of the released source tree.
+mdns="$WORK/hiddify-sing-box/replace/MasterDnsVPN"
+mdns_base=$(< "$ROOT/patches/masterdns/base-revision")
+mdns_expected=$(< "$ROOT/patches/masterdns/expected-tree")
+assert_sha "$mdns" "$mdns_base"
+apply_series masterdns "$mdns" "$mdns_base" "$mdns_base"
+mdns_tree=$(verify_patched_tree "$mdns" "$mdns_base" "$mdns_base" "$mdns_expected")
+
 cat > "$ROOT/.build/prepared-sources.lock" <<LOCK
 CORE_SHA=$core
 SING_SHA=$sing
@@ -121,5 +129,7 @@ RAY_SHA=$ray
 CORE_TREE=$core_tree
 SING_TREE=$sing_tree
 RAY_TREE=$ray_tree
+MASTERDNS_SHA=$mdns_base
+MASTERDNS_TREE=$mdns_tree
 LOCK
-echo 'Applied all three patch series and verified the source trees for locked revisions.'
+echo 'Applied all source and nested dependency patch series and verified the source trees for locked revisions.'

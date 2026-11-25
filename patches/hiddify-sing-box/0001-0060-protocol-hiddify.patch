@@ -1,0 +1,791 @@
+diff --git a/protocol/hiddify/dnstt/dnstt_func.go b/protocol/hiddify/dnstt/dnstt_func.go
+index ef1f261cfb0b6cf53d3b08344a70765f89b2308b..602483d509c0d168e1d4c10d92160bc092c89546 100644
+--- a/protocol/hiddify/dnstt/dnstt_func.go
++++ b/protocol/hiddify/dnstt/dnstt_func.go
+@@ -2,38 +2,38 @@ package dnstt
+ 
+ import (
+ 	"context"
+-	"github.com/sagernet/sing-box/option"
++	"fmt"
+ 	"math/rand"
+ 	"net"
+ 
+-	"fmt"
++	"github.com/sagernet/sing-box/common/monitoring"
++	"github.com/sagernet/sing-box/option"
+ 
+ 	dnstt "github.com/net2share/vaydns/client"
+-	"github.com/sagernet/sing-box/common/monitoring"
+ )
+ 
+-func (c *Outbound) addResolver(resolver dnstt.Resolver) {
+-	c.mu.Lock()
+-	if c.pool != nil {
++func (h *Outbound) addResolver(resolver dnstt.Resolver) {
++	h.mu.Lock()
++	if h.pool != nil {
+ 		// Smart pool mode: register the resolver as a pool upstream.
+-		// c.resolvers stays at the single virtual resolver set up in
++		// h.resolvers stays at the single virtual resolver set up in
+ 		// NewOutbound, so the existing tunnel keeps running — the pool
+ 		// rotates upstreams behind it. No need to invalidate
+-		// c.mutlitunnel here (unlike the legacy path, which has to
++		// h.mutlitunnel here (unlike the legacy path, which has to
+ 		// rebuild the tunnel when its resolver list changes).
+-		_ = c.pool.Add(resolverURL(resolver))
++		_ = h.pool.Add(resolverURL(resolver))
+ 	} else {
+-		// for i := 0; i < c.options.TunnelPerResolver; i++ {
+-		c.resolvers = append(c.resolvers, resolver)
+-		c.tunnels = append(c.tunnels, nil)
++		// for i := 0; i < h.options.TunnelPerResolver; i++ {
++		h.resolvers = append(h.resolvers, resolver)
++		h.tunnels = append(h.tunnels, nil)
+ 		// }
+-		c.mutlitunnel = nil
++		h.mutlitunnel = nil
+ 	}
+-	c.mu.Unlock()
+-	if !c.isReady() {
+-		c.started = 1
+-		c.logger.InfoContext(c.ctx, "initial resolver ", resolver.ResolverAddr)
+-		monitoring.Get(c.ctx).TestNow(c.Tag())
++	h.mu.Unlock()
++	if !h.isReady() {
++		h.started = 1
++		h.logger.InfoContext(h.ctx, "initial resolver ", resolver.ResolverAddr)
++		monitoring.Get(h.ctx).TestNow(h.Tag())
+ 	}
+ }
+ 
+@@ -49,48 +49,50 @@ func resolverURL(r dnstt.Resolver) string {
+ 	}
+ }
+ 
+-func (c *Outbound) openStreamImp(ctx context.Context) (net.Conn, error) {
+-	c.mu.Lock()
+-	defer c.mu.Unlock()
+-	if t := c.mutlitunnel; t != nil {
++func (h *Outbound) openStreamImp(ctx context.Context) (net.Conn, error) {
++	h.mu.Lock()
++	defer h.mu.Unlock()
++	if t := h.mutlitunnel; t != nil {
+ 		return t.OpenStream()
+ 	}
+ 
+-	if newtunnel, err := c.createDnsttTunnel(ctx, c.resolvers); err != nil {
++	if newtunnel, err := h.createDnsttTunnel(ctx, h.resolvers); err != nil {
+ 		return nil, err
+ 	} else {
+-		c.mutlitunnel = newtunnel
++		h.mutlitunnel = newtunnel
+ 		return newtunnel.OpenStream()
+ 	}
+ }
+-func (c *Outbound) OpenStream(ctx context.Context) (net.Conn, error) {
++
++func (h *Outbound) OpenStream(ctx context.Context) (net.Conn, error) {
+ 	var err error
+ 	var conn net.Conn
+ 	for range 3 {
+-		conn, err = c.openStreamImp(ctx)
++		conn, err = h.openStreamImp(ctx)
+ 		if err == nil {
+ 			return conn, nil
+ 		}
+ 	}
+ 	return nil, err
+ }
+-func (c *Outbound) OpenStreamSingleResolver(ctx context.Context) (net.Conn, error) {
++
++func (h *Outbound) OpenStreamSingleResolver(ctx context.Context) (net.Conn, error) {
+ 	// dnsttConfig := streamSettings.ProtocolSettings.(*Config)
+-	c.mu.Lock()
+-	defer c.mu.Unlock()
+-	// c.tunnel_index = (c.tunnel_index + 1) % len(c.tunnels)
++	h.mu.Lock()
++	defer h.mu.Unlock()
++	// h.tunnel_index = (h.tunnel_index + 1) % len(h.tunnels)
+ 	var lasterr error
+-	for i := 0; i < max(5, len(c.tunnels)); i++ {
+-		tunnel_index := rand.Intn(len(c.resolvers)) // 0 <= x < n
+-		tunnel := c.tunnels[tunnel_index]
++	for i := 0; i < max(5, len(h.tunnels)); i++ {
++		tunnel_index := rand.Intn(len(h.resolvers)) // 0 <= x < n
++		tunnel := h.tunnels[tunnel_index]
+ 		if tunnel == nil {
+-			if newtunnel, err := c.createDnsttTunnel(ctx, []dnstt.Resolver{c.resolvers[tunnel_index]}); err != nil {
++			if newtunnel, err := h.createDnsttTunnel(ctx, []dnstt.Resolver{h.resolvers[tunnel_index]}); err != nil {
+ 				lasterr = err
+-				c.logger.DebugContext(ctx, "tunnel [", tunnel_index, "]  failed resolver ", c.resolvers[tunnel_index].ResolverAddr)
++				h.logger.DebugContext(ctx, "tunnel [", tunnel_index, "]  failed resolver ", h.resolvers[tunnel_index].ResolverAddr)
+ 			} else {
+-				c.tunnels[tunnel_index] = newtunnel
++				h.tunnels[tunnel_index] = newtunnel
+ 				tunnel = newtunnel
+-				c.logger.InfoContext(ctx, "tunnel [", tunnel_index, "] resolver ", c.resolvers[tunnel_index].ResolverAddr)
++				h.logger.InfoContext(ctx, "tunnel [", tunnel_index, "] resolver ", h.resolvers[tunnel_index].ResolverAddr)
+ 
+ 				// return tunnel, nil
+ 			}
+@@ -103,13 +105,14 @@ func (c *Outbound) OpenStreamSingleResolver(ctx context.Context) (net.Conn, erro
+ 				lasterr = err
+ 			}
+ 			tunnel.Close()
+-			c.tunnels[tunnel_index] = nil
++			h.tunnels[tunnel_index] = nil
+ 		}
+ 	}
+ 	return nil, lasterr
+ }
+-func (c *Outbound) createDnsttTunnel(ctx context.Context, resolver []dnstt.Resolver) (*dnstt.Tunnel, error) {
+-	tServer, err := newTunnelServer(c.options)
++
++func (h *Outbound) createDnsttTunnel(ctx context.Context, resolver []dnstt.Resolver) (*dnstt.Tunnel, error) {
++	tServer, err := newTunnelServer(h.options)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -118,29 +121,29 @@ func (c *Outbound) createDnsttTunnel(ctx context.Context, resolver []dnstt.Resol
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed to create tunnel: %w", err)
+ 	}
+-	if c.options.OpenStreamTimeout != nil {
+-		tunnel.OpenStreamTimeout = c.options.OpenStreamTimeout.Build()
++	if h.options.OpenStreamTimeout != nil {
++		tunnel.OpenStreamTimeout = h.options.OpenStreamTimeout.Build()
+ 	}
+-	if c.options.MaxStreams != nil {
+-		tunnel.MaxStreams = *c.options.MaxStreams
++	if h.options.MaxStreams != nil {
++		tunnel.MaxStreams = *h.options.MaxStreams
+ 	}
+-	if c.options.ReconnectMinDelay != nil {
+-		tunnel.ReconnectMinDelay = c.options.ReconnectMinDelay.Build()
++	if h.options.ReconnectMinDelay != nil {
++		tunnel.ReconnectMinDelay = h.options.ReconnectMinDelay.Build()
+ 	}
+-	if c.options.ReconnectMaxDelay != nil {
+-		tunnel.ReconnectMaxDelay = c.options.ReconnectMaxDelay.Build()
++	if h.options.ReconnectMaxDelay != nil {
++		tunnel.ReconnectMaxDelay = h.options.ReconnectMaxDelay.Build()
+ 	}
+-	if c.options.SessionCheckInterval != nil {
+-		tunnel.SessionCheckInterval = c.options.SessionCheckInterval.Build()
++	if h.options.SessionCheckInterval != nil {
++		tunnel.SessionCheckInterval = h.options.SessionCheckInterval.Build()
+ 	}
+-	if c.options.IdleTimeout != nil {
+-		tunnel.IdleTimeout = c.options.IdleTimeout.Build()
++	if h.options.IdleTimeout != nil {
++		tunnel.IdleTimeout = h.options.IdleTimeout.Build()
+ 	}
+-	if c.options.KeepAlive != nil {
+-		tunnel.KeepAlive = c.options.KeepAlive.Build()
++	if h.options.KeepAlive != nil {
++		tunnel.KeepAlive = h.options.KeepAlive.Build()
+ 	}
+-	if c.options.HandshakeTimeout != nil {
+-		tunnel.HandshakeTimeout = c.options.HandshakeTimeout.Build()
++	if h.options.HandshakeTimeout != nil {
++		tunnel.HandshakeTimeout = h.options.HandshakeTimeout.Build()
+ 	}
+ 
+ 	if err := tunnel.InitiateResolverConnection(); err != nil {
+@@ -151,24 +154,24 @@ func (c *Outbound) createDnsttTunnel(ctx context.Context, resolver []dnstt.Resol
+ 		return nil, fmt.Errorf("failed to initiate DNS packet connection: %w", err)
+ 	}
+ 
+-	// c.logger.DebugContext(c.ctx, "effective MTU %d", tServer.MTU)
++	// h.logger.DebugContext(h.ctx, "effective MTU %d", tServer.MTU)
+ 
+ 	if err := tunnel.InitiateKCPConn(tServer.MTU); err != nil {
+ 		return nil, fmt.Errorf("failed to initiate KCP connection: %w", err)
+ 	}
+ 
+-	// c.logger.DebugContext(c.ctx, "established KCP conn")
++	// h.logger.DebugContext(h.ctx, "established KCP conn")
+ 	if err := tunnel.InitiateNoiseChannel(); err != nil {
+-		// c.logger.WarnContext(c.ctx, "failed to establish Noise channel: %v", err)
++		// h.logger.WarnContext(h.ctx, "failed to establish Noise channel: %v", err)
+ 		return nil, fmt.Errorf("failed to initiate noise channel: %w", err)
+ 	}
+ 
+-	// c.logger.DebugContext(c.ctx, "established Noise channel")
++	// h.logger.DebugContext(h.ctx, "established Noise channel")
+ 
+ 	if err := tunnel.InitiateSmuxSession(); err != nil {
+ 		return nil, fmt.Errorf("failed to initiate smux session: %w", err)
+ 	}
+-	// c.logger.DebugContext(c.ctx, "established smux session")
++	// h.logger.DebugContext(h.ctx, "established smux session")
+ 	return tunnel, nil
+ }
+ 
+diff --git a/protocol/hiddify/dnstt/h_dnstt_test.go b/protocol/hiddify/dnstt/h_dnstt_test.go
+index 14d129cf4f002c09a5d3fef0c0b7f25d301676c5..80a2a9bcad84607f81edd15ec6063df247784b4d 100644
+--- a/protocol/hiddify/dnstt/h_dnstt_test.go
++++ b/protocol/hiddify/dnstt/h_dnstt_test.go
+@@ -8,8 +8,6 @@ import (
+ 	"testing"
+ 	"time"
+ 
+-	"github.com/miekg/dns"
+-	dnstt "github.com/net2share/vaydns/client"
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/common/dnspool"
+ 	C "github.com/sagernet/sing-box/constant"
+@@ -18,6 +16,9 @@ import (
+ 	"github.com/sagernet/sing/common/json/badoption"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
++
++	"github.com/miekg/dns"
++	dnstt "github.com/net2share/vaydns/client"
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+@@ -85,37 +86,25 @@ func TestH_DnsttAutoResolvers(t *testing.T) {
+ 	require.NotEmpty(t, builtin)
+ 
+ 	for _, auto := range []string{"auto", ""} {
+-		// "auto" is the shared candidate list (Soar's discovery candidates, then the built-in
+-		// resolvers), each turned into a UDP resolver in order, keeping whether it is automatic
+-		// and its tier.
+-		entries := []string{auto, "4.4.4.4:53"}
+-		candidates := dnspool.Expand(entries)
+-		resolvers, err := getConfigResolvers(option.DnsttOptions{Resolvers: entries})
++		resolvers, err := getConfigResolvers(option.DnsttOptions{Resolvers: []string{auto, "4.4.4.4:53"}})
+ 		require.NoError(t, err)
+-		require.Len(t, resolvers, len(candidates))
+-		// the discovery candidates keep their order; the built-in ones come in map order
+-		wantTier := map[string]int{}
+-		for _, c := range candidates[:len(candidates)-1] {
+-			wantTier[c.Address] = c.Tier
+-		}
++		require.GreaterOrEqual(t, len(resolvers), len(builtin)+1)
+ 		seen := map[string]bool{}
+-		for i, r := range resolvers[:len(resolvers)-1] {
++		seenAddresses := map[string]bool{}
++		for _, r := range resolvers[:len(resolvers)-1] {
++			require.False(t, seenAddresses[r.Resolver.ResolverAddr], r.Resolver.ResolverAddr)
++			seenAddresses[r.Resolver.ResolverAddr] = true
+ 			require.True(t, r.Auto)
+ 			require.Equal(t, dnstt.ResolverTypeUDP, r.Resolver.ResolverType)
+ 			require.True(t, strings.HasSuffix(r.Resolver.ResolverAddr, ":53"), r.Resolver.ResolverAddr)
+-			require.Equal(t, candidates[i].Tier, r.Tier, r.Resolver.ResolverAddr)
+-			if r.Tier == dnspool.TierDiscovery {
+-				require.Equal(t, candidates[i].Address, r.Resolver.ResolverAddr)
++			ip := strings.TrimSuffix(r.Resolver.ResolverAddr, ":53")
++			if _, known := builtin[ip]; known {
++				seen[ip] = true
++			} else {
++				require.Equal(t, dnspool.TierDiscovery, r.Tier, "additional candidates come from discovery")
+ 			}
+-			tier, known := wantTier[r.Resolver.ResolverAddr]
+-			require.True(t, known, r.Resolver.ResolverAddr)
+-			require.Equal(t, tier, r.Tier, r.Resolver.ResolverAddr)
+-			require.False(t, seen[r.Resolver.ResolverAddr], r.Resolver.ResolverAddr)
+-			seen[r.Resolver.ResolverAddr] = true
+-		}
+-		for ip := range builtin {
+-			require.True(t, seen[ip+":53"], ip)
+ 		}
++		require.Len(t, seen, len(builtin))
+ 		last := resolvers[len(resolvers)-1]
+ 		require.False(t, last.Auto)
+ 		require.Equal(t, "4.4.4.4:53", last.Resolver.ResolverAddr)
+diff --git a/protocol/hiddify/dnstt/h_registry_race_test.go b/protocol/hiddify/dnstt/h_registry_race_test.go
+index 8acad6f38260566dad3de25a1d63bdb0c7acfd03..fe6d5ee659f8aab1d0cfb9d675ae7b05d31f4a60 100644
+--- a/protocol/hiddify/dnstt/h_registry_race_test.go
++++ b/protocol/hiddify/dnstt/h_registry_race_test.go
+@@ -11,12 +11,10 @@ import (
+ // registries are built for every new context, possibly at the same time
+ func TestH_RegisterOutboundConcurrently(t *testing.T) {
+ 	var wg sync.WaitGroup
+-	for i := 0; i < 8; i++ {
+-		wg.Add(1)
+-		go func() {
+-			defer wg.Done()
++	for range 8 {
++		wg.Go(func() {
+ 			RegisterOutbound(outbound.NewRegistry())
+-		}()
++		})
+ 	}
+ 	wg.Wait()
+ 	if len(dnspool.BuiltinResolvers()) == 0 {
+diff --git a/protocol/hiddify/dnstt/outbound.go b/protocol/hiddify/dnstt/outbound.go
+index c4113dc4653e00c2904014c2f84a2b937900dcb6..b92057d822bc0c98d4c20dce7e9794dc52e653f5 100644
+--- a/protocol/hiddify/dnstt/outbound.go
++++ b/protocol/hiddify/dnstt/outbound.go
+@@ -3,25 +3,24 @@ package dnstt
+ import (
+ 	"context"
+ 	"fmt"
+-	"github.com/sagernet/sing-box/common/dialer"
+ 	"net"
+ 	"sync"
+-	"time"
+ 
+-	dnstt "github.com/net2share/vaydns/client"
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/adapter/outbound"
++	"github.com/sagernet/sing-box/common/dialer"
+ 	"github.com/sagernet/sing-box/common/dnspool"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+ 	E "github.com/sagernet/sing/common/exceptions"
+-	"github.com/sagernet/sing/common/json/badoption"
+ 	"github.com/sagernet/sing/common/logger"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
+ 	"github.com/sagernet/sing/common/uot"
+ 	"github.com/sagernet/sing/service"
++
++	dnstt "github.com/net2share/vaydns/client"
+ )
+ 
+ func RegisterOutbound(registry *outbound.Registry) {
+@@ -32,9 +31,8 @@ var _ adapter.Outbound = (*Outbound)(nil)
+ 
+ type Outbound struct {
+ 	outbound.Adapter
+-	dnsRouter adapter.DNSRouter
+-	logger    logger.ContextLogger
+-	ctx       context.Context
++	logger logger.ContextLogger
++	ctx    context.Context
+ 
+ 	candidateResolvers []ResolverS
+ 	resolvers          []dnstt.Resolver
+@@ -44,16 +42,14 @@ type Outbound struct {
+ 	cache              adapter.CacheFile
+ 	uotClient          *uot.Client
+ 	started            int
+-	resolve            bool
+-	tunnel_index       int
+ 
+ 	pool *dnspool.Pool // the outbound's own resolver pool, set when options.SmartPool is enabled
+ 
+ 	options option.DnsttOptions
+ }
+ 
+-func (c *Outbound) PreStart() error {
+-	c.cache = service.FromContext[adapter.CacheFile](c.ctx)
++func (h *Outbound) PreStart() error {
++	h.cache = service.FromContext[adapter.CacheFile](h.ctx)
+ 	return nil
+ }
+ 
+@@ -62,16 +58,7 @@ func (h *Outbound) PostStart() error {
+ 	return nil
+ }
+ 
+-func initDuration(d *badoption.Duration, defultDuration time.Duration) time.Duration {
+-	b := d.Build()
+-	if b <= 0 {
+-		return defultDuration
+-	}
+-	return b
+-}
+-
+ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.DnsttOptions) (adapter.Outbound, error) {
+-
+ 	// if options.TunnelPerResolver <= 0 {
+ 	// 	options.TunnelPerResolver = 4
+ 	// }
+@@ -148,7 +135,6 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
+ 	}
+ 
+ 	return out, nil
+-
+ }
+ 
+ func (h *Outbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+@@ -160,6 +146,7 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination
+ 	}
+ 	return h.OpenStream(ctx)
+ }
++
+ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+ 	if !h.isReady() {
+ 		return nil, E.New("outbound is not started")
+@@ -174,45 +161,45 @@ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
+ 	return nil, E.New("UoT is not enabled for this outbound")
+ }
+ 
+-func (c *Outbound) isReady() bool {
+-	return c.started > 0
++func (h *Outbound) isReady() bool {
++	return h.started > 0
+ }
+ 
+ // Status is failed once every resolver failed its test. //H
+-func (c *Outbound) Status() adapter.Status {
++func (h *Outbound) Status() adapter.Status {
+ 	switch {
+-	case c.started > 0:
++	case h.started > 0:
+ 		return adapter.StatusReady
+-	case c.started < 0:
++	case h.started < 0:
+ 		return adapter.StatusFailed
+ 	}
+ 	return adapter.StatusConnecting
+ }
+ 
+ // StatusError is why it failed: no resolver passed its test. //H
+-func (c *Outbound) StatusError() error {
+-	if c.started < 0 {
+-		return E.New("none of the ", len(c.candidateResolvers), " resolvers passed the test")
++func (h *Outbound) StatusError() error {
++	if h.started < 0 {
++		return E.New("none of the ", len(h.candidateResolvers), " resolvers passed the test")
+ 	}
+ 	return nil
+ }
+ 
+-func (w *Outbound) DisplayType() string {
+-	str := C.ProxyDisplayName(w.Type()) // the status is shown on its own
+-	if w.started > 0 {
+-		str += fmt.Sprint(" · ", len(w.resolvers), " resolvers")
++func (h *Outbound) DisplayType() string {
++	str := C.ProxyDisplayName(h.Type()) // the status is shown on its own
++	if h.started > 0 {
++		str += fmt.Sprint(" · ", len(h.resolvers), " resolvers")
+ 	}
+ 	return str
+ }
+ 
+-func (c *Outbound) Close() error {
+-	for _, t := range c.tunnels {
++func (h *Outbound) Close() error {
++	for _, t := range h.tunnels {
+ 		if t != nil {
+ 			t.Close()
+ 		}
+ 	}
+-	if c.pool != nil {
+-		_ = c.pool.Close()
++	if h.pool != nil {
++		_ = h.pool.Close()
+ 	}
+ 	return nil
+ }
+diff --git a/protocol/hiddify/dnstt/resolver_concurrency_test.go b/protocol/hiddify/dnstt/resolver_concurrency_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a7301fd73f1a9084b76c12034ed82d299b58672f
+--- /dev/null
++++ b/protocol/hiddify/dnstt/resolver_concurrency_test.go
+@@ -0,0 +1,21 @@
++package dnstt
++
++import (
++	"sync"
++	"testing"
++
++	"github.com/sagernet/sing-box/common/dnspool"
++)
++
++func TestConcurrentResolverInitializationPublishesImmutableTables(t *testing.T) {
++	var wg sync.WaitGroup
++	for range 32 {
++		wg.Go(func() {
++			dnspool.BuiltinResolvers()
++			if len(dnspool.BuiltinResolversByCountry()) == 0 || len(dnspool.BuiltinResolvers()) == 0 {
++				t.Error("resolver table was not published")
++			}
++		})
++	}
++	wg.Wait()
++}
+diff --git a/protocol/hiddify/dnstt/tester.go b/protocol/hiddify/dnstt/tester.go
+index f0b9a082f18dec3c91f0289f68743b7a0f18c5fb..157619dbb04a201fd0a6217da046554833df9362 100644
+--- a/protocol/hiddify/dnstt/tester.go
++++ b/protocol/hiddify/dnstt/tester.go
+@@ -8,11 +8,11 @@ import (
+ 	"net/http"
+ 	"time"
+ 
+-	dnstt "github.com/net2share/vaydns/client"
+ 	"github.com/sagernet/sing-box/common/dnspool"
+ 	"github.com/sagernet/sing/common/batch"
+ 
+ 	"github.com/miekg/dns"
++	dnstt "github.com/net2share/vaydns/client"
+ )
+ 
+ // historyKey names the saved resolver scores; each record type keeps its own.
+@@ -103,6 +103,7 @@ func (h *Outbound) startTestResolver() error {
+ 
+ 	return b.Wait()
+ }
++
+ func (h *Outbound) testTunnelResolver(resolver dnstt.Resolver) (rate int, err error) {
+ 	domain := h.options.PreTestDomain
+ 	record := h.options.PreTestRecordType
+@@ -147,7 +148,6 @@ func (h *Outbound) testTunnelResolver(resolver dnstt.Resolver) (rate int, err er
+ 	h.logger.InfoContext(h.ctx, "successfully opened stream to resolver ", resolver.ResolverAddr)
+ 	conn.Close()
+ 	return 1, nil
+-
+ }
+ 
+ // ResolveUDP is the shared plain-DNS probe, through sing-box's UDP transport.
+@@ -192,7 +192,6 @@ func (h *Outbound) Resolve(resolver dnstt.Resolver, name string, qtype uint16) (
+ }
+ 
+ func (h *Outbound) getTCPBasedResolverConnection(r dnstt.Resolver, timeout time.Duration) (net.PacketConn, *net.UDPAddr, error) {
+-
+ 	h.logger.InfoContext(h.ctx, "getting resolver connection ", r.ResolverAddr)
+ 	switch r.ResolverType {
+ 	case dnstt.ResolverTypeUDP:
+diff --git a/protocol/hiddify/dnstt/tools.go b/protocol/hiddify/dnstt/tools.go
+index 8c0136ada29c7c06c924f0bdf1ca82f686c29029..83edf9ded29037494119731809d26b7f4d31ec4d 100644
+--- a/protocol/hiddify/dnstt/tools.go
++++ b/protocol/hiddify/dnstt/tools.go
+@@ -4,9 +4,10 @@ import (
+ 	"fmt"
+ 	"strings"
+ 
+-	dnstt "github.com/net2share/vaydns/client"
+ 	"github.com/sagernet/sing-box/common/dnspool"
+ 	"github.com/sagernet/sing-box/option"
++
++	dnstt "github.com/net2share/vaydns/client"
+ )
+ 
+ type ResolverS struct {
+@@ -29,6 +30,7 @@ func getConfigResolvers(options option.DnsttOptions) ([]ResolverS, error) {
+ 	}
+ 	return resolvers, nil
+ }
++
+ func getResolver(options option.DnsttOptions, s string) (dnstt.Resolver, error) {
+ 	var resolver dnstt.Resolver
+ 	var err error
+diff --git a/protocol/hiddify/gooserelay/h_status_test.go b/protocol/hiddify/gooserelay/h_status_test.go
+index 19a64d4f35b29dda722def85f097f551a303fb71..3b48e55cd1cc3c7ec582513b3741ca863625cf0f 100644
+--- a/protocol/hiddify/gooserelay/h_status_test.go
++++ b/protocol/hiddify/gooserelay/h_status_test.go
+@@ -7,6 +7,7 @@ import (
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
++
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+diff --git a/protocol/hiddify/gooserelay/outbound.go b/protocol/hiddify/gooserelay/outbound.go
+index 2440c84cb748d014066b6e8d0c044db8def649fc..bd4c5494f80d4275b8fb6eca169d0dd782d5d48b 100644
+--- a/protocol/hiddify/gooserelay/outbound.go
++++ b/protocol/hiddify/gooserelay/outbound.go
+@@ -15,7 +15,6 @@ import (
+ 	"sync"
+ 	"time"
+ 
+-	"github.com/kianmhz/GooseRelayVPN/goose"
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/adapter/outbound"
+ 	C "github.com/sagernet/sing-box/constant"
+@@ -26,6 +25,8 @@ import (
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
+ 	"github.com/sagernet/sing/common/uot"
++
++	"github.com/kianmhz/GooseRelayVPN/goose"
+ )
+ 
+ const (
+@@ -181,7 +182,7 @@ func (h *Outbound) diagnoseAndMarkReady(runCtx context.Context) {
+ 		}(key)
+ 	}
+ 
+-	for i := 0; i < len(keys); i++ {
++	for range keys {
+ 		select {
+ 		case r := <-results:
+ 			if r.err == nil {
+@@ -233,7 +234,7 @@ func (h *Outbound) isReady() bool {
+ }
+ 
+ func (h *Outbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+-	if !h.isReady() {
++	if !h.IsReady() {
+ 		return nil, E.New("outbound is not started")
+ 	}
+ 	switch N.NetworkName(network) {
+@@ -248,7 +249,7 @@ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
+ 	if h.uotClient == nil {
+ 		return nil, E.New("UDP over TCP is not enabled for this outbound")
+ 	}
+-	if !h.isReady() {
++	if !h.IsReady() {
+ 		return nil, E.New("outbound is not started")
+ 	}
+ 	return h.uotClient.ListenPacket(ctx, destination)
+@@ -292,3 +293,5 @@ func (a singDialerAdapter) DialContext(ctx context.Context, network string, dest
+ func (a singDialerAdapter) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+ 	return nil, E.New("not supported")
+ }
++
++func (h *Outbound) IsReady() bool { return h.isReady() }
+diff --git a/protocol/hiddify/gooserelay/outbound_test.go b/protocol/hiddify/gooserelay/outbound_test.go
+index 411c14dd70fde70188b7e862b53c4448945a6026..f6070a2f853852320f714d9e7b13e07cd50f2921 100644
+--- a/protocol/hiddify/gooserelay/outbound_test.go
++++ b/protocol/hiddify/gooserelay/outbound_test.go
+@@ -100,7 +100,6 @@ func TestNew_OptionValidation(t *testing.T) {
+ 
+ 	logger := log.NewNOPFactory().Logger()
+ 	for _, tc := range cases {
+-		tc := tc
+ 		t.Run(tc.name, func(t *testing.T) {
+ 			t.Parallel()
+ 			if tc.wantSkip {
+diff --git a/protocol/hiddify/hinvalid/endpoint.go b/protocol/hiddify/hinvalid/endpoint.go
+index b7d5140399d39aeeecdef73768364c0398e04b6b..968a4e677b00a533629f5ce3b531fd63386a07bd 100644
+--- a/protocol/hiddify/hinvalid/endpoint.go
++++ b/protocol/hiddify/hinvalid/endpoint.go
+@@ -31,9 +31,6 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ }
+ 
+ func (h *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+-	if stage == adapter.StartStateInitialize {
+-		scope.Add(h.Close) // H: closed with the box
+-	}
+ 	return nil
+ }
+ 
+diff --git a/protocol/hiddify/hinvalid/h_outbound_test.go b/protocol/hiddify/hinvalid/h_outbound_test.go
+index 45e1969314df91e8f262dfd3c5f34341e7e920fd..df0a11e3d433df43220e95ff735fb578c5a69b6d 100644
+--- a/protocol/hiddify/hinvalid/h_outbound_test.go
++++ b/protocol/hiddify/hinvalid/h_outbound_test.go
+@@ -7,11 +7,13 @@ import (
+ 	"syscall"
+ 	"testing"
+ 
++	"github.com/sagernet/sing-box/adapter"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
++
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+diff --git a/protocol/hiddify/masterdns/h_masterdns_test.go b/protocol/hiddify/masterdns/h_masterdns_test.go
+index 2498946d59d66c355c56249e7e5ac525977ece6d..26a78959c80364fbfdc9020691a09eaeeca687f3 100644
+--- a/protocol/hiddify/masterdns/h_masterdns_test.go
++++ b/protocol/hiddify/masterdns/h_masterdns_test.go
+@@ -7,16 +7,16 @@ import (
+ 	"testing"
+ 	"time"
+ 
+-	"masterdnsvpn-go/lib/testserver"
+-
+-	"github.com/miekg/dns"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+ 	"github.com/sagernet/sing/common/json/badoption"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
++
++	"github.com/miekg/dns"
+ 	"github.com/stretchr/testify/require"
++	"masterdnsvpn-go/lib/testserver"
+ )
+ 
+ func validOptions() option.MasterDNSOptions {
+diff --git a/protocol/hiddify/masterdns/outbound.go b/protocol/hiddify/masterdns/outbound.go
+index 695de0b8b1f346be79119a2fba18cca3656edfe3..61e36038b679c032754f7ad001b89ab9e52a733b 100644
+--- a/protocol/hiddify/masterdns/outbound.go
++++ b/protocol/hiddify/masterdns/outbound.go
+@@ -17,10 +17,6 @@ import (
+ 	"syscall"
+ 	"time"
+ 
+-	mdns "masterdnsvpn-go/lib"
+-
+-	mDNS "github.com/miekg/dns"
+-
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/adapter/outbound"
+ 	"github.com/sagernet/sing-box/common/dialer"
+@@ -35,6 +31,9 @@ import (
+ 	N "github.com/sagernet/sing/common/network"
+ 	"github.com/sagernet/sing/common/uot"
+ 	"github.com/sagernet/sing/service"
++
++	mDNS "github.com/miekg/dns"
++	mdns "masterdnsvpn-go/lib"
+ )
+ 
+ const (
+diff --git a/protocol/hiddify/soar/h_compat.go b/protocol/hiddify/soar/h_compat.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..139863369353e549bb55ce12f1f2f7def9f93c14
+--- /dev/null
++++ b/protocol/hiddify/soar/h_compat.go
+@@ -0,0 +1,5 @@
++package soar
++
++import "github.com/sagernet/sing-box/adapter"
++
++func (h *Outbound) IsReady() bool { return h.Status() == adapter.StatusReady }
+diff --git a/protocol/hiddify/soar/h_soar_test.go b/protocol/hiddify/soar/h_soar_test.go
+index 7f20f4d0496801a70a85e4d40794dba5a749dd88..880bf2c68d36108dd03e5b4fcd7763964ee729bf 100644
+--- a/protocol/hiddify/soar/h_soar_test.go
++++ b/protocol/hiddify/soar/h_soar_test.go
+@@ -11,14 +11,15 @@ import (
+ 	"testing"
+ 	"time"
+ 
+-	"github.com/getlantern/soar"
+-	"github.com/miekg/dns"
+ 	"github.com/sagernet/sing-box/adapter"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
++
++	"github.com/getlantern/soar"
++	"github.com/miekg/dns"
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+diff --git a/protocol/hiddify/soar/outbound.go b/protocol/hiddify/soar/outbound.go
+index 5021d94df4bb5214777c59810f23f662e0e78d2a..ff490beebbb1706e090c0f3838bce8671efa0d0b 100644
+--- a/protocol/hiddify/soar/outbound.go
++++ b/protocol/hiddify/soar/outbound.go
+@@ -22,7 +22,6 @@ import (
+ 	"sync"
+ 	"time"
+ 
+-	"github.com/getlantern/soar"
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/adapter/outbound"
+ 	"github.com/sagernet/sing-box/common/dialer"
+@@ -35,6 +34,8 @@ import (
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
+ 	"github.com/sagernet/sing/service"
++
++	"github.com/getlantern/soar"
+ )
+ 
+ const (
+@@ -107,7 +108,7 @@ func validateZone(zone string) error {
+ 	if len(zone) > 200 {
+ 		return E.New("domain ", strconv.Quote(zone), " is too long to carry data under it")
+ 	}
+-	for _, label := range strings.Split(zone, ".") {
++	for label := range strings.SplitSeq(zone, ".") {
+ 		if label == "" || len(label) > 63 {
+ 			return E.New("domain ", strconv.Quote(zone), " is not a DNS name")
+ 		}

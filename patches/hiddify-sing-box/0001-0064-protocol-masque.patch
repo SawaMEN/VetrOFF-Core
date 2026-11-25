@@ -1,0 +1,782 @@
+diff --git a/protocol/masque/client.go b/protocol/masque/client.go
+index 340fae68d88b2e747ca0d37b1cf02c190155aabb..ed0d4f612f9e90f71f3659c0211d1dc66c74cbaa 100644
+--- a/protocol/masque/client.go
++++ b/protocol/masque/client.go
+@@ -57,7 +57,6 @@ type ClientEndpoint struct {
+ 	stateAccess   sync.Mutex
+ 	deviceStarted bool
+ 	state         atomic.Pointer[clientState]
+-	tracker       adapter.StatusTracker //H
+ }
+ 
+ type clientState struct {
+@@ -122,11 +121,9 @@ func NewClientEndpoint(ctx context.Context, router adapter.Router, logger log.Co
+ 		return nil, err
+ 	}
+ 	clientEndpoint := &ClientEndpoint{
+-		endpointBase: endpointBase{
+-			Adapter: endpoint.NewAdapterWithDialerOptions(C.TypeMASQUEClient, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, options.DialerOptions),
+-			router:  router,
+-			logger:  logger,
+-		},
++		Adapter:   endpoint.NewAdapterWithDialerOptions(C.TypeMASQUEClient, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, options.DialerOptions),
++		router:    router,
++		logger:    logger,
+ 		ctx:       ctx,
+ 		dnsRouter: service.FromContext[adapter.DNSRouter](ctx),
+ 		mtu:       options.MTU,
+@@ -157,17 +154,20 @@ func (c *ClientEndpoint) Start(stage adapter.StartStage, scope *adapter.Scope) e
+ 		if err != nil {
+ 			return err
+ 		}
+-		scope.Add(tunnelDevice.Close)
+ 		tunnelDevice.SetPacketWriter(c.writePacketBuffers)
+ 		c.device = tunnelDevice
++		scope.Add(c.Close)
+ 		c.deviceOptions = nil
+-		scope.Add(c.client.Close)
+ 	case adapter.StartStatePostStart:
+ 		c.client.Start()
+ 	}
+ 	return nil
+ }
+ 
++func (c *ClientEndpoint) Close() error {
++	return common.Close(c.client, c.device)
++}
++
+ func (c *ClientEndpoint) UpdateConfiguration(configuration masque.Configuration) error {
+ 	c.stateAccess.Lock()
+ 	defer c.stateAccess.Unlock()
+@@ -206,38 +206,16 @@ func (c *ClientEndpoint) WriteInboundBuffers(packetBuffers []*buf.Buffer) error
+ 	return err
+ }
+ 
+-func (c *ClientEndpoint) WaitWriteInboundBuffers(packetBuffers []*buf.Buffer) error {
+-	if !c.state.Load().configured {
+-		buf.ReleaseMulti(packetBuffers)
+-		return nil
+-	}
+-	err := c.device.WaitWriteInboundBuffers(packetBuffers)
+-	buf.ReleaseMulti(packetBuffers)
+-	return err
+-}
+-
+-func (c *ClientEndpoint) FrontHeadroom() int {
+-	return c.device.FrontHeadroom()
+-}
+-
+ func (c *ClientEndpoint) InterfaceUpdated(ctx context.Context) {
+ 	c.client.RestartSession()
+ }
+ 
+-// Status is ready while a session with the server is up; on demand, the endpoint connects when
+-// it is used, so it is always ready. //H
+-func (c *ClientEndpoint) Status() adapter.Status { //H
+-	return c.tracker.Status(c.onDemand || c.client.Ready()) //H
+-} //H
+-
+ func (c *ClientEndpoint) OnDemand() bool {
+ 	return c.onDemand
+ }
+ 
+ func (c *ClientEndpoint) SetKeepIdleConnections(keep bool) {
+-	if keep {
+-		c.client.Resume()
+-	} else {
++	if !keep {
+ 		c.client.Suspend()
+ 	}
+ }
+@@ -267,10 +245,6 @@ func (c *ClientEndpoint) PortMTU() uint32 {
+ 	return c.device.PortMTU()
+ }
+ 
+-func (c *ClientEndpoint) UpstreamPort() any {
+-	return c.device
+-}
+-
+ func (c *ClientEndpoint) AttachReturn(returnPath tun.Return) error {
+ 	return c.device.AttachReturn(returnPath)
+ }
+@@ -297,7 +271,7 @@ func (c *ClientEndpoint) WritePackets(packets [][]byte) error {
+ 	return c.client.WritePacketBuffers(common.Map(packets, func(packet []byte) *buf.Buffer {
+ 		packetBuffer := buf.NewSize(masque.PacketHeadroom + len(packet))
+ 		packetBuffer.Resize(masque.PacketHeadroom, 0)
+-		common.Must1(packetBuffer.Write(packet))
++		packetBuffer.Write(packet)
+ 		return packetBuffer
+ 	}), true)
+ }
+diff --git a/protocol/masque/config.go b/protocol/masque/config.go
+index 0a2354489d81a166e185b5989d8ef2e4d501931d..05ca29ef81019c005eaee2d6a5d678eed556455b 100644
+--- a/protocol/masque/config.go
++++ b/protocol/masque/config.go
+@@ -21,8 +21,8 @@ type Config struct {
+ 	AccessToken    string `json:"access_token"`              // Authentication token for API access
+ 	IPv4           string `json:"ipv4"`                      // Assigned IPv4 address
+ 	IPv6           string `json:"ipv6"`                      // Assigned IPv6 address
+-	EndpointPort   int    `json:"endpoint_port,omitempty"`   //H: port of the endpoints; 443 when 0
+-	ReplacedDevice string `json:"replaced_device,omitempty"` //H: private key of the link's device this registered one replaces
++	EndpointPort   int    `json:"endpoint_port,omitempty"`   // H: port of the endpoints; 443 when 0
++	ReplacedDevice string `json:"replaced_device,omitempty"` // H: private key of the link's device this registered one replaces
+ }
+ 
+ func (c *Config) GetEcPrivateKey() (*ecdsa.PrivateKey, error) {
+diff --git a/protocol/masque/endpoint.go b/protocol/masque/endpoint.go
+index 27fac86614b7736dc91ba09b897a7d31bc14d4ce..0333671f2659b54cdab2039aef6764741ed434c1 100644
+--- a/protocol/masque/endpoint.go
++++ b/protocol/masque/endpoint.go
+@@ -37,20 +37,20 @@ func newDeviceOptions(ctx context.Context, logger log.ContextLogger, handler tun
+ 		udpTimeout = C.UDPTimeout
+ 	}
+ 	return &device.Options{
+-		Context:             ctx,
+-		Logger:              logger,
+-		System:              options.System,
+-		Handler:             handler,
+-		UDPTimeout:          udpTimeout,
+-		ICMPTimeout:         C.ICMPTimeout,
+-		UDPMapping:          tun.NATMapping(options.UDPMapping),
+-		UDPFiltering:        tun.NATFiltering(options.UDPFiltering),
+-		UDPNATMax:           options.UDPNATMax,
+-		InterfaceFinder:     service.FromContext[adapter.NetworkManager](ctx).InterfaceFinder(),
+-		Name:                options.Name,
+-		NamePrefix:          "masque",
+-		MTU:                 options.MTU,
+-		PacketFrontHeadroom: masque.PacketHeadroom,
++		Context:         ctx,
++		Logger:          logger,
++		System:          options.System,
++		Handler:         handler,
++		UDPTimeout:      udpTimeout,
++		ICMPTimeout:     C.ICMPTimeout,
++		UDPMapping:      tun.NATMapping(options.UDPMapping),
++		UDPFiltering:    tun.NATFiltering(options.UDPFiltering),
++		UDPNATMax:       options.UDPNATMax,
++		InterfaceFinder: service.FromContext[adapter.NetworkManager](ctx).InterfaceFinder(),
++		Name:            options.Name,
++		NamePrefix:      "masque",
++		MTU:             options.MTU,
++		PacketHeadroom:  masque.PacketHeadroom,
+ 		Configuration: device.Configuration{
+ 			MTU:     options.MTU,
+ 			Address: address,
+@@ -58,6 +58,10 @@ func newDeviceOptions(ctx context.Context, logger log.ContextLogger, handler tun
+ 	}
+ }
+ 
++func (e *endpointBase) SupportsFlow(network string) bool {
++	return slices.Contains(e.Network(), network)
++}
++
+ func (e *endpointBase) newConnection(ctx context.Context, endpoint adapter.Endpoint, localAddresses []netip.Prefix, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
+ 	var metadata adapter.InboundContext
+ 	metadata.Inbound = endpoint.Tag()
+diff --git a/protocol/masque/h_compat.go b/protocol/masque/h_compat.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3312c189b0970a51043db946a711175e2fe9bc78
+--- /dev/null
++++ b/protocol/masque/h_compat.go
+@@ -0,0 +1,6 @@
++package masque
++
++import "github.com/sagernet/sing-box/adapter"
++
++// IsReady retains the fork adapter contract alongside detailed Status.
++func (w *Outbound) IsReady() bool { return w.Status() == adapter.StatusReady }
+diff --git a/protocol/masque/h_config_test.go b/protocol/masque/h_config_test.go
+index 08050447bcd72ba924d7df08ca9eb525e3ebb0a4..e835d541777ec50f2764406b500b9984cf712b22 100644
+--- a/protocol/masque/h_config_test.go
++++ b/protocol/masque/h_config_test.go
+@@ -11,12 +11,12 @@ import (
+ 	"encoding/json"
+ 	"encoding/pem"
+ 	"fmt"
+-	"github.com/sagernet/sing-box/adapter/htest"
+ 	"sync"
+ 	"testing"
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/adapter/htest"
+ 	"github.com/sagernet/sing-box/adapter/outbound"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+@@ -24,6 +24,7 @@ import (
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
++
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+diff --git a/protocol/masque/h_device_test.go b/protocol/masque/h_device_test.go
+index 5dda2fb3b01b694ccf5c724b43a676d0668ef7ef..9b9ebd1bf9c9d869554bb923fb3c6a1910ab353a 100644
+--- a/protocol/masque/h_device_test.go
++++ b/protocol/masque/h_device_test.go
+@@ -13,6 +13,7 @@ import (
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+ 	M "github.com/sagernet/sing/common/metadata"
++
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+diff --git a/protocol/masque/h_endpoint_compat.go b/protocol/masque/h_endpoint_compat.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a065a6cae99a5b89f17be978638a8ffea5aebb51
+--- /dev/null
++++ b/protocol/masque/h_endpoint_compat.go
+@@ -0,0 +1,34 @@
++package masque
++
++import (
++	"github.com/sagernet/sing-tun"
++	"github.com/sagernet/sing/common/buf"
++)
++
++func (c *ClientEndpoint) WaitWriteInboundBuffers(packetBuffers []*buf.Buffer) error {
++	if !c.state.Load().configured {
++		buf.ReleaseMulti(packetBuffers)
++		return nil
++	}
++	err := c.device.WaitWriteInboundBuffers(packetBuffers)
++	buf.ReleaseMulti(packetBuffers)
++	return err
++}
++
++func (c *ClientEndpoint) FrontHeadroom() int {
++	return c.device.FrontHeadroom()
++}
++
++func (s *ServerEndpoint) WaitWriteInboundBuffers(packetBuffers []*buf.Buffer) error {
++	err := s.device.WaitWriteInboundBuffers(packetBuffers)
++	buf.ReleaseMulti(packetBuffers)
++	return err
++}
++
++func (s *ServerEndpoint) FrontHeadroom() int {
++	return s.device.FrontHeadroom()
++}
++
++func (s *ServerEndpoint) NewOutboundQueue(handler func(packetBuffers []*buf.Buffer)) *tun.OutboundQueue {
++	return s.device.NewOutboundQueue(handler)
++}
+diff --git a/protocol/masque/outbound.go b/protocol/masque/outbound.go
+index 59b6993d5bb8fa1157605f800e00a27741796f11..80d08792ac7517f7c849d4669360ad8f07c21ea6 100644
+--- a/protocol/masque/outbound.go
++++ b/protocol/masque/outbound.go
+@@ -10,7 +10,7 @@ import (
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/adapter/outbound"
+ 	"github.com/sagernet/sing-box/common/dialer"
+-	"github.com/sagernet/sing-box/common/iponly" //H
++	"github.com/sagernet/sing-box/common/iponly" // H
+ 	"github.com/sagernet/sing-box/common/monitoring"
+ 	"github.com/sagernet/sing-box/common/tls"
+ 	C "github.com/sagernet/sing-box/constant"
+@@ -27,8 +27,8 @@ import (
+ )
+ 
+ // detourSettle is the least time between two moves of the tunnel when a group detour moves by
+-// itself (a URL test, a balancer). //H
+-const detourSettle = 30 * time.Second //H
++// itself (a URL test, a balancer). // H
++const detourSettle = 30 * time.Second // H
+ 
+ func RegisterOutbound(registry *outbound.Registry) {
+ 	outbound.Register[option.MASQUEOutboundOptions](registry, C.TypeMASQUE, NewOutbound)
+@@ -46,7 +46,7 @@ type Outbound struct {
+ 	options      option.MASQUEOutboundOptions
+ 	tunnel       *masque.Tunnel
+ 	startHandler func()
+-	scanner      *masqueScanner //H
++	scanner      *masqueScanner // H
+ 
+ 	warpConfig   *Config     // the device of the warp endpoint, which registered it
+ 	peer         M.Socksaddr // the endpoint of the warp endpoint's server and server_port
+@@ -55,21 +55,21 @@ type Outbound struct {
+ 	done         chan struct{}
+ 	tracker      adapter.StatusTracker
+ 	doneOnce     sync.Once
+-	tunnelAccess sync.Mutex //H: currentTunnel reads it while the tunnel is set up or closed
++	tunnelAccess sync.Mutex // H: currentTunnel reads it while the tunnel is set up or closed
+ 
+-	onRejected func(err error) //H: told when Cloudflare refuses the device; see SetOnRejected
++	onRejected func(err error) // H: told when Cloudflare refuses the device; see SetOnRejected
+ 
+ 	await chan struct{}
+ 
+-	ownerFollowsDetour bool //H: see followDetour
++	ownerFollowsDetour bool // H: see followDetour
+ 
+-	setupError adapter.LastError //H: why the device or the tunnel could not be set up; see StatusError
++	setupError adapter.LastError // H: why the device or the tunnel could not be set up; see StatusError
+ }
+ 
+ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.MASQUEOutboundOptions) (adapter.Outbound, error) {
+-	if options.Device == nil { //H: it does not register WARP devices
+-		return nil, errNoDevice //H
+-	} //H
++	if options.Device == nil { // H: it does not register WARP devices
++		return nil, errNoDevice // H
++	} // H
+ 	return newWARPOutbound(ctx, logger, tag, options, nil, M.Socksaddr{}, "")
+ }
+ 
+@@ -80,11 +80,11 @@ func NewWARPOutbound(ctx context.Context, logger log.ContextLogger, tag string,
+ 	if config == nil {
+ 		return nil, E.New("missing WARP MASQUE config")
+ 	}
+-	outbound, err := newWARPOutbound(ctx, logger, tag, options, config, peer, profileKey) //H
+-	if err == nil {                                                                       //H
++	outbound, err := newWARPOutbound(ctx, logger, tag, options, config, peer, profileKey) // H
++	if err == nil {                                                                       // H
+ 		outbound.ownerFollowsDetour = true // H: the warp endpoint moves the tunnel itself
+-	} //H
+-	return outbound, err //H
++	} // H
++	return outbound, err // H
+ }
+ 
+ func newWARPOutbound(ctx context.Context, logger log.ContextLogger, tag string, options option.MASQUEOutboundOptions, config *Config, peer M.Socksaddr, profileKey string) (*Outbound, error) {
+@@ -92,17 +92,17 @@ func newWARPOutbound(ctx context.Context, logger log.ContextLogger, tag string,
+ 		return nil, err
+ 	}
+ 	if profileKey == "" {
+-		profileKey = options.UniqueIdentifier //H: unique_identifier, so renaming the outbound keeps the device
++		profileKey = options.UniqueIdentifier // H: unique_identifier, so renaming the outbound keeps the device
+ 	}
+ 	if profileKey == "" {
+ 		profileKey = tag
+ 	}
+-	if config == nil && options.Device != nil { //H: an enrolled device, without the API
+-		var err error                                               //H
+-		if config, err = deviceConfig(options.Device); err != nil { //H
+-			return nil, err //H
+-		} //H
+-	} //H
++	if config == nil && options.Device != nil { // H: an enrolled device, without the API
++		var err error                                               // H
++		if config, err = deviceConfig(options.Device); err != nil { // H
++			return nil, err // H
++		} // H
++	} // H
+ 	outbound := &Outbound{
+ 		Adapter:    outbound.NewAdapterWithDialerOptions(C.TypeMASQUE, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, options.DialerOptions),
+ 		ctx:        ctx,
+@@ -119,7 +119,7 @@ func newWARPOutbound(ctx context.Context, logger log.ContextLogger, tag string,
+ 		defer close(outbound.await)
+ 		if err := outbound.startTunnel(outbound.warpConfig); err != nil {
+ 			logger.ErrorContext(ctx, err)
+-			outbound.setupError.Set(err) //H
++			outbound.setupError.Set(err) // H
+ 		}
+ 		if outbound.isClosed() { // closed while the tunnel was set up
+ 			outbound.closeTunnel()
+@@ -143,11 +143,11 @@ func warpTLS(ctx context.Context, logger logger.ContextLogger, options option.MA
+ 	if err != nil {
+ 		return nil, E.New("failed to generate cert: ", err)
+ 	}
+-	serverName := options.ServerName //H
++	serverName := options.ServerName // H
+ 	if serverName == "" {
+ 		serverName = defaultServerName
+ 	}
+-	tlsConfig, err := tls.NewMASQUEClient(ctx, logger, serverName, cert, privKey, peerPubKey, options.MASQUEOutboundTLSOptions) //H
++	tlsConfig, err := tls.NewMASQUEClient(ctx, logger, serverName, cert, privKey, peerPubKey, options.MASQUEOutboundTLSOptions) // H
+ 	if err != nil {
+ 		return nil, E.New("failed to prepare TLS config: ", err)
+ 	}
+@@ -188,7 +188,7 @@ func (w *Outbound) startTunnel(appConfig *Config) error {
+ 	}
+ 	var scanner *masqueScanner
+ 	var scan func(http2 bool) (net.Addr, error)
+-	if options.Scanner != nil && options.Scanner.Enabled && !hasPeer(w.peer) { //H: look for endpoints that answer
++	if options.Scanner != nil && options.Scanner.Enabled && !hasPeer(w.peer) { // H: look for endpoints that answer
+ 		scanner, err = newMASQUEScanner(ctx, logger, w.profileKey, options, outboundDialer, tlsConfig, &w.scanStatus)
+ 		if err != nil {
+ 			logger.WarnContext(ctx, "WARP scanner: ", err)
+@@ -198,7 +198,7 @@ func (w *Outbound) startTunnel(appConfig *Config) error {
+ 		}
+ 	}
+ 	peer := w.peer
+-	if peer.IsFqdn() { // the warp endpoint's server is a domain
++	if peer.IsDomain() { // the warp endpoint's server is a domain
+ 		addresses, err := w.dnsRouter.Lookup(ctx, peer.Fqdn, adapter.DNSQueryOptions{})
+ 		if err != nil {
+ 			return E.Cause(err, "resolve WARP server ", peer.Fqdn)
+@@ -224,23 +224,23 @@ func (w *Outbound) startTunnel(appConfig *Config) error {
+ 		ReconnectDelay:       options.ReconnectDelay.Build(),
+ 	})
+ 	if err != nil {
+-		if scanner != nil { //H
+-			scanner.Close() //H
+-		} //H
++		if scanner != nil { // H
++			scanner.Close() // H
++		} // H
+ 		return err
+ 	}
+-	if scanner != nil { //H: scores and failover
++	if scanner != nil { // H: scores and failover
+ 		tunnel.SetFailover(scanner.OnConnected, scanner.NextEndpoint)
+-		w.tunnelAccess.Lock() //H
++		w.tunnelAccess.Lock() // H
+ 		w.scanner = scanner
+-		w.tunnelAccess.Unlock() //H
+-	}
+-	if w.onRejected != nil { //H
+-		tunnel.SetOnRejected(w.onRejected) //H
+-	} //H
+-	w.tunnelAccess.Lock()   //H
+-	w.tunnel = tunnel       //H
+-	w.tunnelAccess.Unlock() //H
++		w.tunnelAccess.Unlock() // H
++	}
++	if w.onRejected != nil { // H
++		tunnel.SetOnRejected(w.onRejected) // H
++	} // H
++	w.tunnelAccess.Lock()   // H
++	w.tunnel = tunnel       // H
++	w.tunnelAccess.Unlock() // H
+ 	if err = tunnel.Start(false); err != nil {
+ 		return err
+ 	}
+@@ -255,7 +255,7 @@ func (w *Outbound) startTunnel(appConfig *Config) error {
+ // followDetour reconnects the tunnel when a group detour moves to another member: the tunnel
+ // keeps its connection on the member it was opened through.
+ func (w *Outbound) followDetour() {
+-	if w.options.Detour == "" || w.ownerFollowsDetour { //H
++	if w.options.Detour == "" || w.ownerFollowsDetour { // H
+ 		return
+ 	}
+ 	outboundManager := service.FromContext[adapter.OutboundManager](w.ctx)
+@@ -271,11 +271,11 @@ func (w *Outbound) followDetour() {
+ 		network = N.NetworkTCP
+ 	}
+ 	// H: a move a group made by itself waits a little: another may follow soon
+-	monitoring.FollowDetourSettled(w.ctx, w.done, detour, network, detourSettle, func() bool { return !adapter.IsReady(w) }, func(change monitoring.DetourChange) { //H
+-		w.logger.InfoContext(w.ctx, "detour moved from ", change.From, " to ", change.To, ", reconnecting") //H
+-		if tunnel := w.currentTunnel(); tunnel != nil {                                                     //H
+-			tunnel.ResetConnection() //H
+-		} //H
++	monitoring.FollowDetourSettled(w.ctx, w.done, detour, network, detourSettle, func() bool { return !adapter.IsReady(w) }, func(change monitoring.DetourChange) { // H
++		w.logger.InfoContext(w.ctx, "detour moved from ", change.From, " to ", change.To, ", reconnecting") // H
++		if tunnel := w.currentTunnel(); tunnel != nil {                                                     // H
++			tunnel.ResetConnection() // H
++		} // H
+ 	})
+ }
+ 
+@@ -290,7 +290,7 @@ func (w *Outbound) isClosed() bool {
+ 
+ // Status is ready while the tunnel has a connection to the server, not once it is set up;
+ // searching while the scanner looks for an endpoint; reconnecting after it was ready; failed
+-// when the tunnel could not be set up. //H
++// when the tunnel could not be set up. // H
+ func (w *Outbound) Status() adapter.Status {
+ 	select {
+ 	case <-w.await:
+@@ -300,7 +300,7 @@ func (w *Outbound) Status() adapter.Status {
+ 		}
+ 		return adapter.StatusConnecting
+ 	}
+-	tunnel := w.currentTunnel() //H
++	tunnel := w.currentTunnel() // H
+ 	if tunnel == nil {
+ 		return adapter.StatusFailed
+ 	}
+@@ -310,12 +310,12 @@ func (w *Outbound) Status() adapter.Status {
+ 	return w.tracker.Status(tunnel.IsConnected())
+ }
+ 
+-// DisplayType names the tunnel and the scanner status. //H
++// DisplayType names the tunnel and the scanner status. // H
+ func (w *Outbound) DisplayType() string {
+ 	return C.DisplayWARPMASQUE + w.scanStatus.String()
+ }
+ 
+-// ScanStatus is the status of the scanner, for the warp endpoint's display type. //H
++// ScanStatus is the status of the scanner, for the warp endpoint's display type. // H
+ func (w *Outbound) ScanStatus() *warpscan.Status {
+ 	return &w.scanStatus
+ }
+@@ -334,9 +334,9 @@ func (w *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ func (w *Outbound) Close() error {
+ 	w.doneOnce.Do(func() { close(w.done) }) // ends a registration in progress
+ 
+-	if scanner := w.currentScanner(); scanner != nil { //H: its searches end with it
+-		scanner.Close() //H
+-	} //H
++	if scanner := w.currentScanner(); scanner != nil { // H: its searches end with it
++		scanner.Close() // H
++	} // H
+ 	select {
+ 	case <-w.await:
+ 		return w.closeTunnel()
+@@ -346,17 +346,17 @@ func (w *Outbound) Close() error {
+ }
+ 
+ func (w *Outbound) closeTunnel() error {
+-	w.tunnelAccess.Lock()   //H
+-	tunnel := w.tunnel      //H
+-	w.tunnel = nil          //H
+-	w.tunnelAccess.Unlock() //H
++	w.tunnelAccess.Lock()   // H
++	tunnel := w.tunnel      // H
++	w.tunnel = nil          // H
++	w.tunnelAccess.Unlock() // H
+ 	if tunnel == nil {
+ 		return nil
+ 	}
+ 	return tunnel.Close()
+ }
+ 
+-// currentTunnel is the tunnel in use, nil before it is set up and after it is closed. //H
++// currentTunnel is the tunnel in use, nil before it is set up and after it is closed. // H
+ func (w *Outbound) currentTunnel() *masque.Tunnel {
+ 	w.tunnelAccess.Lock()
+ 	defer w.tunnelAccess.Unlock()
+@@ -364,7 +364,7 @@ func (w *Outbound) currentTunnel() *masque.Tunnel {
+ }
+ 
+ func (w *Outbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+-	tunnel, err := w.initializedTunnel(ctx) //H
++	tunnel, err := w.initializedTunnel(ctx) // H
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -387,7 +387,7 @@ func (w *Outbound) DialContext(ctx context.Context, network string, destination
+ }
+ 
+ func (w *Outbound) ListenPacketWithDestination(ctx context.Context, destination M.Socksaddr) (net.PacketConn, netip.Addr, error) {
+-	tunnel, err := w.initializedTunnel(ctx) //H
++	tunnel, err := w.initializedTunnel(ctx) // H
+ 	if err != nil {
+ 		return nil, netip.Addr{}, err
+ 	}
+@@ -397,22 +397,22 @@ func (w *Outbound) ListenPacketWithDestination(ctx context.Context, destination
+ 		if err != nil {
+ 			return nil, netip.Addr{}, err
+ 		}
+-		packetConn, destinationAddress, err := N.ListenSerial(ctx, tunnel, destination, destinationAddresses) //H
+-		if err != nil {                                                                                       //H
+-			return nil, netip.Addr{}, err //H
++		packetConn, destinationAddress, err := N.ListenSerial(ctx, tunnel, destination, destinationAddresses) // H
++		if err != nil {                                                                                       // H
++			return nil, netip.Addr{}, err // H
+ 		}
+-		return iponly.NewPacketConn(w.logger, packetConn), destinationAddress, nil //H
++		return iponly.NewPacketConn(w.logger, packetConn), destinationAddress, nil // H
+ 	}
+ 	packetConn, err := tunnel.ListenPacket(ctx, destination)
+ 	if err != nil {
+ 		return nil, netip.Addr{}, err
+ 	}
+ 	// the tunnel's netstack takes IP destinations only: a packet to a domain (Chrome's QUIC to a
+-	// FakeIP-mapped name) panicked in gonet.UDPConn.WriteTo and took the core down (#2569) //H
++	// FakeIP-mapped name) panicked in gonet.UDPConn.WriteTo and took the core down (#2569) // H
+ 	if destination.IsIP() {
+-		return iponly.NewPacketConn(w.logger, packetConn), destination.Addr, nil //H
++		return iponly.NewPacketConn(w.logger, packetConn), destination.Addr, nil // H
+ 	}
+-	return iponly.NewPacketConn(w.logger, packetConn), netip.Addr{}, nil //H
++	return iponly.NewPacketConn(w.logger, packetConn), netip.Addr{}, nil // H
+ }
+ 
+ func (w *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+@@ -426,32 +426,32 @@ func (w *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
+ 	return packetConn, nil
+ }
+ 
+-func (w *Outbound) initializedTunnel(ctx context.Context) (*masque.Tunnel, error) { //H: the tunnel, once set up
++func (w *Outbound) initializedTunnel(ctx context.Context) (*masque.Tunnel, error) { // H: the tunnel, once set up
+ 	select {
+ 	case <-w.await:
+ 	case <-ctx.Done():
+ 		return nil, ctx.Err()
+ 	}
+-	tunnel := w.currentTunnel() //H
++	tunnel := w.currentTunnel() // H
+ 	if tunnel == nil {
+ 		return nil, E.New("tunnel not initialized")
+ 	}
+ 	return tunnel, nil
+ }
+ 
+-// InterfaceUpdated reconnects the tunnel on the new network, after naming it for the scores. //H
++// InterfaceUpdated reconnects the tunnel on the new network, after naming it for the scores. // H
+ func (w *Outbound) InterfaceUpdated(ctx context.Context) {
+ 	select {
+ 	case <-w.await:
+ 	default:
+ 		return
+ 	}
+-	tunnel := w.currentTunnel() //H
++	tunnel := w.currentTunnel() // H
+ 	if tunnel == nil {
+ 		return
+ 	}
+ 	go func() {
+-		if scanner := w.currentScanner(); scanner != nil { //H
++		if scanner := w.currentScanner(); scanner != nil { // H
+ 			scanner.DetectNetwork(true)
+ 		}
+ 		tunnel.ResetConnection()
+diff --git a/protocol/masque/server.go b/protocol/masque/server.go
+index bd37395a7f38e4500aaab2f10cd3e3f56b834519..518ae901bf2ff46c7d9bbda74da1ce21ded2cab4 100644
+--- a/protocol/masque/server.go
++++ b/protocol/masque/server.go
+@@ -2,6 +2,7 @@ package masque
+ 
+ import (
+ 	"context"
++	"io"
+ 	"math"
+ 	"net"
+ 	"net/netip"
+@@ -50,6 +51,7 @@ type ServerEndpoint struct {
+ 	tlsConfig      tls.ServerConfig
+ 	http3          bool
+ 	quicOptions    option.QUICOptions
++	http3Server    io.Closer
+ 	server         *masque.Server
+ 	deviceOptions  *device.Options
+ 	device         device.Device
+@@ -76,11 +78,9 @@ func NewServerEndpoint(ctx context.Context, router adapter.Router, logger log.Co
+ 		options.HTTP3Options.InitialPacketSize = min(int(options.MTU)+masque.QUICPacketOverhead, math.MaxUint16)
+ 	}
+ 	serverEndpoint := &ServerEndpoint{
+-		endpointBase: endpointBase{
+-			Adapter: endpoint.NewAdapter(C.TypeMASQUEServer, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, nil),
+-			router:  router,
+-			logger:  logger,
+-		},
++		Adapter:        endpoint.NewAdapter(C.TypeMASQUEServer, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, nil),
++		router:         router,
++		logger:         logger,
+ 		ctx:            ctx,
+ 		dnsRouter:      service.FromContext[adapter.DNSRouter](ctx),
+ 		http3:          serveHTTP3,
+@@ -88,6 +88,7 @@ func NewServerEndpoint(ctx context.Context, router adapter.Router, logger log.Co
+ 		localAddresses: options.Address,
+ 	}
+ 	server, err := masque.NewServer(masque.ServerOptions{
++		SpeedScope:      tag,
+ 		Context:         ctx,
+ 		Logger:          logger,
+ 		Path:            options.Path,
+@@ -135,7 +136,6 @@ func NewServerEndpoint(ctx context.Context, router adapter.Router, logger log.Co
+ 		ConnectionHandler: (*serverConnectionHandler)(serverEndpoint),
+ 	})
+ 	serverEndpoint.deviceOptions = newDeviceOptions(ctx, logger, serverEndpoint, options.MASQUEEndpointOptions, time.Duration(options.UDPTimeout), options.Address)
+-	serverEndpoint.deviceOptions.Route = server.RouteOutbound
+ 	return serverEndpoint, nil
+ }
+ 
+@@ -151,18 +151,16 @@ func (s *ServerEndpoint) Start(stage adapter.StartStage, scope *adapter.Scope) e
+ 		if err != nil {
+ 			return err
+ 		}
+-		scope.Add(tunnelDevice.Close)
+ 		tunnelDevice.SetPacketWriter(s.writePacketBuffers)
+ 		s.device = tunnelDevice
++		scope.Add(s.Close)
+ 		s.deviceOptions = nil
+-		scope.Add(s.server.Close)
+ 	case adapter.StartStateStart:
+ 		if s.tlsConfig != nil {
+ 			err := s.tlsConfig.Start()
+ 			if err != nil {
+ 				return E.Cause(err, "create TLS config")
+ 			}
+-			scope.Add(s.tlsConfig.Close)
+ 		}
+ 		err := s.device.Start()
+ 		if err != nil {
+@@ -172,23 +170,28 @@ func (s *ServerEndpoint) Start(stage adapter.StartStage, scope *adapter.Scope) e
+ 		if err != nil {
+ 			return err
+ 		}
+-		scope.Add(s.listener.Close)
+ 		if s.http3 {
+-			http3Server, listenErr := s.httpServer.ListenHTTP3(s.ctx, s.logger, s.listener, nil, s.tlsConfig, s.quicOptions)
+-			if listenErr != nil {
+-				return listenErr
++			s.http3Server, err = s.httpServer.ListenHTTP3(s.ctx, s.logger, s.listener, nil, s.tlsConfig, s.quicOptions)
++			if err != nil {
++				return err
+ 			}
+-			scope.Add(http3Server.Close)
+ 		}
+ 		s.started.Store(true)
+-		scope.Add(func() error {
+-			s.started.Store(false)
+-			return nil
+-		})
+ 	}
+ 	return nil
+ }
+ 
++func (s *ServerEndpoint) Close() error {
++	s.started.Store(false)
++	return common.Close(
++		s.listener,
++		s.http3Server,
++		s.server,
++		s.device,
++		s.tlsConfig,
++	)
++}
++
+ type serverConnectionHandler ServerEndpoint
+ 
+ func (h *serverConnectionHandler) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+@@ -210,20 +213,6 @@ func (s *ServerEndpoint) WriteInboundBuffers(packetBuffers []*buf.Buffer) error
+ 	return err
+ }
+ 
+-func (s *ServerEndpoint) WaitWriteInboundBuffers(packetBuffers []*buf.Buffer) error {
+-	err := s.device.WaitWriteInboundBuffers(packetBuffers)
+-	buf.ReleaseMulti(packetBuffers)
+-	return err
+-}
+-
+-func (s *ServerEndpoint) FrontHeadroom() int {
+-	return s.device.FrontHeadroom()
+-}
+-
+-func (s *ServerEndpoint) NewOutboundQueue(handler func(packetBuffers []*buf.Buffer)) *tun.OutboundQueue {
+-	return s.device.NewOutboundQueue(handler)
+-}
+-
+ func (s *ServerEndpoint) PreMatchFlow(network string, destination netip.Addr) adapter.PreMatchAction {
+ 	return adapter.PreMatchFlow
+ }
+@@ -236,10 +225,6 @@ func (s *ServerEndpoint) PortMTU() uint32 {
+ 	return s.device.PortMTU()
+ }
+ 
+-func (s *ServerEndpoint) UpstreamPort() any {
+-	return s.device
+-}
+-
+ func (s *ServerEndpoint) AttachReturn(returnPath tun.Return) error {
+ 	return s.device.AttachReturn(returnPath)
+ }
+@@ -260,12 +245,7 @@ func (s *ServerEndpoint) WritePackets(packets [][]byte) error {
+ 	if !s.started.Load() {
+ 		return E.New("endpoint is not ready yet")
+ 	}
+-	return s.server.WritePacketBuffers(common.Map(packets, func(packet []byte) *buf.Buffer {
+-		packetBuffer := buf.NewSize(masque.PacketHeadroom + len(packet))
+-		packetBuffer.Resize(masque.PacketHeadroom, 0)
+-		common.Must1(packetBuffer.Write(packet))
+-		return packetBuffer
+-	}), true)
++	return s.server.WritePacketBuffers(common.Map(packets, buf.As), true)
+ }
+ 
+ func (s *ServerEndpoint) writePacketBuffers(packetBuffers []*buf.Buffer) error {

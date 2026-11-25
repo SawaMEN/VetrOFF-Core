@@ -1,0 +1,40 @@
+diff --git a/hiddify/warpscan/h_masque_test.go b/hiddify/warpscan/h_masque_test.go
+index 523050201d6ea680d4a12eb3de4b806f92e23ce0..45f87186fa904d2072d1660d0f6fa93677dde16c 100644
+--- a/hiddify/warpscan/h_masque_test.go
++++ b/hiddify/warpscan/h_masque_test.go
+@@ -26,12 +26,13 @@ type hClient struct {
+ 	config *stdtls.Config
+ }
+ 
+-func (c *hClient) ServerName() string                        { return c.config.ServerName }
+-func (c *hClient) SetServerName(name string)                 { c.config.ServerName = name }
+-func (c *hClient) NextProtos() []string                      { return c.config.NextProtos }
+-func (c *hClient) SetNextProtos(nextProto []string)          { c.config.NextProtos = nextProto }
+-func (c *hClient) STDConfig() (*stdtls.Config, error)        { return c.config, nil }
+-func (c *hClient) Client(conn net.Conn) (aTLS.Conn, error)   { return stdtls.Client(conn, c.config), nil }
++func (c *hClient) ServerName() string                      { return c.config.ServerName }
++func (c *hClient) SetServerName(name string)               { c.config.ServerName = name }
++func (c *hClient) NextProtos() []string                    { return c.config.NextProtos }
++func (c *hClient) SetNextProtos(nextProto []string)        { c.config.NextProtos = nextProto }
++func (c *hClient) STDConfig() (*stdtls.Config, error)      { return c.config, nil }
++func (c *hClient) Client(conn net.Conn) (aTLS.Conn, error) { return stdtls.Client(conn, c.config), nil }
++
+ func (c *hClient) Clone() aTLS.Config                        { return &hClient{config: c.config.Clone()} }
+ func (c *hClient) HandshakeTimeout() time.Duration           { return 0 }
+ func (c *hClient) SetHandshakeTimeout(timeout time.Duration) {}
+diff --git a/hiddify/warpscan/wireguard.go b/hiddify/warpscan/wireguard.go
+index 6bec5875c35a1ab30072e138958e2021f876bd45..0c1b6f5419c842d2fd93f4c2320d9ed24b2475fb 100644
+--- a/hiddify/warpscan/wireguard.go
++++ b/hiddify/warpscan/wireguard.go
+@@ -145,7 +145,10 @@ func wireGuardHandshake(ctx context.Context, dialer N.Dialer, addrPort netip.Add
+ 		if _, _, _, err = state.ReadMessage(nil, response[12:60]); err != nil {
+ 			return 0, E.Cause(err, "invalid handshake response")
+ 		}
+-		return time.Since(start), nil
++		// On some Windows clocks a successful loopback handshake can be
++		// measured as zero. Keep a successful probe distinguishable from
++		// an unset/failed measurement without inventing millisecond latency.
++		return max(time.Since(start), time.Nanosecond), nil
+ 	}
+ }
+ 

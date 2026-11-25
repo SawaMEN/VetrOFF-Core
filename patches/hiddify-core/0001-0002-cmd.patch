@@ -89,61 +89,28 @@ index 0000000000000000000000000000000000000000..85fbf814adf8abcdeb7413697266feb8
 +		os.Exit(1)
 +	}
 +}
-diff --git a/cmd/cmd_admin_bgservice.go b/cmd/cmd_admin_bgservice.go
-index ac64b776e82a7f16618d0147faf6ecbd9d5d4765..42c6300aab307f27681e2d31d995073dde4f685a 100644
---- a/cmd/cmd_admin_bgservice.go
-+++ b/cmd/cmd_admin_bgservice.go
-@@ -30,7 +30,6 @@ var commandService = &cobra.Command{
- 			adminbgservice.ActivateAdminBgService(&adminbgservice.AdminBgStartRequest{
- 				Ipv6:       true,
- 				ServerPort: 12334,
--				Stack:      "gvisor",
- 			})
- 			<-time.After(1 * time.Second)
- 		case "deactivate":
-diff --git a/cmd/cmd_config_parse.go b/cmd/cmd_config_parse.go
-index 01642c703d42ee0fb4468de07b1cc88dbd99aeba..befa716fe7ecc9d72395bcb0798a9adf0796e5a3 100644
---- a/cmd/cmd_config_parse.go
-+++ b/cmd/cmd_config_parse.go
-@@ -99,6 +99,20 @@ func parseToXray(path string) ([]byte, error) {
- 	return pretty.Bytes(), nil
- }
+diff --git a/cmd/cmd_version.go b/cmd/cmd_version.go
+index 3f4a1beb844b9d4a8d41ac487ae31d20fe4c0721..c37d94130c84f4a8cbfbccf29e8d4b029bd0a1d2 100644
+--- a/cmd/cmd_version.go
++++ b/cmd/cmd_version.go
+@@ -13,7 +13,7 @@ import (
  
-+// shareLinksToXray converts plain share links with libxray, which returns the outbounds as JSON
-+// ({"outbounds": [...]}) since v1.261031.0; the empty key is for links that are not Age-encrypted.
-+func shareLinksToXray(text string) (*conf.Config, error) {
-+	raw, err := share.ConvertShareLinksToXrayJson(text, "")
-+	if err != nil {
-+		return nil, err
-+	}
-+	cfg := &conf.Config{}
-+	if err := json.Unmarshal(raw, cfg); err != nil {
-+		return nil, err
-+	}
-+	return cfg, nil
-+}
-+
- // Share links are converted one by one, working around three things libxray gets wrong:
- //   - it reads HTML-escaped links ("&amp;" between the parameters, as some subscriptions write them) as
- //     parameters named "amp;pbk", and so on. "&amp;" is turned back into "&", as ray2sing does;
-@@ -115,7 +129,7 @@ func convertShareLinksToXray(text string) (*conf.Config, error) {
- 		}
+ var commandVersion = &cobra.Command{
+ 	Use:   "version",
+-	Short: "Print current version of hiddify-core",
++	Short: "Print current version of VetrOFF-Core",
+ 	Run:   printVersion,
+ 	Args:  cobra.NoArgs,
+ }
+@@ -30,7 +30,7 @@ func printVersion(cmd *cobra.Command, args []string) {
+ 		os.Stdout.WriteString(C.Version + "\n")
+ 		return
  	}
- 	if !strings.Contains(text, "://") {
--		return share.ConvertShareLinksToXrayJson(text)
-+		return shareLinksToXray(text)
- 	}
- 	var result *conf.Config
- 	var lastErr error
-@@ -129,7 +143,7 @@ func convertShareLinksToXray(text string) (*conf.Config, error) {
- 		if vmessExtra != "" {
- 			extra = vmessExtra
- 		}
--		cfg, err := share.ConvertShareLinksToXrayJson(line)
-+		cfg, err := shareLinksToXray(line)
- 		if err != nil {
- 			lastErr = err
- 			continue
+-	version := "hiddify-core version " + HC.Version + " hiddify-sing-box version " + C.Version + "\n\n"
++	version := "VetrOFF-Core " + HC.Version + "\nHiddify sing-box version " + C.Version + "\n\n"
+ 	version += "Environment: " + runtime.Version() + " " + runtime.GOOS + "/" + runtime.GOARCH + "\n"
+ 
+ 	var tags string
 diff --git a/cmd/cmd_xui_check.go b/cmd/cmd_xui_check.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..f88be2052b96664955c5cd6957f9fed506064819

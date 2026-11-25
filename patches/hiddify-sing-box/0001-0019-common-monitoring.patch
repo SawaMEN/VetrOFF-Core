@@ -1,184 +1,36 @@
-diff --git a/common/monitoring/h_cycle.go b/common/monitoring/h_cycle.go
-new file mode 100644
-index 0000000000000000000000000000000000000000..d36edee8f71d9c1c13795e573303100022ba85d4
---- /dev/null
-+++ b/common/monitoring/h_cycle.go
-@@ -0,0 +1,61 @@
-+package monitoring
-+
-+import (
-+	"time"
-+
-+	N "github.com/sagernet/sing/common/network"
-+)
-+
-+// PeriodicCycleRunning reports a regular cycle of the schedule in progress (every interval). Its
-+// results arrive one by one, and a group that took each at once moved its selection many times
-+// during one cycle, so the balancer keeps the members it uses while they answer and chooses again
-+// when the cycle ends. Not the first cycle after start, nor one after a network change: then there
-+// is no selection worth keeping yet, and the groups take each result as it comes (after the
-+// debounce of the group events).
-+func (m *OutboundMonitoring) PeriodicCycleRunning() bool {
-+	return m.cycleRunning.Load() && m.periodicCycle.Load()
-+}
-+
-+// CycleStartedAt is when the running cycle started: a result at or after it is of this cycle.
-+func (m *OutboundMonitoring) CycleStartedAt() time.Time {
-+	if started, ok := m.cycleStarted.Load().(time.Time); ok {
-+		return started
-+	}
-+	return time.Time{}
-+}
-+
-+// endCycle marks the cycle over and tells every group, so a group that held its selection
-+// during it chooses with all the results.
-+func (m *OutboundMonitoring) endCycle() {
-+	m.cycleRunning.Store(false)
-+	if registry := m.reg(); registry != nil {
-+		m.emitAllGroupEvents(registry)
-+	}
-+}
-+
-+// emitAllGroupEvents tells every group of registry that something changed.
-+func (m *OutboundMonitoring) emitAllGroupEvents(registry *monitoringRegistry) {
-+	tags := make([]string, 0, len(registry.groups))
-+	for tag := range registry.groups {
-+		tags = append(tags, tag)
-+	}
-+	m.emitGroupEvent(tags)
-+}
-+
-+// groupUses reports whether the group sends its connections through member now: its selection,
-+// or the selection of the group it selects. A member that starts working changes nothing for
-+// what goes through a group that uses another one; retesting that (the Extra Security hop behind
-+// the selector) for every member of a large subscription that answered tested it dozens of times
-+// in the first cycle, and its ping changed every few seconds.
-+func (m *OutboundMonitoring) groupUses(groupTag, member string) bool {
-+	state := m.getState(groupTag)
-+	if state == nil {
-+		return false
-+	}
-+	for _, outbound := range detourPath(state.outbound, N.NetworkTCP)[1:] { // [0] is the group itself
-+		if outbound.Tag() == member {
-+			return true
-+		}
-+	}
-+	return false
-+}
 diff --git a/common/monitoring/h_cycle_test.go b/common/monitoring/h_cycle_test.go
-new file mode 100644
-index 0000000000000000000000000000000000000000..0e802f6177aa208433069f8b7a27a889eb47a224
---- /dev/null
+index 862ee9106ae2e130e1b3f7d8375180e028f5a88b..0e802f6177aa208433069f8b7a27a889eb47a224 100644
+--- a/common/monitoring/h_cycle_test.go
 +++ b/common/monitoring/h_cycle_test.go
-@@ -0,0 +1,108 @@
-+package monitoring
-+
-+import (
-+	"context"
-+	"net"
-+	"testing"
-+	"time"
-+
-+	"github.com/sagernet/sing-box/adapter"
-+	"github.com/sagernet/sing-box/adapter/htest"
-+	"github.com/sagernet/sing-box/option"
-+	"github.com/sagernet/sing/common/json/badoption"
-+	M "github.com/sagernet/sing/common/metadata"
-+
-+	"github.com/stretchr/testify/require"
-+)
-+
-+// The end of a cycle is told to every group, so a balancer that held its selection during it
-+// chooses with all the results.
-+func TestH_MonitoringTellsTheGroupsWhenACycleEnds(t *testing.T) {
-+	url, addr := noContentServer(t)
-+	a := &fakeOutbound{tag: "a", dial: dialTo(addr, nil)}
+@@ -20,7 +20,7 @@ import (
+ func TestH_MonitoringTellsTheGroupsWhenACycleEnds(t *testing.T) {
+ 	url, addr := noContentServer(t)
+ 	a := &fakeOutbound{tag: "a", dial: dialTo(addr, nil)}
+-	grp := &fakeGroup{fakeOutbound: fakeOutbound{tag: "grp"}, all: []string{"a"}}
 +	grp := &fakeGroup{tag: "grp", all: []string{"a"}}
-+	m := newTestMonitor(t, nil, option.MonitoringOptions{
-+		Interval:       badoption.Duration(time.Hour),
-+		Workers:        1,
-+		URLs:           []string{url},
-+		URLTestTimeout: badoption.Duration(time.Second),
-+	}, a, grp)
-+	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
-+	events, err := m.SubscribeGroup("grp")
-+	require.NoError(t, err)
-+	defer m.UnsubscribeGroup("grp", events)
-+	require.NoError(t, htest.Start(m, adapter.StartStatePostStart)) // runs the first cycle
-+	require.Eventually(t, func() bool { return !m.cycleRunning.Load() }, 5*time.Second, 10*time.Millisecond)
-+	for quiet := time.After(2 * time.Second); ; { // what the first cycle's results sent
-+		select {
-+		case <-events:
-+			continue
-+		case <-quiet:
-+		}
-+		break
-+	}
-+
-+	m.cycleRunning.Store(true)
-+	m.endCycle()
-+	require.False(t, m.cycleRunning.Load())
-+	select {
-+	case <-events:
-+	case <-time.After(3 * time.Second):
-+		t.Fatal("the end of the cycle was not told to the group")
-+	}
-+}
-+
-+// Only a regular cycle of the schedule holds the groups: the first one after start and one after
-+// a network change are taken result by result. A network change during a regular cycle ends the
-+// hold, since its results are of the old network.
-+func TestH_MonitoringOnlyPeriodicCyclesHold(t *testing.T) {
-+	release := make(chan struct{})
-+	slow := &fakeOutbound{tag: "slow", dial: func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-+		select {
-+		case <-release:
-+		case <-ctx.Done():
-+		}
-+		return nil, context.DeadlineExceeded
-+	}}
-+	m := newTestMonitor(t, nil, option.MonitoringOptions{
-+		Interval:       badoption.Duration(time.Hour),
-+		Workers:        1,
-+		URLs:           []string{"http://127.0.0.1:1/generate_204"},
-+		URLTestTimeout: badoption.Duration(5 * time.Second),
-+	}, slow)
-+	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
-+	m.workerWG.Add(1)
-+	go m.workerLoop()
-+
-+	require.True(t, m.startCycleOnce(), "as at start")
-+	require.True(t, m.cycleRunning.Load())
-+	require.False(t, m.PeriodicCycleRunning(), "the first cycle is taken as it comes")
-+	close(release)
-+	require.Eventually(t, func() bool { return !m.cycleRunning.Load() }, 10*time.Second, 10*time.Millisecond)
-+
-+	release = make(chan struct{})
-+	require.True(t, m.startCycle(true), "the schedule's")
-+	require.True(t, m.PeriodicCycleRunning())
+ 	m := newTestMonitor(t, nil, option.MonitoringOptions{
+ 		Interval:       badoption.Duration(time.Hour),
+ 		Workers:        1,
+@@ -83,7 +83,7 @@ func TestH_MonitoringOnlyPeriodicCyclesHold(t *testing.T) {
+ 	release = make(chan struct{})
+ 	require.True(t, m.startCycle(true), "the schedule's")
+ 	require.True(t, m.PeriodicCycleRunning())
+-	m.started = true
 +	m.started.Store(true)
-+	m.retestAll() // a network change during it
-+	require.False(t, m.PeriodicCycleRunning(), "the results are of the old network")
-+	close(release)
-+	require.Eventually(t, func() bool { return !m.cycleRunning.Load() }, 20*time.Second, 10*time.Millisecond)
-+	require.False(t, m.PeriodicCycleRunning())
-+}
-+
-+// A member that starts working retests what goes through a group only when the group uses it:
-+// the Extra Security hop behind the selector was tested again for every member of a large
-+// subscription that answered.
-+func TestH_MonitoringGroupUsesItsSelectionOnly(t *testing.T) {
-+	a, b := &fakeOutbound{tag: "a"}, &fakeOutbound{tag: "b"}
+ 	m.retestAll() // a network change during it
+ 	require.False(t, m.PeriodicCycleRunning(), "the results are of the old network")
+ 	close(release)
+@@ -96,8 +96,8 @@ func TestH_MonitoringOnlyPeriodicCyclesHold(t *testing.T) {
+ // subscription that answered.
+ func TestH_MonitoringGroupUsesItsSelectionOnly(t *testing.T) {
+ 	a, b := &fakeOutbound{tag: "a"}, &fakeOutbound{tag: "b"}
+-	inner := &fakeGroup{fakeOutbound: fakeOutbound{tag: "inner"}, all: []string{"a", "b"}, selected: a}
+-	outer := &fakeGroup{fakeOutbound: fakeOutbound{tag: "outer"}, all: []string{"inner"}, selected: inner}
 +	inner := &fakeGroup{tag: "inner", all: []string{"a", "b"}, selected: a}
 +	outer := &fakeGroup{tag: "outer", all: []string{"inner"}, selected: inner}
-+	m := newTestMonitor(t, nil, option.MonitoringOptions{Interval: badoption.Duration(time.Hour)}, a, b, inner, outer)
-+	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
-+	require.True(t, m.groupUses("inner", "a"))
-+	require.False(t, m.groupUses("inner", "b"), "a member the group does not use")
-+	require.True(t, m.groupUses("outer", "a"), "through the group it selects")
-+	require.False(t, m.groupUses("outer", "b"))
-+	require.False(t, m.groupUses("a", "a"), "not a group")
-+}
+ 	m := newTestMonitor(t, nil, option.MonitoringOptions{Interval: badoption.Duration(time.Hour)}, a, b, inner, outer)
+ 	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
+ 	require.True(t, m.groupUses("inner", "a"))
 diff --git a/common/monitoring/h_detour_result_test.go b/common/monitoring/h_detour_result_test.go
 index 6feaff3a9fe9c48a295a6c5724d4fdba705d21d7..b06ae2393396a9bfbe2b3d36fd6d2b6a6fe3a93e 100644
 --- a/common/monitoring/h_detour_result_test.go
@@ -244,602 +96,45 @@ index f1749db5729bd29fdea0d7c00a66f504b0134d25..8e417cb8050f6f2521013d39e140f2bf
  	moves := make(chan DetourChange, 8)
  	var broken atomic.Bool
  	push := settleMoves(ctx, ctx.Done(), settle, broken.Load, func(change DetourChange) { moves <- change })
-diff --git a/common/monitoring/h_ipv6.go b/common/monitoring/h_ipv6.go
-index 0503374815d1c9c4fc60ff475dac80139c3ed556..a792a2be111dcb09353260c71f1efa5b66f9faa2 100644
---- a/common/monitoring/h_ipv6.go
-+++ b/common/monitoring/h_ipv6.go
-@@ -2,72 +2,268 @@ package monitoring
- 
- import (
- 	"context"
-+	"net/netip"
- 	"time"
- 
- 	"github.com/sagernet/sing-box/adapter"
--	M "github.com/sagernet/sing/common/metadata"
--	N "github.com/sagernet/sing/common/network"
-+	"github.com/sagernet/sing-box/common/urltest"
-+	C "github.com/sagernet/sing-box/constant"
-+	E "github.com/sagernet/sing/common/exceptions"
-+	"github.com/sagernet/sing/service"
- )
- 
--// defaultIPv6Probe is Cloudflare's resolver over DNS-over-TLS: an address any IPv6 route
--// reaches, on a port the connection is only opened to, never spoken on.
--const defaultIPv6Probe = "[2606:4700:4700::1111]:443"
-+// How the monitoring knows an outbound's IPv6: from what the router saw on the connections it
-+// carried (route option ipv6_fallback), never from a probe of its own. A probe is traffic to a
-+// public address that a filtered network breaks, and a dial through VLESS, Trojan or VMess says
-+// nothing about the exit anyway. The user's own traffic says it all: a connection to an IPv6
-+// address that the destination answered shows IPv6 carried; one that got nothing while the same
-+// destination answered over IPv4 shows it is not.
-+const (
-+	// ipv6FailuresToConclude is how many IPv6 connections in a row must get nothing, while
-+	// IPv4 answered, before the outbound counts as having no IPv6. One is a site whose IPv6 is
-+	// broken; two is the exit.
-+	ipv6FailuresToConclude = 2
-+	// ipv6Forget is how long an outbound found without IPv6 stays so. No IPv6 reaches it
-+	// meanwhile (no AAAA answers, IPv6 refused), so nothing else can tell when its exit gains
-+	// IPv6; after this the next IPv6 connection is let through and carried over IPv4 if needed.
-+	ipv6Forget = 10 * time.Minute
-+)
- 
--// ipv6ProbeTimeout bounds the probe: a dead IPv6 path through a proxy answers nothing.
--const ipv6ProbeTimeout = 3 * time.Second
-+type ipv6Knowledge struct {
-+	failures   int       // IPv6 connections in a row that got nothing while IPv4 answered
-+	carriedAt  time.Time // when an IPv6 connection last answered
-+	observedAt time.Time // the last observation
-+}
- 
--// ipv6ProbeAddress is the probe to use for the option's value: the default when empty, none
--// for "none".
--func ipv6ProbeAddress(option string) string {
--	switch option {
--	case "":
--		return defaultIPv6Probe
--	case "none", "off", "false":
--		return ""
-+func (k *ipv6Knowledge) observe(carried bool, now time.Time) {
-+	k.observedAt = now
-+	if carried {
-+		k.failures = 0
-+		k.carriedAt = now
-+	} else {
-+		k.failures++
- 	}
--	return option
- }
- 
--// ipv6Of is what the test records about IPv6 for the one outbound that answered its URL test:
--// once per outbound per run (and once more after a cached result), a connection to the probe
--// address through that outbound, closed as soon as it is open; otherwise what was known of it.
--// Each outbound and endpoint has its own answer: one proxy carries IPv6, the next may not.
--func (m *OutboundMonitoring) ipv6Of(ctx context.Context, out *outboundState) *bool {
--	out.mu.Lock()
--	known, fromCache := out.history.IPv6, out.from_cache
--	out.mu.Unlock()
--	if m.ipv6Probe == "" {
--		return known
--	}
--	if known != nil && !fromCache {
--		return known
--	}
--	probeContext, cancel := context.WithTimeout(ctx, ipv6ProbeTimeout)
--	defer cancel()
--	conn, err := out.outbound.DialContext(probeContext, N.NetworkTCP, M.ParseSocksaddr(m.ipv6Probe))
--	supported := err == nil
--	if conn != nil {
--		conn.Close()
-+// answer is what the knowledge says: supported, and whether anything is known at all.
-+func (k ipv6Knowledge) answer(now time.Time) (supported bool, known bool) {
-+	if k.failures >= ipv6FailuresToConclude {
-+		if now.Sub(k.observedAt) < ipv6Forget {
-+			return false, true
-+		}
-+		return false, false // long enough: let an IPv6 connection through and see
-+	}
-+	if !k.carriedAt.IsZero() {
-+		return true, true
-+	}
-+	return false, false
-+}
-+
-+// ObserveIPv6 implements adapter.IPv6Capability: the router saw a connection to an IPv6 address
-+// through the outbound answered (carried), or answered only once carried over IPv4 (not). A
-+// group's observation goes to the member it leads to.
-+func (m *OutboundMonitoring) ObserveIPv6(tag string, carried bool) {
-+	reg := m.reg()
-+	if reg == nil || tag == "" {
-+		return
-+	}
-+	leaf := m.ipv6Leaf(reg, tag)
-+	now := time.Now()
-+	m.ipv6Access.Lock()
-+	knowledge := m.ipv6[leaf]
-+	if knowledge == nil {
-+		knowledge = &ipv6Knowledge{}
-+		m.ipv6[leaf] = knowledge
- 	}
--	if supported {
--		m.logger.Debug("outbound ", out.outbound.Tag(), " carries IPv6")
-+	knowledge.observe(carried, now)
-+	supported, known := knowledge.answer(now)
-+	failures := knowledge.failures
-+	m.ipv6Access.Unlock()
-+	if carried {
-+		m.logger.Debug("outbound ", leaf, " carried IPv6")
-+	} else if known && !supported {
-+		m.logger.Info("outbound ", leaf, " has no IPv6: ", failures, " IPv6 connections got nothing while IPv4 answered; no AAAA answers and no IPv6 through it for ", ipv6Forget)
- 	} else {
--		m.logger.Info("outbound ", out.outbound.Tag(), " does not carry IPv6: ", err)
-+		m.logger.Info("outbound ", leaf, " did not carry an IPv6 connection that IPv4 then carried")
-+	}
-+	// shown to the app, and fresh: no need to verify it again this run
-+	if state, ok := reg.outbounds[leaf]; ok {
-+		state.mu.Lock()
-+		if known {
-+			state.history.IPv6 = &supported
-+		} else {
-+			state.history.IPv6 = nil
-+		}
-+		state.history.IPv6FromCache = false
-+		state.mu.Unlock()
- 	}
--	return &supported
- }
- 
--// OutboundIPv6 implements adapter.IPv6Capability: what the probe found for the outbound, or
--// for the member a group leads to; not known before the probe.
-+// OutboundIPv6 implements adapter.IPv6Capability: what the connections showed for the outbound;
-+// for a group, for the member it leads to, or, when it has no single selection (a balancer that
-+// hashes or rotates), for all its live members together. Not known before any observation.
- func (m *OutboundMonitoring) OutboundIPv6(tag string) (supported bool, known bool) {
--	if m.reg() == nil {
-+	reg := m.reg()
-+	if reg == nil {
- 		return false, false
- 	}
--	his := m.getUrlTest(tag)
--	if his == nil || his.IPv6 == nil {
-+	return m.ipv6OfTag(reg, tag, 0)
-+}
-+
-+// ipv6Leaf is the outbound a connection through tag went through: a group's selected member,
-+// down the chain; a group without a single selection stands for itself.
-+func (m *OutboundMonitoring) ipv6Leaf(reg *monitoringRegistry, tag string) string {
-+	for range 8 {
-+		state, ok := reg.outbounds[tag]
-+		if !ok {
-+			return tag
-+		}
-+		if _, isGroup := reg.groups[tag]; !isGroup {
-+			return tag
-+		}
-+		selected := RealTag(state.outbound)
-+		if selected == "" || selected == tag {
-+			return tag
-+		}
-+		tag = selected
-+	}
-+	return tag
-+}
-+
-+func (m *OutboundMonitoring) ipv6Knowledge(tag string) (supported bool, known bool) {
-+	m.ipv6Access.Lock()
-+	defer m.ipv6Access.Unlock()
-+	knowledge := m.ipv6[tag]
-+	if knowledge == nil {
- 		return false, false
- 	}
--	return *his.IPv6, true
-+	return knowledge.answer(time.Now())
-+}
-+
-+func (m *OutboundMonitoring) ipv6OfTag(reg *monitoringRegistry, tag string, depth int) (supported bool, known bool) {
-+	if depth > 8 { // a group leads to its selected member, which may be a group too
-+		return false, false
-+	}
-+	state, ok := reg.outbounds[tag]
-+	if !ok {
-+		return m.ipv6Knowledge(tag)
-+	}
-+	grp, isGroup := reg.groups[tag]
-+	if !isGroup {
-+		return m.ipv6Knowledge(tag)
-+	}
-+	if selected := RealTag(state.outbound); selected != "" && selected != tag {
-+		return m.ipv6OfTag(reg, selected, depth+1)
-+	}
-+	// No single selection: a connection may go to any live member, so IPv6 is carried only when
-+	// every one of them is known to carry it, and lacking as soon as one is known to lack it.
-+	// What was observed on the group itself (a member the router could not name) counts too.
-+	if supported, known = m.ipv6Knowledge(tag); known && !supported {
-+		return false, true
-+	}
-+	live, allKnown := 0, true
-+	for member := range grp.outbounds {
-+		memberState, ok := reg.outbounds[member]
-+		if !ok || !memberState.answered() {
-+			continue
-+		}
-+		live++
-+		memberSupported, memberKnown := m.ipv6OfTag(reg, member, depth+1)
-+		if memberKnown && !memberSupported {
-+			return false, true
-+		}
-+		if !memberKnown {
-+			allKnown = false
-+		}
-+	}
-+	if live == 0 || !allKnown {
-+		return false, false
-+	}
-+	return true, true
-+}
-+
-+// answered reports whether the outbound has a URL test result that is not a timeout, of this run
-+// or a cached one: a member a group may give a connection to.
-+func (s *outboundState) answered() bool {
-+	s.mu.Lock()
-+	defer s.mu.Unlock()
-+	return s.history.Delay > 0 && s.history.Delay < TimeoutDelay
- }
- 
- var _ adapter.IPv6Capability = (*OutboundMonitoring)(nil)
-+
-+// recordIPv6 sets what is known outright: a verification at the URL test, a declaration from the
-+// link, or an answer cached from an earlier run. Traffic observations build on it from there.
-+func (m *OutboundMonitoring) recordIPv6(tag string, carried bool) {
-+	now := time.Now()
-+	m.ipv6Access.Lock()
-+	knowledge := m.ipv6[tag]
-+	if knowledge == nil {
-+		knowledge = &ipv6Knowledge{}
-+		m.ipv6[tag] = knowledge
-+	}
-+	knowledge.observedAt = now
-+	if carried {
-+		knowledge.failures = 0
-+		knowledge.carriedAt = now
-+	} else {
-+		knowledge.failures = ipv6FailuresToConclude
-+		knowledge.carriedAt = time.Time{}
-+	}
-+	m.ipv6Access.Unlock()
-+}
-+
-+// seedIPv6Knowledge starts the run with what is already known: the answers cached with the URL
-+// test results of earlier runs, and the links' declarations, which win. Both are verified again
-+// at the outbound's first URL test when the verification is on.
-+func (m *OutboundMonitoring) seedIPv6Knowledge() {
-+	reg := m.reg()
-+	if reg == nil {
-+		return
-+	}
-+	for tag, state := range reg.outbounds {
-+		state.mu.Lock()
-+		cached := state.history.IPv6
-+		state.mu.Unlock()
-+		if cached != nil {
-+			m.recordIPv6(tag, *cached)
-+		}
-+	}
-+	for tag, carried := range m.ipv6Declared {
-+		m.recordIPv6(tag, carried)
-+		if state, ok := reg.outbounds[tag]; ok {
-+			state.mu.Lock()
-+			declared := carried
-+			state.history.IPv6 = &declared
-+			state.mu.Unlock()
-+		} else {
-+			m.logger.Warn("ipv6_declared names an outbound that is not monitored: ", tag)
-+		}
-+	}
-+}
-+
-+// verifyIPv6Of is the URL test over IPv6 through the outbound (urltest.URLTestIPv6), with the
-+// box's own DNS for the test host's IPv6 address; nil when nothing could be verified, which
-+// leaves what is known as it is.
-+func (m *OutboundMonitoring) verifyIPv6Of(ctx context.Context, out *outboundState, link string) *bool {
-+	resolve := func(ctx context.Context, host string) ([]netip.Addr, error) {
-+		router := service.FromContext[adapter.DNSRouter](m.ctx)
-+		if router == nil {
-+			return nil, E.New("no DNS router")
-+		}
-+		return router.Lookup(ctx, host, adapter.DNSQueryOptions{Strategy: C.DomainStrategyIPv6Only})
-+	}
-+	verifyContext, cancel := context.WithTimeout(ctx, m.urlTestTimeout)
-+	defer cancel()
-+	carried, err := urltest.URLTestIPv6(verifyContext, link, out.outbound, resolve)
-+	if err != nil {
-+		m.logger.Debug("outbound ", out.outbound.Tag(), ": IPv6 not verified: ", err)
-+		return nil
-+	}
-+	if carried {
-+		m.logger.Debug("outbound ", out.outbound.Tag(), " carries IPv6, verified at the URL test")
-+	} else {
-+		m.logger.Info("outbound ", out.outbound.Tag(), " has no IPv6, verified at the URL test: no AAAA answers and no IPv6 through it")
-+	}
-+	return &carried
-+}
 diff --git a/common/monitoring/h_ipv6_test.go b/common/monitoring/h_ipv6_test.go
-index b2ab2d58a5c8b6fcbc01453f49b29d3918780ceb..bf793619443349c0c1fa8602192175c3c3f858be 100644
+index d37b1c66348c476b3b90dd2b7867af2cada70239..bf793619443349c0c1fa8602192175c3c3f858be 100644
 --- a/common/monitoring/h_ipv6_test.go
 +++ b/common/monitoring/h_ipv6_test.go
-@@ -6,6 +6,8 @@ import (
- 	"net"
- 	"net/http"
- 	"net/http/httptest"
-+	"net/netip"
-+	"strconv"
- 	"testing"
- 	"time"
- 
-@@ -19,70 +21,180 @@ import (
- 	"github.com/stretchr/testify/require"
- )
- 
--// After a URL test that answers, the monitoring opens one connection to the IPv6 probe through
--// the outbound and records whether it got through; a group answers for its selected member;
--// the DNS router and the route find the answer as adapter.IPv6Capability in the context.
--func TestH_MonitoringProbesIPv6(t *testing.T) {
--	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
--		time.Sleep(3 * time.Millisecond)
-+// hFakeDNS answers every lookup with the addresses given; nothing else of a DNS router.
-+type hFakeDNS struct {
-+	adapter.DNSRouter
-+	addresses []netip.Addr
-+}
-+
-+func (d *hFakeDNS) Lookup(ctx context.Context, domain string, options adapter.DNSQueryOptions) ([]netip.Addr, error) {
-+	return d.addresses, nil
-+}
-+
-+// The monitoring learns an outbound's IPv6 from what the router observed on its connections:
-+// nothing is known before the first observation; one IPv6 connection that answered says it is
-+// carried; two in a row that got nothing while IPv4 answered say it is not, for a while; a group
-+// answers for the member it leads to; the DNS router and the route find it as
-+// adapter.IPv6Capability in the context.
-+func TestH_MonitoringLearnsIPv6(t *testing.T) {
-+	a, b := &fakeOutbound{tag: "a"}, &fakeOutbound{tag: "b"}
+@@ -38,7 +38,7 @@ func (d *hFakeDNS) Lookup(ctx context.Context, domain string, options adapter.DN
+ // adapter.IPv6Capability in the context.
+ func TestH_MonitoringLearnsIPv6(t *testing.T) {
+ 	a, b := &fakeOutbound{tag: "a"}, &fakeOutbound{tag: "b"}
+-	grp := &fakeGroup{fakeOutbound: fakeOutbound{tag: "grp"}, all: []string{"a", "b"}, selected: a}
 +	grp := &fakeGroup{tag: "grp", all: []string{"a", "b"}, selected: a}
-+	m := newTestMonitor(t, nil, option.MonitoringOptions{Interval: badoption.Duration(time.Hour)}, a, b, grp)
-+	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
-+
-+	_, known := m.OutboundIPv6("a")
-+	require.False(t, known, "nothing is known before an observation")
-+	_, known = m.OutboundIPv6("grp")
-+	require.False(t, known)
-+
-+	m.ObserveIPv6("grp", false) // a group's observation goes to its selected member
-+	_, known = m.OutboundIPv6("a")
-+	require.False(t, known, "one failure may be the destination's")
-+	m.ObserveIPv6("a", false)
-+	supported, known := m.OutboundIPv6("a")
-+	require.True(t, known && !supported, "two in a row is the exit")
-+	supported, known = m.OutboundIPv6("grp")
-+	require.True(t, known && !supported, "the group answers for its selected member")
-+	_, known = m.OutboundIPv6("b")
-+	require.False(t, known, "the other member is untouched")
-+	his := m.getUrlTest("a")
-+	require.NotNil(t, his.IPv6)
-+	require.False(t, *his.IPv6, "shown to the app")
-+
-+	m.ObserveIPv6("a", true)
-+	supported, known = m.OutboundIPv6("a")
-+	require.True(t, known && supported, "an IPv6 connection that answered says it is carried")
-+	m.ObserveIPv6("a", false)
-+	supported, known = m.OutboundIPv6("a")
-+	require.True(t, known && supported, "one failure after a success is the destination's")
-+
-+	grp.selected = b
-+	m.ObserveIPv6("b", false)
-+	m.ObserveIPv6("b", false)
-+	supported, known = m.OutboundIPv6("grp")
-+	require.True(t, known && !supported, "the group follows its selection")
-+
-+	// found without IPv6 long enough ago: let an IPv6 connection through again
-+	m.ipv6Access.Lock()
-+	m.ipv6["b"].observedAt = time.Now().Add(-ipv6Forget - time.Second)
-+	m.ipv6Access.Unlock()
-+	_, known = m.OutboundIPv6("b")
-+	require.False(t, known, "forgotten after a while, so the exit may show it gained IPv6")
-+
-+	capability := service.FromContext[adapter.IPv6Capability](m.ctx)
-+	require.NotNil(t, capability, "registered for the DNS router and the route")
-+	supported, known = capability.OutboundIPv6("a")
-+	require.True(t, known && supported)
-+	_, known = capability.OutboundIPv6("unregistered")
-+	require.False(t, known)
-+}
-+
-+// A group with no single selection carries IPv6 only when every live member is known to.
-+func TestH_MonitoringIPv6OfSpreadingGroup(t *testing.T) {
-+	a, b := &fakeOutbound{tag: "a"}, &fakeOutbound{tag: "b"}
+ 	m := newTestMonitor(t, nil, option.MonitoringOptions{Interval: badoption.Duration(time.Hour)}, a, b, grp)
+ 	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
+ 
+@@ -92,7 +92,7 @@ func TestH_MonitoringLearnsIPv6(t *testing.T) {
+ // A group with no single selection carries IPv6 only when every live member is known to.
+ func TestH_MonitoringIPv6OfSpreadingGroup(t *testing.T) {
+ 	a, b := &fakeOutbound{tag: "a"}, &fakeOutbound{tag: "b"}
+-	grp := &fakeGroup{fakeOutbound: fakeOutbound{tag: "grp"}, all: []string{"a", "b"}}
 +	grp := &fakeGroup{tag: "grp", all: []string{"a", "b"}}
-+	m := newTestMonitor(t, nil, option.MonitoringOptions{Interval: badoption.Duration(time.Hour)}, a, b, grp)
-+	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
-+	setHistory(m, "a", 50, false, nil)
-+	setHistory(m, "b", 60, false, nil)
-+
-+	m.ObserveIPv6("a", true)
-+	_, known := m.OutboundIPv6("grp")
-+	require.False(t, known, "a member not observed yet leaves the group unknown")
-+	m.ObserveIPv6("b", true)
-+	supported, known := m.OutboundIPv6("grp")
-+	require.True(t, known && supported)
-+	m.ObserveIPv6("b", false)
-+	m.ObserveIPv6("b", false)
-+	supported, known = m.OutboundIPv6("grp")
-+	require.True(t, known && !supported, "one member without IPv6 is enough to say no")
-+}
-+
-+// With verify_ipv6, an outbound's URL test is followed once per run by the same URL over the
-+// host's IPv6 address through it, and what that showed is known, cached with the URL test
-+// results and shown to the app; a declaration from the link is known from the start.
-+func TestH_MonitoringVerifiesIPv6AtURLTest(t *testing.T) {
-+	listener, err := net.Listen("tcp6", "[::1]:0")
-+	if err != nil {
-+		t.Skip("no IPv6 loopback: ", err)
-+	}
-+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
- 		w.WriteHeader(http.StatusNoContent)
- 	}))
-+	server.Listener = listener
-+	server.Start()
- 	defer server.Close()
--	serverAddr := M.ParseSocksaddr(server.Listener.Addr().String())
--	probe := M.ParseSocksaddr("[2001:db8::1]:443")
-+	port := listener.Addr().(*net.TCPAddr).Port
-+	link := "http://ipv6.test:" + strconv.Itoa(port) + "/generate_204"
- 	var dialer net.Dialer
-+	serverAddr := M.ParseSocksaddr("[::1]:" + strconv.Itoa(port))
-+	// the URL test itself dials the host name (the proxy resolves it); the verification dials
-+	// the IPv6 address: with6 reaches both, without6 only the name
+ 	m := newTestMonitor(t, nil, option.MonitoringOptions{Interval: badoption.Duration(time.Hour)}, a, b, grp)
+ 	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
+ 	setHistory(m, "a", 50, false, nil)
+@@ -132,7 +132,7 @@ func TestH_MonitoringVerifiesIPv6AtURLTest(t *testing.T) {
+ 	// the IPv6 address: with6 reaches both, without6 only the name
  	outbound := func(tag string, ipv6 bool) *fakeOutbound {
  		return &fakeOutbound{tag: tag, dial: func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
--			switch destination {
--			case serverAddr:
--				return dialer.DialContext(ctx, network, destination.String())
--			case probe:
--				if ipv6 {
--					return dialer.DialContext(ctx, network, serverAddr.String()) // any open connection will do
--				}
--				return nil, errors.New("no route to host")
+-			if destination.IsFqdn() || ipv6 {
 +			if destination.IsDomain() || ipv6 {
-+				return dialer.DialContext(ctx, network, serverAddr.String())
+ 				return dialer.DialContext(ctx, network, serverAddr.String())
  			}
--			return nil, errors.New("unreachable")
-+			return nil, errors.New("no route to host")
- 		}}
- 	}
--	with, without := outbound("with6", true), outbound("without6", false)
--	grp := &fakeGroup{fakeOutbound: fakeOutbound{tag: "grp"}, all: []string{"with6", "without6"}, selected: without}
-+	with, without, declared, cached := outbound("with6", true), outbound("without6", false), outbound("declared", true), outbound("cached", true)
- 	m := newTestMonitor(t, nil, option.MonitoringOptions{
- 		Interval:       badoption.Duration(time.Hour),
- 		Workers:        2,
--		URLs:           []string{server.URL + "/generate_204"},
-+		URLs:           []string{link},
- 		URLTestTimeout: badoption.Duration(time.Second),
--		IPv6Probe:      "[2001:db8::1]:443",
--	}, with, without, grp)
-+		VerifyIPv6:     true,
-+		IPv6Declared:   map[string]bool{"declared": false},
-+	}, with, without, declared, cached)
-+	service.MustRegister[adapter.DNSRouter](m.ctx, &hFakeDNS{addresses: []netip.Addr{netip.MustParseAddr("::1")}})
- 	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
-+	// an earlier run found cached without IPv6; its exit has it now
-+	no := false
-+	setCached(m, "cached", adapter.URLTestHistory{Delay: 50, IPv6: &no, IPv6FromCache: true})
-+	m.seedIPv6Knowledge()
-+	supported, known := m.OutboundIPv6("cached")
-+	require.True(t, known && !supported, "cached: known before any test")
-+	supported, known = m.OutboundIPv6("declared")
-+	require.True(t, known && !supported, "declared by the link: known before any test")
-+	_, known = m.OutboundIPv6("with6")
-+	require.False(t, known)
- 
--	_, known := m.OutboundIPv6("with6")
--	require.False(t, known, "not known before the probe")
- 	require.NoError(t, htest.Start(m, adapter.StartStatePostStart))
- 	require.Eventually(t, func() bool {
- 		_, known1 := m.OutboundIPv6("with6")
- 		_, known2 := m.OutboundIPv6("without6")
--		return known1 && known2
--	}, 5*time.Second, 10*time.Millisecond)
--	supported, _ := m.OutboundIPv6("with6")
-+		cachedSupported, _ := m.OutboundIPv6("cached")
-+		return known1 && known2 && cachedSupported
-+	}, 10*time.Second, 10*time.Millisecond)
-+	supported, _ = m.OutboundIPv6("with6")
- 	require.True(t, supported)
- 	supported, _ = m.OutboundIPv6("without6")
- 	require.False(t, supported)
--	supported, known = m.OutboundIPv6("grp")
--	require.True(t, known, "a group answers for its selected member")
--	require.False(t, supported)
--	grp.selected = with
--	supported, _ = m.OutboundIPv6("grp")
--	require.True(t, supported)
-+	his := m.getUrlTest("without6")
-+	require.NotNil(t, his.IPv6)
-+	require.False(t, *his.IPv6, "cached with the URL test results")
-+	his = m.getUrlTest("cached")
-+	require.True(t, *his.IPv6 && !his.IPv6FromCache, "a cached answer is verified again at the first URL test")
-+}
- 
--	capability := service.FromContext[adapter.IPv6Capability](m.ctx)
--	require.NotNil(t, capability, "registered for the DNS router and the route")
--	supported, known = capability.OutboundIPv6("with6")
--	require.True(t, known && supported)
-+// What an earlier run cached is known at the start, before any test.
-+func TestH_MonitoringSeedsIPv6FromCache(t *testing.T) {
-+	a := &fakeOutbound{tag: "a"}
-+	m := newTestMonitor(t, nil, option.MonitoringOptions{Interval: badoption.Duration(time.Hour)}, a)
-+	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
-+	no := false
-+	setCached(m, "a", adapter.URLTestHistory{Delay: 50, IPv6: &no})
-+	m.seedIPv6Knowledge()
-+	supported, known := m.OutboundIPv6("a")
-+	require.True(t, known && !supported)
- }
- 
--func TestH_IPv6ProbeAddress(t *testing.T) {
--	require.Equal(t, defaultIPv6Probe, ipv6ProbeAddress(""))
--	require.Equal(t, "", ipv6ProbeAddress("none"))
--	require.Equal(t, "[2001:4860:4860::8888]:443", ipv6ProbeAddress("[2001:4860:4860::8888]:443"))
-+// setCached gives the outbound a history as loaded from the cache file.
-+func setCached(m *OutboundMonitoring, tag string, history adapter.URLTestHistory) {
-+	s := m.reg().outbounds[tag]
-+	s.mu.Lock()
-+	s.history = history
-+	s.from_cache = true
-+	s.mu.Unlock()
- }
+ 			return nil, errors.New("no route to host")
 diff --git a/common/monitoring/h_join.go b/common/monitoring/h_join.go
-new file mode 100644
-index 0000000000000000000000000000000000000000..7f19c29d4ad0b2a4af2565ac0496fa2efe001444
---- /dev/null
+index a7e0c273ffdb99c7ef70b6c72070dda1353408bd..b184a160d74537989fd8f0be117742a13c0eac37 100644
+--- a/common/monitoring/h_join.go
 +++ b/common/monitoring/h_join.go
-@@ -0,0 +1,50 @@
-+package monitoring
-+
-+import (
-+	"errors"
-+)
-+
-+// joinRunningTest is what a test asked for while another test of the same outbound runs: it waits
-+// for that one and takes its result as its own, instead of a second URL test beside it. Two tests
-+// at once pinged the proxy twice, and the one that ended last wrote the result, so a late failure
-+// replaced a fresh answer and the groups left the member; a tap on the proxy, or its selection
-+// during the cycle's test of it, did that.
-+func (m *OutboundMonitoring) joinRunningTest(task *testTask, state *outboundState) {
-+	state.mu.Lock()
-+	done := state.testDone
-+	state.mu.Unlock()
-+	m.logger.Info("MONITORING test ", task.outboundTag, ": ", task.reason, ": a test of it runs, taking its result")
-+	select {
-+	case <-m.ctx.Done():
-+		return
-+	case <-done:
-+	}
-+	state.mu.Lock()
-+	if task.priority {
-+		state.priorityQueued = false
-+	} else {
-+		state.queued = false
-+		state.enqueuedCycle = 0
-+	}
-+	history := state.history
-+	state.mu.Unlock()
-+	var err error
-+	if history.Error != "" || history.Delay >= TimeoutDelay {
-+		err = errors.New(history.Error)
-+	}
-+	m.handResult(task, testOutcome{outboundTag: task.outboundTag, history: history, err: err, cycleID: task.cycleID, priority: task.priority})
-+}
+@@ -37,3 +37,17 @@ func (m *OutboundMonitoring) joinRunningTest(task *testTask, state *outboundStat
+ 	// to this one too
+ 	m.keepTopNoted(task.outboundTag)
+ }
 +
 +// finishRunningTest publishes completion before a stage consumes its result. Otherwise the
 +// next URL stage can join the already settled test and reuse the previous URL's failure.
@@ -854,145 +149,63 @@ index 0000000000000000000000000000000000000000..7f19c29d4ad0b2a4af2565ac0496fa2e
 +		close(done)
 +	}
 +}
-diff --git a/common/monitoring/h_join_test.go b/common/monitoring/h_join_test.go
-new file mode 100644
-index 0000000000000000000000000000000000000000..108a2a2ef5728d2bd16b6d808d7f171e8a37cdf3
---- /dev/null
-+++ b/common/monitoring/h_join_test.go
-@@ -0,0 +1,70 @@
-+package monitoring
-+
-+import (
-+	"context"
-+	"sync/atomic"
-+	"testing"
-+	"time"
-+
-+	"github.com/sagernet/sing-box/adapter"
-+	"github.com/sagernet/sing-box/adapter/htest"
-+	"github.com/sagernet/sing-box/option"
-+	"github.com/sagernet/sing/common/json/badoption"
-+
-+	"github.com/stretchr/testify/require"
-+)
-+
-+// A test asked for while a test of the same outbound runs joins it: one ping, one result for
-+// both. Two tests at once pinged the proxy twice and the last to end wrote the result.
-+func TestH_MonitoringTestJoinsTheRunningOne(t *testing.T) {
-+	url, addr := noContentServer(t)
-+	var dials, inFlight, maxInFlight atomic.Int64
-+	slow := &fakeOutbound{tag: "slow", dial: dialTo(addr, func(ctx context.Context) error {
-+		dials.Add(1)
-+		if n := inFlight.Add(1); n > maxInFlight.Load() {
-+			maxInFlight.Store(n)
-+		}
-+		defer inFlight.Add(-1)
-+		select {
-+		case <-ctx.Done():
-+			return ctx.Err()
-+		case <-time.After(300 * time.Millisecond):
-+			return nil
-+		}
-+	})}
-+	m := newTestMonitor(t, nil, option.MonitoringOptions{
-+		Interval:         badoption.Duration(time.Hour),
-+		Workers:          2,
-+		URLs:             []string{url},
-+		OnDemandTimeouts: []badoption.Duration{badoption.Duration(time.Second), badoption.Duration(3 * time.Second), badoption.Duration(10 * time.Second)},
-+	}, slow)
-+	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
-+
-+	// the cycle's test of it (run by a worker), and a tap on it while that runs
-+	results := make(chan testOutcome, 1)
-+	go m.executeTask(&testTask{outboundTag: "slow", cycleID: m.cycleSeq.Add(1), resultCh: results})
-+	time.Sleep(50 * time.Millisecond)
-+	require.NoError(t, m.TestNow("slow"))
-+	select {
-+	case outcome := <-results:
-+		require.NoError(t, outcome.err)
-+	case <-time.After(3 * time.Second):
-+		t.Fatal("the cycle's test did not end")
-+	}
-+	require.Eventually(t, m.reg().outbounds["slow"].tested, 2*time.Second, 5*time.Millisecond, "both tests are over")
-+	his := m.OutboundsHistory("")["slow"]
-+	require.NotNil(t, his)
-+	require.Greater(t, his.Delay, uint16(0))
-+	require.Less(t, his.Delay, TimeoutDelay)
-+	require.Equal(t, int64(1), dials.Load(), "one ping for both")
-+	require.Equal(t, int64(1), maxInFlight.Load(), "never two tests of one outbound at once")
-+
-+	// a tap during a tap
-+	dials.Store(0)
-+	require.NoError(t, m.TestNow("slow"))
-+	time.Sleep(50 * time.Millisecond)
-+	require.NoError(t, m.TestNow("slow"))
-+	require.Eventually(t, m.reg().outbounds["slow"].tested, 2*time.Second, 5*time.Millisecond)
-+	require.Equal(t, int64(1), dials.Load(), "the second tap joined the first")
-+	require.Equal(t, int64(1), maxInFlight.Load())
-+}
-diff --git a/common/monitoring/h_log.go b/common/monitoring/h_log.go
-new file mode 100644
-index 0000000000000000000000000000000000000000..8d2f0d131b11b982eb055a6126733259aa3b79d2
---- /dev/null
-+++ b/common/monitoring/h_log.go
-@@ -0,0 +1,36 @@
-+package monitoring
-+
-+import (
-+	"fmt"
-+)
-+
-+// Worked reports a URL test result that worked: measured, in this run, and not a timeout. The
-+// groups and monitoring agree on it through here.
-+func Worked(delay uint16, fromCache bool) bool {
-+	return !fromCache && delay != 0 && delay < TimeoutDelay
-+}
-+
-+// DelayString is a result for the MONITORING and LOWEST logs: "17 ms", "cached 17 ms", "failed",
-+// "untested".
-+func DelayString(delay uint16, fromCache bool) string {
-+	switch {
-+	case delay == 0:
-+		return "untested"
-+	case delay >= TimeoutDelay:
-+		return "failed"
-+	case fromCache:
-+		return fmt.Sprint("cached ", delay, " ms")
-+	default:
-+		return fmt.Sprint(delay, " ms")
-+	}
-+}
-+
-+// testKind says, for the MONITORING log, how a test runs and what was known of the outbound
-+// before it.
-+func testKind(task *testTask, delay uint16, fromCache bool) string {
-+	kind := "regular"
-+	if task.staged {
-+		kind = "staged"
-+	}
-+	return fmt.Sprint(" (", kind, ", before: ", DelayString(delay, fromCache), ")")
-+}
+diff --git a/common/monitoring/h_keep_top.go b/common/monitoring/h_keep_top.go
+index 6a35e046f1a2e1385f5cad5c230a9c00784b5217..e6ec49ed25eb803e8dc8d3d47536aa68be911ff9 100644
+--- a/common/monitoring/h_keep_top.go
++++ b/common/monitoring/h_keep_top.go
+@@ -117,7 +117,7 @@ func (m *OutboundMonitoring) SetKeepTop(options *option.KeepTopOptions) {
+ 	m.parkLazy.Store(options != nil)
+ 	if options == nil {
+ 		m.keepTopStopLocked()
+-		if m.started {
++		if m.started.Load() {
+ 			m.emitAllGroupEvents(m.reg())
+ 		}
+ 		return
+@@ -650,7 +650,7 @@ func (m *OutboundMonitoring) keepTopStepLocked(order topOrder) {
+ 		woken := m.setActive(m.keepTopWithSearchersLocked(loaded))
+ 		// the ones of the batch that were in use already did not come out of rest, which is
+ 		// what tests the others
+-		if m.started {
++		if m.started.Load() {
+ 			cycleID := max(m.cycleSeq.Load(), 1)
+ 			for _, tag := range k.batch {
+ 				asked := warm && k.pick == current.pick && slices.Contains(current.batch, tag) // by the step that put it in the batch
+@@ -670,7 +670,7 @@ func (m *OutboundMonitoring) keepTopStepLocked(order topOrder) {
+ 		// (the iOS extension is killed, not stopped). A pick steps once for every outbound it
+ 		// tests, and a save writes them all and syncs the disk: while it goes on they are saved
+ 		// every keepTopSaveEvery, not at each of its hundreds of steps
+-		if m.started && m.cacheDirty.Load() && (!k.picking || now.Sub(k.saved) >= keepTopSaveEvery) {
++		if m.started.Load() && m.cacheDirty.Load() && (!k.picking || now.Sub(k.saved) >= keepTopSaveEvery) {
+ 			m.cacheDirty.Store(false)
+ 			k.saved = now
+ 			_ = m.saveHistory()
+diff --git a/common/monitoring/h_keep_top_search.go b/common/monitoring/h_keep_top_search.go
+index 439c8290fc012cf473fb393e5be06cb661497028..4a5befb456791cbd4a201e4aed4ac4ad3cd22c51 100644
+--- a/common/monitoring/h_keep_top_search.go
++++ b/common/monitoring/h_keep_top_search.go
+@@ -58,7 +58,7 @@ func (m *OutboundMonitoring) keepTopWatchSearchersLocked(now time.Time) bool {
+ 			drop(tag) // not created, or used by the pick itself
+ 			continue
+ 		}
+-		status := lazy.Status()
++		status := adapter.OutboundStatus(lazy)
+ 		readyAt, was := k.searching[tag]
+ 		switch {
+ 		case status == adapter.StatusFailed:
 diff --git a/common/monitoring/h_monitoring_test.go b/common/monitoring/h_monitoring_test.go
-index b5de7c12295a40997130707acf08afabfa93af7b..90962dfd2794ed7a03646d4d07186576a525c01c 100644
+index 8935c5d335d22f11a5c742d7c329b74986b489b3..df85dc29a5a2ad6c3cc586bedfe4b67d912c164f 100644
 --- a/common/monitoring/h_monitoring_test.go
 +++ b/common/monitoring/h_monitoring_test.go
-@@ -3,7 +3,6 @@ package monitoring
- import (
- 	"context"
- 	"errors"
--	"github.com/sagernet/sing-box/adapter/htest"
- 	"io"
- 	"net"
- 	"net/http"
-@@ -14,6 +13,7 @@ import (
- 	"time"
+@@ -15,6 +15,7 @@ import (
+ 	"github.com/sagernet/sing-box/adapter/htest"
  
  	"github.com/sagernet/sing-box/adapter"
 +	"github.com/sagernet/sing-box/adapter/htest"
  	"github.com/sagernet/sing-box/hiddify/ipinfo"
  	"github.com/sagernet/sing-box/log"
  	"github.com/sagernet/sing-box/option"
-@@ -37,12 +37,14 @@ func (f *fakeOutbound) Tag() string            { return f.tag }
+@@ -38,12 +39,14 @@ func (f *fakeOutbound) Tag() string            { return f.tag }
  func (f *fakeOutbound) Network() []string      { return []string{N.NetworkTCP, N.NetworkUDP} }
  func (f *fakeOutbound) Dependencies() []string { return f.deps }
  func (f *fakeOutbound) Status() adapter.Status { return adapter.StatusReady }
@@ -1007,42 +220,7 @@ index b5de7c12295a40997130707acf08afabfa93af7b..90962dfd2794ed7a03646d4d07186576
  func (f *fakeOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
  	return nil, errors.New("fake: unsupported")
  }
-@@ -97,6 +99,34 @@ func (c *fakeCache) SaveBinary(tag string, set *adapter.SavedBinary) error {
- 	return nil
- }
- 
-+// noContentServer is a local URL test target answering 204, closed with the test: its URL, and
-+// the address a fake outbound's dial must go to.
-+func noContentServer(t *testing.T) (string, M.Socksaddr) {
-+	t.Helper()
-+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-+		w.WriteHeader(http.StatusNoContent)
-+	}))
-+	t.Cleanup(server.Close)
-+	return server.URL + "/generate_204", M.ParseSocksaddr(server.Listener.Addr().String())
-+}
-+
-+// dialTo is a fake outbound's dial: to addr, after before (nil for none) had its say, with any
-+// other destination failing.
-+func dialTo(addr M.Socksaddr, before func(ctx context.Context) error) func(context.Context, string, M.Socksaddr) (net.Conn, error) {
-+	var dialer net.Dialer
-+	return func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-+		if destination != addr {
-+			return nil, context.DeadlineExceeded
-+		}
-+		if before != nil {
-+			if err := before(ctx); err != nil {
-+				return nil, err
-+			}
-+		}
-+		return dialer.DialContext(ctx, network, destination.String())
-+	}
-+}
-+
- func newTestMonitor(t *testing.T, cache adapter.CacheFile, options option.MonitoringOptions, outbounds ...adapter.Outbound) *OutboundMonitoring {
- 	ctx, cancel := context.WithCancel(context.Background())
- 	t.Cleanup(cancel)
-@@ -174,7 +204,7 @@ func TestH_MonitoringMergeIpInfo(t *testing.T) {
+@@ -209,7 +212,7 @@ func TestH_MonitoringMergeIpInfo(t *testing.T) {
  
  func TestH_MonitoringRealTag(t *testing.T) {
  	a := &fakeOutbound{tag: "a"}
@@ -1051,7 +229,7 @@ index b5de7c12295a40997130707acf08afabfa93af7b..90962dfd2794ed7a03646d4d07186576
  	require.Equal(t, "a", RealTag(a))
  	require.Equal(t, "g", RealTag(g))
  	g.selected = a
-@@ -185,8 +215,8 @@ func TestH_MonitoringGroupsAndHistory(t *testing.T) {
+@@ -220,8 +223,8 @@ func TestH_MonitoringGroupsAndHistory(t *testing.T) {
  	a := &fakeOutbound{tag: "a"}
  	b := &fakeOutbound{tag: "b"}
  	c := &fakeOutbound{tag: "c", deps: []string{"a"}}
@@ -1062,7 +240,7 @@ index b5de7c12295a40997130707acf08afabfa93af7b..90962dfd2794ed7a03646d4d07186576
  	m := newTestMonitor(t, nil, option.MonitoringOptions{}, a, b, c, urltestGroup, selector)
  	require.Equal(t, "outbound-monitoring", m.Name())
  	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
-@@ -247,7 +277,7 @@ func TestH_MonitoringQueueAndApplyResult(t *testing.T) {
+@@ -283,7 +286,7 @@ func TestH_MonitoringQueueAndApplyResult(t *testing.T) {
  	}
  	a := &fakeOutbound{tag: "a", dial: held}
  	b := &fakeOutbound{tag: "b", dial: held}
@@ -1071,7 +249,7 @@ index b5de7c12295a40997130707acf08afabfa93af7b..90962dfd2794ed7a03646d4d07186576
  	m := newTestMonitor(t, nil, option.MonitoringOptions{}, a, b, grp)
  	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
  
-@@ -300,7 +330,7 @@ func TestH_MonitoringSaveLoadHistory(t *testing.T) {
+@@ -336,7 +339,7 @@ func TestH_MonitoringSaveLoadHistory(t *testing.T) {
  	cache := &fakeCache{data: map[string]*adapter.SavedBinary{}}
  	a := &fakeOutbound{tag: "a"}
  	b := &fakeOutbound{tag: "b"}
@@ -1080,7 +258,7 @@ index b5de7c12295a40997130707acf08afabfa93af7b..90962dfd2794ed7a03646d4d07186576
  	m := newTestMonitor(t, cache, option.MonitoringOptions{}, a, b, grp)
  	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
  	setHistory(m, "a", 77, false, &ipinfo.IpInfo{IP: "8.8.8.8", CountryCode: "US"})
-@@ -323,7 +353,7 @@ func TestH_MonitoringSaveLoadHistory(t *testing.T) {
+@@ -359,7 +362,7 @@ func TestH_MonitoringSaveLoadHistory(t *testing.T) {
  }
  
  func TestH_MonitoringStartRejectsUnknownGroupMember(t *testing.T) {
@@ -1089,7 +267,7 @@ index b5de7c12295a40997130707acf08afabfa93af7b..90962dfd2794ed7a03646d4d07186576
  	m := newTestMonitor(t, nil, option.MonitoringOptions{}, grp)
  	require.Error(t, htest.Start(m, adapter.StartStateInitialize))
  }
-@@ -343,7 +373,7 @@ func TestH_MonitoringCycleEndToEnd(t *testing.T) {
+@@ -379,7 +382,7 @@ func TestH_MonitoringCycleEndToEnd(t *testing.T) {
  		return dialer.DialContext(ctx, network, destination.String())
  	}}
  	bad := &fakeOutbound{tag: "bad"}
@@ -1098,7 +276,7 @@ index b5de7c12295a40997130707acf08afabfa93af7b..90962dfd2794ed7a03646d4d07186576
  	cache := &fakeCache{data: map[string]*adapter.SavedBinary{}}
  
  	m := newTestMonitor(t, cache, option.MonitoringOptions{
-@@ -377,9 +407,9 @@ func TestH_MonitoringCycleEndToEnd(t *testing.T) {
+@@ -413,9 +416,9 @@ func TestH_MonitoringCycleEndToEnd(t *testing.T) {
  func TestH_MonitoringSignalChangePropagatesToDependents(t *testing.T) {
  	a := &fakeOutbound{tag: "a"}
  	b := &fakeOutbound{tag: "b"}
@@ -1110,7 +288,7 @@ index b5de7c12295a40997130707acf08afabfa93af7b..90962dfd2794ed7a03646d4d07186576
  	m := newTestMonitor(t, nil, option.MonitoringOptions{
  		OnDemandTimeouts: []badoption.Duration{badoption.Duration(50 * time.Millisecond), badoption.Duration(100 * time.Millisecond), badoption.Duration(200 * time.Millisecond)},
  	}, a, b, selector, viaSelector, outer)
-@@ -443,7 +473,7 @@ func TestH_MonitoringRetestsTestBrokenByNetworkReset(t *testing.T) {
+@@ -479,7 +482,7 @@ func TestH_MonitoringRetestsTestBrokenByNetworkReset(t *testing.T) {
  		plainDials.Add(1)
  		return nil, errors.New("plain: unreachable")
  	}}
@@ -1119,22 +297,28 @@ index b5de7c12295a40997130707acf08afabfa93af7b..90962dfd2794ed7a03646d4d07186576
  	m = newTestMonitor(t, nil, option.MonitoringOptions{
  		Interval:       badoption.Duration(time.Hour),
  		Workers:        1,
-@@ -495,7 +525,7 @@ func TestH_MonitoringRetestsEverythingAfterNetworkChange(t *testing.T) {
- 		return aDials.Load() >= 1 && bDials.Load() >= 1 && !m.cycleRunning.Load()
- 	}, 3*time.Second, 10*time.Millisecond, "the first cycle ends")
- 	aBefore, bBefore := aDials.Load(), bDials.Load()
--	cyclesBefore := atomic.LoadUint64(&m.cycleSeq)
-+	cyclesBefore := m.cycleSeq.Load()
- 
- 	// the interval is an hour: only the network change can make a second test happen
- 	m.NetworkChanged()
-@@ -507,5 +537,5 @@ func TestH_MonitoringRetestsEverythingAfterNetworkChange(t *testing.T) {
- 	}, 4*time.Second, 20*time.Millisecond, "every outbound is tested again")
- 	time.Sleep(networkRetestDelay + 500*time.Millisecond)
- 	// a test can dial more than once (the url test, then the IP lookup), so count cycles
--	require.EqualValues(t, cyclesBefore+1, atomic.LoadUint64(&m.cycleSeq), "a burst of changes is one retest")
-+	require.EqualValues(t, cyclesBefore+1, m.cycleSeq.Load(), "a burst of changes is one retest")
- }
+diff --git a/common/monitoring/h_parked.go b/common/monitoring/h_parked.go
+index 60be7fb385ecd6cf02025e586c62ce7724e7cab8..6eb5b92966a7f2f606f1b5ddfb6d4ca31193ab9a 100644
+--- a/common/monitoring/h_parked.go
++++ b/common/monitoring/h_parked.go
+@@ -85,7 +85,7 @@ func (m *OutboundMonitoring) setActive(tags []string) []string {
+ 			changed = true
+ 		}
+ 	}
+-	if !m.started || !changed {
++	if !m.started.Load() || !changed {
+ 		return woken
+ 	}
+ 	slices.Sort(woken)
+@@ -102,7 +102,7 @@ func (m *OutboundMonitoring) setActive(tags []string) []string {
+ // time as a cycle tests. For a list the user looks at: a lazy outbound at rest is created for
+ // its test and closed after it, so a few exist at a time, not all of them.
+ func (m *OutboundMonitoring) TestOutbounds(tags []string, reason string) {
+-	if !m.started {
++	if !m.started.Load() {
+ 		return
+ 	}
+ 	cycleID := max(m.cycleSeq.Load(), 1)
 diff --git a/common/monitoring/h_priority_test.go b/common/monitoring/h_priority_test.go
 index c14a3bd6317e99662ad07633062a3ad623bebe16..b771eefbc32500f3e24e2154227b1bcc569f4ac2 100644
 --- a/common/monitoring/h_priority_test.go
@@ -1152,255 +336,72 @@ index c14a3bd6317e99662ad07633062a3ad623bebe16..b771eefbc32500f3e24e2154227b1bcc
  		Interval:       badoption.Duration(time.Hour),
  		Workers:        1,
 diff --git a/common/monitoring/h_registry.go b/common/monitoring/h_registry.go
-index 3a07d1dc2d3c989c1af2d20ce8f1a03bbdc93212..152fb846992bbba858e6391786777f32e61763f6 100644
+index de3fbc729477b4352aedf24b73c3e516980b592f..92c1d5c8b1eca6abf72b5f494a8f2e24d7fab717 100644
 --- a/common/monitoring/h_registry.go
 +++ b/common/monitoring/h_registry.go
-@@ -25,18 +25,26 @@ func (m *OutboundMonitoring) reg() *monitoringRegistry {
- }
- 
- // buildRegistry reads the current outbounds, endpoints and groups. An outbound that is still the
--// same instance keeps its test history from previous; a group that still exists keeps its
--// observer, so subscribers keep receiving its events.
-+// same instance keeps its test history from previous; one replaced by a hot reload keeps its
-+// last result as a cached one, due for a test, the way a result loaded at start is: the groups
-+// can still fall back on it, the cycle tests it before the untested, and the app shows it as
-+// waiting until the new instance has answered. A group that still exists keeps its observer, so
-+// subscribers keep receiving its events.
- func (m *OutboundMonitoring) buildRegistry(previous *monitoringRegistry) (*monitoringRegistry, error) {
- 	registry := newMonitoringRegistry()
- 	add := func(outbound adapter.Outbound) {
- 		state := &outboundState{groupTags: []string{}, invalid: true, outbound: outbound, dependencies: outbound.Dependencies()}
--		if old, ok := previous.outbounds[outbound.Tag()]; ok && old.outbound == outbound {
-+		if old, ok := previous.outbounds[outbound.Tag()]; ok {
- 			old.mu.Lock()
- 			state.history = old.history
- 			state.lastURL = old.lastURL
--			state.invalid = old.invalid
--			state.from_cache = old.from_cache
-+			if old.outbound == outbound {
-+				state.invalid = old.invalid
-+				state.from_cache = old.from_cache
-+			} else {
-+				state.from_cache = state.history.Delay != 0
-+				state.history.IpInfoFromCache = state.history.IpInfo != nil
-+			}
- 			old.mu.Unlock()
- 		}
- 		registry.outbounds[outbound.Tag()] = state
-@@ -107,7 +115,7 @@ func (m *OutboundMonitoring) Reload() error {
- 		return err
+@@ -139,7 +139,7 @@ func (m *OutboundMonitoring) Reload() error {
  	}
  	m.registry.Store(registry)
+ 	m.keepTopReload(registry) // before the changed ones are tested: the ones that rest are not
 -	if m.started {
 +	if m.started.Load() {
  		for tag, grp := range registry.groups {
  			if _, existed := previous.groups[tag]; !existed {
  				m.schedulerWG.Add(1)
-@@ -121,13 +129,30 @@ func (m *OutboundMonitoring) Reload() error {
+@@ -153,7 +153,7 @@ func (m *OutboundMonitoring) Reload() error {
  		}
  	}
  	m.logger.Info("reloaded ", len(registry.outbounds), " outbounds and ", len(registry.groups), " groups for monitoring")
 -	if m.started {
--		groupTags := make([]string, 0, len(registry.groups))
--		for tag := range registry.groups {
--			groupTags = append(groupTags, tag)
--		}
--		m.emitGroupEvent(groupTags)
--		m.startCycleOnce()
 +	if m.started.Load() {
-+		m.emitAllGroupEvents(registry)
-+		m.testChanged(previous, registry)
+ 		m.emitAllGroupEvents(registry)
+ 		m.testChanged(previous, registry)
  	}
- 	return nil
- }
-+
-+// testChanged queues a test of every outbound the reload created or replaced, and of nothing
-+// else: the others keep their result until their regular time. A whole cycle here used to test
-+// every outbound whose result was older than the interval, which after a profile update was all
-+// of them, and the changed ones waited behind them, or for the next tick when a cycle was
-+// already running. Before the first cycle there is nothing to do: it tests everything.
-+func (m *OutboundMonitoring) testChanged(previous, registry *monitoringRegistry) {
-+	cycleID := m.cycleSeq.Load()
-+	if cycleID == 0 {
-+		return
-+	}
-+	for tag, state := range registry.outbounds {
-+		if _, isGroup := registry.groups[tag]; isGroup {
-+			continue
-+		}
-+		if old, ok := previous.outbounds[tag]; ok && old.outbound == state.outbound {
-+			continue
-+		}
-+		m.enqueueTask(&testTask{outboundTag: tag, cycleID: cycleID, reason: "replaced by a reload"})
-+	}
-+}
 diff --git a/common/monitoring/h_registry_test.go b/common/monitoring/h_registry_test.go
-new file mode 100644
-index 0000000000000000000000000000000000000000..9baf4b8ac59ecddf39b75161a87d508527201493
---- /dev/null
+index 5da0e5a17e5bdbbe4daf5e64dbde24e8b8351234..6521334dbd13484a6f993beae13548b64289cebd 100644
+--- a/common/monitoring/h_registry_test.go
 +++ b/common/monitoring/h_registry_test.go
-@@ -0,0 +1,104 @@
-+package monitoring
-+
-+import (
-+	"testing"
-+	"time"
-+
-+	"github.com/sagernet/sing-box/adapter"
-+	"github.com/sagernet/sing-box/adapter/htest"
-+	"github.com/sagernet/sing-box/hiddify/ipinfo"
-+	"github.com/sagernet/sing-box/option"
-+
-+	"github.com/stretchr/testify/require"
-+)
-+
-+// A hot reload replaces an outbound by a new instance with the same tag: its last result stays, as
-+// a cached one, due for a test; an instance that stays keeps its result as it was.
-+func TestH_ReloadKeepsReplacedHistoryAsCache(t *testing.T) {
-+	a := &fakeOutbound{tag: "a"}
-+	b := &fakeOutbound{tag: "b"}
+@@ -16,7 +16,7 @@ import (
+ func TestH_ReloadKeepsReplacedHistoryAsCache(t *testing.T) {
+ 	a := &fakeOutbound{tag: "a"}
+ 	b := &fakeOutbound{tag: "b"}
+-	grp := &fakeGroup{fakeOutbound: fakeOutbound{tag: "grp"}, all: []string{"a", "b"}}
 +	grp := &fakeGroup{tag: "grp", all: []string{"a", "b"}}
-+	m := newTestMonitor(t, nil, option.MonitoringOptions{}, a, b, grp)
-+	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
-+	setHistory(m, "a", 120, false, &ipinfo.IpInfo{IP: "1.1.1.1"})
-+	setHistory(m, "b", 80, false, nil)
-+	m.reg().outbounds["a"].invalid = false
-+	m.reg().outbounds["b"].invalid = false
-+
-+	manager := m.outboundManager.(*fakeOutboundManager)
-+	manager.list = []adapter.Outbound{&fakeOutbound{tag: "a"}, b, grp}
-+	require.NoError(t, m.Reload())
-+
-+	replaced := m.reg().outbounds["a"]
-+	require.Equal(t, uint16(120), replaced.history.Delay, "the last result is kept")
-+	require.True(t, replaced.from_cache, "as a cached one")
-+	require.True(t, replaced.history.IpInfoFromCache)
-+	require.True(t, replaced.invalid, "and due for a test")
-+	require.True(t, m.getUrlTest("a").IsFromCache)
-+	require.Contains(t, m.collectCycleTargets(), "a")
-+
-+	kept := m.reg().outbounds["b"]
-+	require.Equal(t, uint16(80), kept.history.Delay)
-+	require.False(t, kept.from_cache, "the same instance keeps its result as it was")
-+	require.False(t, kept.invalid)
-+	require.NotContains(t, m.collectCycleTargets(), "b")
-+
-+	// no result yet: nothing to keep, and not from the cache
-+	manager.list = []adapter.Outbound{&fakeOutbound{tag: "a"}, &fakeOutbound{tag: "b"}, grp}
-+	setHistory(m, "b", 0, false, nil)
-+	require.NoError(t, m.Reload())
-+	require.False(t, m.reg().outbounds["b"].from_cache)
-+	require.Equal(t, []string{"a", "b"}, m.collectCycleTargets(), "the cached result sorts before the untested")
-+}
-+
-+// A reload tests the outbounds it created or replaced, and only those: the others keep their
-+// result until their regular time, however old; and it does not wait for a cycle.
-+func TestH_ReloadTestsChangedOnly(t *testing.T) {
-+	a := &fakeOutbound{tag: "a"}
-+	b := &fakeOutbound{tag: "b"}
-+	m := newTestMonitor(t, nil, option.MonitoringOptions{}, a, b)
-+	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
+ 	m := newTestMonitor(t, nil, option.MonitoringOptions{}, a, b, grp)
+ 	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
+ 	setHistory(m, "a", 120, false, &ipinfo.IpInfo{IP: "1.1.1.1"})
+@@ -57,7 +57,7 @@ func TestH_ReloadTestsChangedOnly(t *testing.T) {
+ 	b := &fakeOutbound{tag: "b"}
+ 	m := newTestMonitor(t, nil, option.MonitoringOptions{}, a, b)
+ 	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
+-	m.started = true
 +	m.started.Store(true)
-+	m.workerWG.Add(1)
-+	go m.workerLoop() // the tests run on the workers, started at post-start
-+	m.cycleSeq.Store(1)
-+	setHistory(m, "a", 120, false, nil)
-+	setHistory(m, "b", 80, false, nil)
-+	m.reg().outbounds["a"].invalid = false
-+	m.reg().outbounds["b"].invalid = false
-+	m.reg().outbounds["b"].history.Time = time.Now().Add(-time.Hour) // older than the interval
-+
-+	manager := m.outboundManager.(*fakeOutboundManager)
-+	manager.list = []adapter.Outbound{&fakeOutbound{tag: "a"}, b}
-+	m.cycleRunning.Store(true) // a running cycle does not hold the changed outbound's test
-+	require.NoError(t, m.Reload())
-+	require.Eventually(t, func() bool {
-+		state := m.reg().outbounds["a"]
-+		state.mu.Lock()
-+		defer state.mu.Unlock()
-+		return !state.from_cache && state.history.Delay == TimeoutDelay
-+	}, 3*time.Second, 5*time.Millisecond, "the replaced outbound is tested (the fake dial fails)")
-+	time.Sleep(100 * time.Millisecond)
-+	kept := m.reg().outbounds["b"]
-+	kept.mu.Lock()
-+	defer kept.mu.Unlock()
-+	require.Equal(t, uint16(80), kept.history.Delay, "the outbound that stayed is not tested, however old its result")
-+	require.False(t, kept.queued)
-+	require.False(t, m.cycleAgain.Load(), "no cycle is asked for")
-+	m.cycleRunning.Store(false)
-+}
-+
-+// The Touch that restarts the stopped timer workers counts as activity: it used to leave the old
-+// time in place, so the next tick stopped them again unless something else had touched since.
-+func TestH_TouchRestartRefreshesActivity(t *testing.T) {
-+	a := &fakeOutbound{tag: "a"}
-+	m := newTestMonitor(t, nil, option.MonitoringOptions{}, a)
-+	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
+ 	m.workerWG.Add(1)
+ 	go m.workerLoop() // the tests run on the workers, started at post-start
+ 	m.cycleSeq.Store(1)
+@@ -93,7 +93,7 @@ func TestH_TouchRestartRefreshesActivity(t *testing.T) {
+ 	a := &fakeOutbound{tag: "a"}
+ 	m := newTestMonitor(t, nil, option.MonitoringOptions{}, a)
+ 	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
+-	m.started = true
 +	m.started.Store(true)
-+	stale := time.Now().Add(-time.Hour)
-+	m.lastActive.Store(stale)
-+
-+	m.Touch()
-+	require.True(t, m.workersRunning.Load())
-+	require.True(t, m.lastActive.Load().After(stale))
-+}
-diff --git a/common/monitoring/h_selected.go b/common/monitoring/h_selected.go
-index 5f9e49f852a43db765d9ac6a05edd4eb5ba684fa..472f20699b2f6fa01916e9beec3bad0f5fab58a9 100644
---- a/common/monitoring/h_selected.go
-+++ b/common/monitoring/h_selected.go
-@@ -1,5 +1,7 @@
- package monitoring
+ 	stale := time.Now().Add(-time.Hour)
+ 	m.lastActive.Store(stale)
  
-+import "time"
-+
- // selectedOf is the outbound a group's selection leads to: its selected member, through nested
- // groups; "" when nothing is selected yet. A plain outbound is its own selection.
- func (m *OutboundMonitoring) selectedOf(tag string) string {
-@@ -21,12 +23,28 @@ func (m *OutboundMonitoring) selectedOf(tag string) string {
- 	return ""
- }
+@@ -116,7 +116,7 @@ func TestH_SubscribeBeforeTheGroupIsRegistered(t *testing.T) {
+ 	require.NoError(t, err)
  
-+// recentResult is how long a result of this run spares the selection a test: a group that moved
-+// to a member on the cycle's result tested it again seconds later, and under load that second
-+// ping read 2549 ms for a 59 ms member, and the group moved on.
-+const recentResult = 15 * time.Second
-+
- // testSelected tests, before everything else queued, the outbound a group's selection leads to:
--// its ping is the one the user is looking at.
-+// its ping is the one the user is looking at. Not when it was measured in the last recentResult.
- func (m *OutboundMonitoring) testSelected(groupTag string) {
--	if tag := m.selectedOf(groupTag); tag != "" {
--		m.testNow(tag, true)
-+	tag := m.selectedOf(groupTag)
-+	if tag == "" {
-+		return
-+	}
-+	if state := m.getState(tag); state != nil {
-+		state.mu.Lock()
-+		recent := state.workedLocked() && time.Since(state.history.Time) < recentResult
-+		state.mu.Unlock()
-+		if recent {
-+			m.logger.Info("MONITORING ", tag, ": not tested again (the selection of ", groupTag, "): measured in the last ", recentResult)
-+			return
-+		}
- 	}
-+	m.testNow(tag, true, "the selection of "+groupTag)
- }
- 
- // testSelections tests what every group's selection leads to, ahead of the first cycle: the
+ 	manager := m.outboundManager.(*fakeOutboundManager)
+-	manager.list = append(manager.list, &fakeGroup{fakeOutbound: fakeOutbound{tag: "added"}, all: []string{"a"}})
++	manager.list = append(manager.list, &fakeGroup{tag: "added", all: []string{"a"}})
+ 	require.NoError(t, m.Reload()) // the hot reload reloads the monitoring once the outbounds exist
+ 	group := m.reg().groups["added"]
+ 	require.NotNil(t, group)
 diff --git a/common/monitoring/h_selected_test.go b/common/monitoring/h_selected_test.go
-index be56f71f407cf274f2591d6d4a903df8442d0030..8d93973415da80e08bef81d5b18db7a7c6605282 100644
+index 377e1435d3637d586ecd5827143856d6fe3588b3..8d93973415da80e08bef81d5b18db7a7c6605282 100644
 --- a/common/monitoring/h_selected_test.go
 +++ b/common/monitoring/h_selected_test.go
-@@ -6,6 +6,7 @@ import (
- 	"net/http"
- 	"net/http/httptest"
- 	"sync"
-+	"sync/atomic"
- 	"testing"
- 	"time"
- 
-@@ -55,7 +56,7 @@ func TestH_MonitoringTestsTheSelectionFirstAndOnChange(t *testing.T) {
+@@ -56,7 +56,7 @@ func TestH_MonitoringTestsTheSelectionFirstAndOnChange(t *testing.T) {
  		time.Sleep(300 * time.Millisecond)
  		return slowDial(ctx, network, destination)
  	}
@@ -1409,123 +410,43 @@ index be56f71f407cf274f2591d6d4a903df8442d0030..8d93973415da80e08bef81d5b18db7a7
  	m := newTestMonitor(t, nil, option.MonitoringOptions{
  		Interval:       badoption.Duration(time.Hour),
  		Workers:        1,
-@@ -80,13 +81,52 @@ func TestH_MonitoringTestsTheSelectionFirstAndOnChange(t *testing.T) {
- 		"the selected member is tested at once, beside the cycle")
- 	require.False(t, m.reg().outbounds["a"].tested(), "the cycle's test of the faster one is still running")
- 
--	// the selection moves to a: it is tested again at once, though its result is fresh
-+	// the selection moves to a: it is tested again at once, as its result is not of the last
-+	// seconds (see recentResult)
- 	require.Eventually(t, func() bool { return m.reg().outbounds["a"].tested() }, 5*time.Second, 10*time.Millisecond)
- 	before := len(dialed())
- 	selector.selected = a
-+	ageResult(m, "a")
- 	require.NoError(t, m.SignalChange("select"))
- 	require.Eventually(t, func() bool {
- 		d := dialed()
- 		return len(d) > before && d[len(d)-1] == "a"
- 	}, 5*time.Second, 10*time.Millisecond, "the new selection is tested on the change")
- }
-+
-+// A selection measured in the last seconds is not tested again when a group moves to it: under
-+// load, the second ping right after the cycle's read a slow value and the group moved on.
-+func TestH_MonitoringSelectionMeasuredJustNowIsNotTestedAgain(t *testing.T) {
-+	url, addr := noContentServer(t)
-+	var dials atomic.Int64
-+	b := &fakeOutbound{tag: "b", dial: dialTo(addr, func(context.Context) error { dials.Add(1); return nil })}
+@@ -100,7 +100,7 @@ func TestH_MonitoringSelectionMeasuredJustNowIsNotTestedAgain(t *testing.T) {
+ 	url, addr := noContentServer(t)
+ 	var dials atomic.Int64
+ 	b := &fakeOutbound{tag: "b", dial: dialTo(addr, func(context.Context) error { dials.Add(1); return nil })}
+-	selector := &fakeGroup{fakeOutbound: fakeOutbound{tag: "select"}, all: []string{"b"}, selected: b}
 +	selector := &fakeGroup{tag: "select", all: []string{"b"}, selected: b}
-+	m := newTestMonitor(t, nil, option.MonitoringOptions{
-+		Interval: badoption.Duration(time.Hour),
-+		Workers:  1,
-+		URLs:     []string{url},
-+	}, b, selector)
-+	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
-+
-+	setHistory(m, "b", 40, false, nil) // measured just now
-+	m.testSelected("select")
-+	time.Sleep(150 * time.Millisecond)
-+	require.Equal(t, int64(0), dials.Load(), "measured just now: not again")
-+
-+	ageResult(m, "b")
-+	m.testSelected("select")
+ 	m := newTestMonitor(t, nil, option.MonitoringOptions{
+ 		Interval: badoption.Duration(time.Hour),
+ 		Workers:  1,
+@@ -115,12 +115,12 @@ func TestH_MonitoringSelectionMeasuredJustNowIsNotTestedAgain(t *testing.T) {
+ 
+ 	ageResult(m, "b")
+ 	m.testSelected("select")
+-	require.Eventually(t, func() bool { return dials.Load() == 1 }, 2*time.Second, 5*time.Millisecond, "an older result: tested")
 +	require.Eventually(t, func() bool { return dials.Load() >= 1 }, 2*time.Second, 5*time.Millisecond, "an older result: tested")
-+	require.Eventually(t, m.reg().outbounds["b"].tested, 5*time.Second, 5*time.Millisecond)
-+
-+	setHistory(m, "b", 40, true, nil) // only a cached result, however recent
-+	m.testSelected("select")
+ 	require.Eventually(t, m.reg().outbounds["b"].tested, 5*time.Second, 5*time.Millisecond)
+ 
+ 	setHistory(m, "b", 40, true, nil) // only a cached result, however recent
+ 	m.testSelected("select")
+-	require.Eventually(t, func() bool { return dials.Load() == 2 }, 2*time.Second, 5*time.Millisecond, "cached: tested")
 +	require.Eventually(t, func() bool { return dials.Load() >= 2 }, 2*time.Second, 5*time.Millisecond, "cached: tested")
-+}
-+
-+// ageResult makes tag's result older than recentResult, so a selection test of it runs.
-+func ageResult(m *OutboundMonitoring, tag string) {
-+	state := m.reg().outbounds[tag]
-+	state.mu.Lock()
-+	state.history.Time = time.Now().Add(-recentResult - time.Second)
-+	state.mu.Unlock()
-+}
+ }
+ 
+ // ageResult makes tag's result older than recentResult, so a selection test of it runs.
 diff --git a/common/monitoring/h_settle.go b/common/monitoring/h_settle.go
-index 7f56ff7fd435e7ddd10cb65c168e6ebfe2496696..29050e753b9cecd97854ddf89f873938c61877b2 100644
+index 18e33dc2c41798780d29e7e72aedef60b45acf4d..1212a25df3b82144a2ae9188394e8dc94020e446 100644
 --- a/common/monitoring/h_settle.go
 +++ b/common/monitoring/h_settle.go
-@@ -9,6 +9,22 @@ import (
- 
- var errTestNeverReturned = errors.New("URL test did not return: the outbound ignores its deadline")
- 
-+// workedLocked reports a result of this run that worked; s.mu is held.
-+func (s *outboundState) workedLocked() bool {
-+	return Worked(s.history.Delay, s.from_cache)
-+}
-+
-+// handResult gives a task's outcome to what waits for it (a cycle's stage), without blocking.
-+func (m *OutboundMonitoring) handResult(task *testTask, outcome testOutcome) {
-+	if task.resultCh == nil {
-+		return
-+	}
-+	select {
-+	case task.resultCh <- outcome:
-+	default:
-+	}
-+}
-+
- // testHardLimit is how long a worker waits for one test: the URL test and the IP lookup, each
- // with its own deadline, and one more test after a network reset. An outbound whose dial ignores
- // its deadline would otherwise hold the worker, and the cycle waiting for the result, for good;
-@@ -46,13 +62,8 @@ func (m *OutboundMonitoring) settle(task *testTask, state *outboundState, histor
+@@ -67,6 +67,7 @@ func (m *OutboundMonitoring) settle(task *testTask, state *outboundState, histor
  	if err == nil && !worked { // it works now; what was measured through it did not
  		m.retestDependents(task.outboundTag, make(map[string]bool))
  	}
--	if task.resultCh != nil {
--		select {
--		case task.resultCh <- outcome:
--		case <-m.ctx.Done():
--		default:
--		}
--	}
 +	m.finishRunningTest(state, task.testDone) // H: the next stage must start a fresh test
-+	m.handResult(task, outcome)
+ 	m.handResult(task, outcome)
  }
  
- // settleLate gives up on a test that did not return within testHardLimit: it counts as failed,
-@@ -60,7 +71,7 @@ func (m *OutboundMonitoring) settle(task *testTask, state *outboundState, histor
- func (m *OutboundMonitoring) settleLate(task *testTask, state *outboundState) {
- 	m.logger.Warn("outbound ", task.outboundTag, " URL test did not return in ", m.testHardLimit(task), ": counted as failed")
- 	state.mu.Lock()
--	worked := !state.from_cache && state.history.Delay != 0 && state.history.Delay < TimeoutDelay
-+	worked := state.workedLocked()
- 	state.mu.Unlock()
- 	m.settle(task, state, adapter.URLTestHistory{Time: time.Now(), Delay: TimeoutDelay}, errTestNeverReturned, worked)
- }
-@@ -81,13 +92,18 @@ func (m *OutboundMonitoring) applyInterim(task *testTask, state *outboundState,
- 	}
- 	if !state.tentative {
- 		state.confirmed = state.history
-+		state.confirmed.IsFromCache = state.from_cache
- 	}
- 	state.history.Delay = history.Delay
- 	state.history.Time = history.Time
-+	if !tentative { // the URL test answered: the error of an earlier test is gone with it
-+		state.history.Error = ""
-+	}
+@@ -127,7 +128,8 @@ func (m *OutboundMonitoring) applyInterim(task *testTask, state *outboundState,
  	state.from_cache = false
  	state.tentative = tentative
  	if !tentative {
@@ -1535,57 +456,11 @@ index 7f56ff7fd435e7ddd10cb65c168e6ebfe2496696..29050e753b9cecd97854ddf89f873938
  	}
  	groupTags := state.groupTags
  	state.mu.Unlock()
-@@ -100,7 +116,11 @@ func (m *OutboundMonitoring) applyInterim(task *testTask, state *outboundState,
- // confirmed is what a group reads of a member: a staged test's tentative miss is swapped for
- // the member's last confirmed result, so no group takes it for dead, or moves away from it and
- // cuts its connections, on a miss that its next attempt may answer. The catch-all group, which
--// the app reads, sees the miss as it is.
-+// the app reads, sees the miss as it is. A member with no result of this run (none, or only the
-+// one cached from the previous run) has nothing to keep: the miss is all this run knows of it,
-+// and the groups see it, so lowest-delay leaves a cached pick that does not answer for one that
-+// does. It used to keep the cached result, marked as fresh, and stay on a member the app showed
-+// as not responding while others worked.
- func (m *OutboundMonitoring) confirmed(groupTag, outboundTag string, his *adapter.URLTestHistory) *adapter.URLTestHistory {
- 	if groupTag == "" || his == nil {
- 		return his
-@@ -114,7 +134,19 @@ func (m *OutboundMonitoring) confirmed(groupTag, outboundTag string, his *adapte
- 	if !state.tentative {
- 		return his
- 	}
-+	if !Worked(state.confirmed.Delay, state.confirmed.IsFromCache) {
-+		return his
-+	}
- 	last := state.confirmed
--	last.IsFromCache = state.from_cache
-+	last.IsFromCache = false
- 	return &last
- }
-+
-+// testError is the error a URL test failed with, as the history keeps it for the app; empty when
-+// the test worked.
-+func testError(err error) string {
-+	if err == nil {
-+		return ""
-+	}
-+	return err.Error()
-+}
 diff --git a/common/monitoring/h_settle_test.go b/common/monitoring/h_settle_test.go
-index ac509b513c7d58ab68ae0bfe640934cad4bd528a..b61df673bea0f13739b37fa35517ebc1a1dfe046 100644
+index 6c061c5d6f6057a02d84085c81bd08977b62eb0d..b61df673bea0f13739b37fa35517ebc1a1dfe046 100644
 --- a/common/monitoring/h_settle_test.go
 +++ b/common/monitoring/h_settle_test.go
-@@ -2,9 +2,11 @@ package monitoring
- 
- import (
- 	"context"
-+	"errors"
- 	"net"
- 	"net/http"
- 	"net/http/httptest"
-+	"sync/atomic"
- 	"testing"
- 	"time"
- 
-@@ -66,7 +68,12 @@ func TestH_MonitoringGivesUpOnATestThatNeverReturns(t *testing.T) {
+@@ -68,7 +68,12 @@ func TestH_MonitoringGivesUpOnATestThatNeverReturns(t *testing.T) {
  		"a test asked for runs at once, beside the stuck one, not behind it")
  	require.Eventually(t, func() bool { return delay("stuck") == TimeoutDelay }, limit+2*time.Second, 10*time.Millisecond,
  		"the test that never returns counts as failed after %s", limit)
@@ -1599,52 +474,19 @@ index ac509b513c7d58ab68ae0bfe640934cad4bd528a..b61df673bea0f13739b37fa35517ebc1
  		"the outbound is free to be tested again")
  }
  
-@@ -122,18 +129,22 @@ func TestH_MonitoringStagedTestShowsTheMissThenTheAnswer(t *testing.T) {
- 	serverAddr := M.ParseSocksaddr(server.Listener.Addr().String())
- 	var dialer net.Dialer
- 	// answers after 450 ms: past the first mark, before the second
--	slow := &fakeOutbound{tag: "slow", dial: func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-+	var dialDelay, dials atomic.Int64
-+	dialDelay.Store(int64(450 * time.Millisecond))
-+	slow := &fakeOutbound{tag: "slow"}
-+	slow.dial = func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
- 		if destination != serverAddr {
- 			return nil, context.DeadlineExceeded
- 		}
-+		dials.Add(1)
- 		select {
- 		case <-ctx.Done():
- 			return nil, ctx.Err()
--		case <-time.After(450 * time.Millisecond):
-+		case <-time.After(time.Duration(dialDelay.Load())):
+@@ -139,7 +144,7 @@ func TestH_MonitoringStagedTestShowsTheMissThenTheAnswer(t *testing.T) {
  		}
  		return dialer.DialContext(ctx, network, destination.String())
--	}}
+ 	}
 -	grp := &fakeGroup{fakeOutbound: fakeOutbound{tag: "grp"}, all: []string{"slow"}, selected: slow}
-+	}
 +	grp := &fakeGroup{tag: "grp", all: []string{"slow"}, selected: slow}
  	m := newTestMonitor(t, nil, option.MonitoringOptions{
  		Interval:         badoption.Duration(time.Hour),
  		Workers:          1,
-@@ -142,7 +153,7 @@ func TestH_MonitoringStagedTestShowsTheMissThenTheAnswer(t *testing.T) {
- 		OnDemandTimeouts: []badoption.Duration{badoption.Duration(200 * time.Millisecond), badoption.Duration(800 * time.Millisecond), badoption.Duration(3 * time.Second)},
- 	}, slow, grp)
- 	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
--	setHistory(m, "slow", 70, false, nil) // last run's result, confirmed
-+	setHistory(m, "slow", 70, true, nil) // only the previous run's result: nothing of this run is known
- 
- 	start := time.Now()
- 	require.NoError(t, m.TestNow("slow"))
-@@ -150,10 +161,46 @@ func TestH_MonitoringStagedTestShowsTheMissThenTheAnswer(t *testing.T) {
- 	groupSees := func() uint16 { return m.OutboundsHistory("grp")["slow"].Delay }
- 	require.Eventually(t, func() bool { return appSees() == TimeoutDelay }, time.Second, 5*time.Millisecond, "a miss at the first mark shows as unavailable")
- 	require.Less(t, time.Since(start), 400*time.Millisecond)
--	require.Equal(t, uint16(70), groupSees(), "the group keeps the last confirmed result through the miss")
- 	require.Eventually(t, func() bool { d := appSees(); return d > 0 && d < TimeoutDelay }, time.Second, 5*time.Millisecond, "the first attempt's late answer shows at once")
--	require.Less(t, time.Since(start), 700*time.Millisecond, "not waiting for the second attempt or the deadline")
-+	require.Less(t, time.Since(start), 700*time.Millisecond, "not waiting for the deadline")
+@@ -160,6 +165,18 @@ func TestH_MonitoringStagedTestShowsTheMissThenTheAnswer(t *testing.T) {
+ 	require.Less(t, time.Since(start), 700*time.Millisecond, "not waiting for the deadline")
  	require.Equal(t, appSees(), groupSees(), "the answer is confirmed for the group too")
-+	require.Equal(t, int64(1), dials.Load(), "a slow proxy is pinged once: no second attempt beside one still running")
+ 	require.Equal(t, int64(1), dials.Load(), "a slow proxy is pinged once: no second attempt beside one still running")
 +	// An answer is published before all bookkeeping and optional IP lookups finish.
 +	// Wait for the priority task to settle before starting a second staged probe;
 +	// otherwise the previous run can overwrite the next run's seeded history.
@@ -1657,189 +499,26 @@ index ac509b513c7d58ab68ae0bfe640934cad4bd528a..b61df673bea0f13739b37fa35517ebc1
 +		}, 3*time.Second, 5*time.Millisecond, "staged probe fully settled")
 +	}
 +	waitForProbeToSettle(1)
-+
-+	// the outbound worked in this run: the first mark does not apply, its result stays through
-+	// the slow answer, and the answer replaces it; a miss would come at the second mark
-+	setHistory(m, "slow", 70, false, nil)
-+	start = time.Now()
-+	require.NoError(t, m.TestNow("slow"))
-+	require.Eventually(t, func() bool { d := appSees(); return d != 70 }, time.Second, 5*time.Millisecond, "the answer shows")
-+	require.Less(t, appSees(), TimeoutDelay, "a working outbound is not shown as unavailable at the first mark")
-+	require.Greater(t, time.Since(start), 400*time.Millisecond, "the answer came from the first attempt")
-+	require.Equal(t, appSees(), groupSees())
+ 
+ 	// the outbound worked in this run: the first mark does not apply, its result stays through
+ 	// the slow answer, and the answer replaces it; a miss would come at the second mark
+@@ -170,6 +187,7 @@ func TestH_MonitoringStagedTestShowsTheMissThenTheAnswer(t *testing.T) {
+ 	require.Less(t, appSees(), TimeoutDelay, "a working outbound is not shown as unavailable at the first mark")
+ 	require.Greater(t, time.Since(start), 400*time.Millisecond, "the answer came from the first attempt")
+ 	require.Equal(t, appSees(), groupSees())
 +	waitForProbeToSettle(2)
-+
-+	// the outbound worked in this run and answers only after the second mark: the miss shows
-+	// there, not at the first, and the group keeps the last confirmed result through it
-+	dialDelay.Store(int64(900 * time.Millisecond))
-+	setHistory(m, "slow", 70, false, nil)
-+	start = time.Now()
-+	require.NoError(t, m.TestNow("slow"))
-+	require.Eventually(t, func() bool { return appSees() == TimeoutDelay }, 2*time.Second, 5*time.Millisecond, "a miss at the second mark shows as unavailable")
-+	require.Greater(t, time.Since(start), 700*time.Millisecond, "not at the first mark")
-+	require.Equal(t, uint16(70), groupSees(), "the group keeps the last confirmed result through the miss")
-+	require.Eventually(t, func() bool { d := appSees(); return d > 0 && d < TimeoutDelay }, 2*time.Second, 5*time.Millisecond, "the late answer shows at once")
-+	require.Equal(t, appSees(), groupSees(), "the answer is confirmed for the group too")
-+	require.Equal(t, int64(3), dials.Load(), "one ping per test")
  
- 	// every attempt fails at once: over as soon as the last one has, not at the deadline
- 	dead := &fakeOutbound{tag: "dead"}
-@@ -174,3 +221,60 @@ func TestH_MonitoringStagedTestShowsTheMissThenTheAnswer(t *testing.T) {
- 	}, 2*time.Second, 5*time.Millisecond, "failed for good once the last attempt failed")
- 	require.Less(t, time.Since(start), 1500*time.Millisecond, "not waiting for the deadline")
- }
-+
-+// A member whose only result is the one cached from the previous run has nothing to keep through
-+// a miss: the groups see the miss, so lowest-delay leaves a cached pick that does not answer for
-+// one that does. They used to keep the cached result, marked as fresh, and stayed on a member the
-+// app showed as not responding while others worked.
-+func TestH_MonitoringMissOfACachedMemberIsSeenByTheGroups(t *testing.T) {
-+	never := &fakeOutbound{tag: "cached", dial: func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-+		<-ctx.Done()
-+		return nil, ctx.Err()
-+	}}
+ 	// the outbound worked in this run and answers only after the second mark: the miss shows
+ 	// there, not at the first, and the group keeps the last confirmed result through it
+@@ -213,7 +231,7 @@ func TestH_MonitoringMissOfACachedMemberIsSeenByTheGroups(t *testing.T) {
+ 		<-ctx.Done()
+ 		return nil, ctx.Err()
+ 	}}
+-	grp := &fakeGroup{fakeOutbound: fakeOutbound{tag: "grp"}, all: []string{"cached"}, selected: never}
 +	grp := &fakeGroup{tag: "grp", all: []string{"cached"}, selected: never}
-+	m := newTestMonitor(t, nil, option.MonitoringOptions{
-+		Interval:         badoption.Duration(time.Hour),
-+		Workers:          1,
-+		URLs:             []string{"http://127.0.0.1:1/generate_204"},
-+		URLTestTimeout:   badoption.Duration(2 * time.Second),
-+		OnDemandTimeouts: []badoption.Duration{badoption.Duration(200 * time.Millisecond), badoption.Duration(800 * time.Millisecond), badoption.Duration(3 * time.Second)},
-+	}, never, grp)
-+	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
-+	setHistory(m, "cached", 70, true, nil) // only the previous run's result
-+
-+	require.NoError(t, m.TestNow("cached"))
-+	groupSees := func() uint16 { return m.OutboundsHistory("grp")["cached"].Delay }
-+	require.Eventually(t, func() bool { return m.OutboundsHistory("")["cached"].Delay == TimeoutDelay }, time.Second, 5*time.Millisecond)
-+	require.Equal(t, TimeoutDelay, groupSees(), "nothing of this run to keep: the group sees the miss")
-+}
-+
-+// A failed attempt is tried again at the next mark, and so until the last mark: a proxy that
-+// fails twice and then answers is found working by the third attempt, with no attempt started
-+// beside a running one.
-+func TestH_MonitoringStagedTestRetriesOnlyAFailedAttempt(t *testing.T) {
-+	url, addr := noContentServer(t)
-+	var dials atomic.Int64
-+	flaky := &fakeOutbound{tag: "flaky", dial: dialTo(addr, func(ctx context.Context) error {
-+		if dials.Add(1) < 3 {
-+			return errors.New("connection refused")
-+		}
-+		time.Sleep(20 * time.Millisecond) // a measurable delay: a 0 ms answer counts as none
-+		return nil
-+	})}
-+	m := newTestMonitor(t, nil, option.MonitoringOptions{
-+		Interval:         badoption.Duration(time.Hour),
-+		Workers:          1,
-+		URLs:             []string{url},
-+		OnDemandTimeouts: []badoption.Duration{badoption.Duration(200 * time.Millisecond), badoption.Duration(400 * time.Millisecond), badoption.Duration(3 * time.Second)},
-+	}, flaky)
-+	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
-+	start := time.Now()
-+	require.NoError(t, m.TestNow("flaky"))
-+	appSees := func() uint16 { return m.OutboundsHistory("")["flaky"].Delay }
-+	require.Eventually(t, func() bool { return appSees() == TimeoutDelay }, time.Second, 5*time.Millisecond, "the failed first attempt shows as unavailable at once")
-+	require.Less(t, time.Since(start), 150*time.Millisecond)
-+	require.Eventually(t, func() bool { d := appSees(); return d > 0 && d < TimeoutDelay }, 2*time.Second, 5*time.Millisecond, "the third attempt answers")
-+	require.Greater(t, time.Since(start), 380*time.Millisecond, "the third attempt started at the second mark")
-+	require.Less(t, time.Since(start), time.Second)
-+	require.Equal(t, int64(3), dials.Load(), "one attempt per mark, each after a failure")
-+}
-diff --git a/common/monitoring/h_staged.go b/common/monitoring/h_staged.go
-index 77fb7ca007d74d24b695b05e4e532aaddb0427fc..a61ca080f55b33f86191826da2e0b0e2adad009f 100644
---- a/common/monitoring/h_staged.go
-+++ b/common/monitoring/h_staged.go
-@@ -2,6 +2,7 @@ package monitoring
- 
- import (
- 	"context"
-+	"fmt"
- 	"time"
- 
- 	"github.com/sagernet/sing-box/adapter"
-@@ -28,19 +29,28 @@ func onDemandTimeouts(options badoption.Listable[badoption.Duration]) []time.Dur
- 
- // stagedURLTest is the URL test of a test asked for: a tap on a proxy, a selection. The first
- // attempt starts at once. When it fails, or has not answered by the first mark, the outbound
--// shows as unavailable for now (tentative, see confirmed); at the first mark a second attempt
--// starts beside the first, and so at every mark but the last, which is the deadline of them all. The first answer from any attempt
--// wins at once, however late, and the others are dropped; when every attempt has failed and no
--// more are due, it is over without waiting for the deadline.
--func (m *OutboundMonitoring) stagedURLTest(parent context.Context, link string, out adapter.Outbound, interim func(adapter.URLTestHistory, bool)) (uint16, error) {
-+// shows as unavailable for now (tentative, see confirmed). An attempt that failed is tried again
-+// at the next mark, and so at every mark but the last, which is the deadline of them all; an
-+// attempt still running at a mark is left to answer, so a slow proxy is pinged once, not three
-+// times. The first answer wins at once, however late; when the last attempt has failed and no
-+// mark is left to try at, it is over without waiting for the deadline.
-+//
-+// The first mark is for an outbound nothing is known of: no result of this run, or only the one
-+// cached from the previous run, so that the app shows something of it within a second. An
-+// outbound that worked in this run (worked) keeps its result past the first mark instead of
-+// showing as unavailable after one slow answer, and its stages start at the second mark.
-+func (m *OutboundMonitoring) stagedURLTest(parent context.Context, link string, out adapter.Outbound, interim func(adapter.URLTestHistory, bool), worked bool) (uint16, error) {
- 	marks := m.onDemand
-+	if worked && len(marks) > 1 {
-+		marks = marks[1:]
-+	}
- 	ctx, cancel := context.WithTimeout(parent, marks[len(marks)-1])
- 	defer cancel()
- 	type result struct {
- 		delay uint16
- 		err   error
- 	}
--	results := make(chan result, len(marks))
-+	results := make(chan result, 1)
- 	attempt := func() {
- 		go func() {
- 			delay, err := urltest.URLTest(ctx, link, out)
-@@ -48,15 +58,17 @@ func (m *OutboundMonitoring) stagedURLTest(parent context.Context, link string,
- 		}()
- 	}
- 	start := time.Now()
-+	m.logger.Info("MONITORING test ", out.Tag(), ": in stages ", fmt.Sprint(marks), " (worked before: ", worked, ")")
- 	attempt()
--	launched, failed := 1, 0
--	next := 0 // the mark the next attempt starts at; the last mark starts none
-+	running := true
-+	next := 0 // the mark the next attempt may start at; the last mark starts none
- 	missed := false
--	miss := func() { // unavailable for now: the first attempt failed, or has not answered by the first mark
-+	miss := func() { // unavailable for now: the attempt failed, or has not answered by the first mark
- 		if missed || interim == nil {
- 			return
- 		}
- 		missed = true
-+		m.logger.Info("MONITORING ", out.Tag(), ": no answer after ", time.Since(start).Round(time.Millisecond), ": unavailable for now")
- 		interim(adapter.URLTestHistory{Time: time.Now(), Delay: TimeoutDelay}, true)
- 	}
- 	var (
-@@ -86,19 +98,22 @@ func (m *OutboundMonitoring) stagedURLTest(parent context.Context, link string,
- 			if r.err == nil && r.delay > 0 && r.delay < TimeoutDelay {
- 				return r.delay, nil
- 			}
--			failed++
-+			running = false
- 			if r.err != nil {
- 				err = r.err
- 			}
--			if failed == launched && next >= len(marks)-1 {
-+			if next >= len(marks)-1 { // no mark left to try at
- 				return TimeoutDelay, err
- 			}
- 			miss()
- 		case <-due:
- 			timer = nil
- 			miss()
--			attempt()
--			launched++
-+			if !running { // the attempt failed: another one, at this mark
-+				m.logger.Info("MONITORING ", out.Tag(), ": the attempt failed, another at ", marks[next])
-+				attempt()
-+				running = true
-+			}
- 			next++
- 		}
- 	}
+ 	m := newTestMonitor(t, nil, option.MonitoringOptions{
+ 		Interval:         badoption.Duration(time.Hour),
+ 		Workers:          1,
 diff --git a/common/monitoring/h_staged_compat_test.go b/common/monitoring/h_staged_compat_test.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..1c25dbd468c44c1b8f235a9e0768b183a9d06c44
@@ -1886,555 +565,125 @@ index 0000000000000000000000000000000000000000..1c25dbd468c44c1b8f235a9e0768b183
 +		t.Fatalf("staged retries exceeded their deadline: %s", elapsed)
 +	}
 +}
-diff --git a/common/monitoring/h_test_error_test.go b/common/monitoring/h_test_error_test.go
-new file mode 100644
-index 0000000000000000000000000000000000000000..1ccfa55515433641048f11c67a9a52e703aad104
---- /dev/null
-+++ b/common/monitoring/h_test_error_test.go
-@@ -0,0 +1,66 @@
-+package monitoring
-+
-+import (
-+	"context"
-+	"errors"
-+	"net"
-+	"net/http"
-+	"net/http/httptest"
-+	"testing"
-+	"time"
-+
-+	"github.com/sagernet/sing-box/adapter"
-+	"github.com/sagernet/sing-box/adapter/htest"
-+	"github.com/sagernet/sing-box/option"
-+	E "github.com/sagernet/sing/common/exceptions"
-+	"github.com/sagernet/sing/common/json/badoption"
-+	M "github.com/sagernet/sing/common/metadata"
-+
-+	"github.com/stretchr/testify/require"
-+)
-+
-+// A failed URL test keeps its error in the history, for the app to say why the proxy failed; the
-+// next test that works clears it.
-+func TestH_MonitoringKeepsTheErrorOfAFailedTest(t *testing.T) {
-+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-+		w.WriteHeader(http.StatusNoContent)
-+	}))
-+	defer server.Close()
-+	proxy := &fakeOutbound{tag: "proxy", dial: func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-+		return nil, errors.New("handshake refused by the server")
-+	}}
-+	m := newTestMonitor(t, nil, option.MonitoringOptions{
-+		Interval:       badoption.Duration(time.Hour),
-+		Workers:        1,
-+		URLs:           []string{server.URL + "/generate_204"},
-+		URLTestTimeout: badoption.Duration(time.Second),
-+	}, proxy)
-+	require.NoError(t, htest.Start(m, adapter.StartStateInitialize))
-+	m.workerWG.Add(1)
-+	go m.workerLoop()
-+
-+	history := func() adapter.URLTestHistory {
-+		state := m.reg().outbounds["proxy"]
-+		state.mu.Lock()
-+		defer state.mu.Unlock()
-+		return state.history
-+	}
-+	require.NoError(t, m.TestNow("proxy"))
-+	// a staged test shows a miss before it settles; the error comes with the result
-+	require.Eventually(t, func() bool { return history().Error != "" }, 10*time.Second, 10*time.Millisecond)
-+	require.Equal(t, TimeoutDelay, history().Delay)
-+	require.Contains(t, history().Error, "handshake refused by the server")
-+	require.Contains(t, m.history.LoadURLTestHistory("proxy").Error, "handshake refused by the server",
-+		"the stored history, which the app reads, has it too")
-+
-+	// a test that works clears it: the delay it shows first, before the IP lookup, and its result
-+	state := m.reg().outbounds["proxy"]
-+	m.applyInterim(&testTask{outboundTag: "proxy"}, state, adapter.URLTestHistory{Time: time.Now(), Delay: 42}, false)
-+	require.Empty(t, history().Error, "the delay of a test that answered")
-+	m.applyResult(testOutcome{outboundTag: "proxy", history: adapter.URLTestHistory{Time: time.Now(), Delay: TimeoutDelay}, err: E.New("refused again")})
-+	require.Equal(t, "refused again", history().Error)
-+	m.applyInterim(&testTask{outboundTag: "proxy"}, state, adapter.URLTestHistory{Time: time.Now(), Delay: TimeoutDelay}, true)
-+	require.Equal(t, "refused again", history().Error, "a tentative miss keeps it")
-+	m.applyResult(testOutcome{outboundTag: "proxy", history: adapter.URLTestHistory{Time: time.Now(), Delay: 42}})
-+	require.Empty(t, history().Error, "the result of a test that worked")
-+}
 diff --git a/common/monitoring/outbound_monitoring.go b/common/monitoring/outbound_monitoring.go
-index d27cc83028faec8b05140900291132a5ae583d46..05914a8b8712a9fd23e29a62f6319f792c0f3a5e 100644
+index 3b933447bf2de2776d299eaf0c3f01c2c1b21be1..3e6acbd519ab1c8bec9ea2a1af9195ae510ccc4d 100644
 --- a/common/monitoring/outbound_monitoring.go
 +++ b/common/monitoring/outbound_monitoring.go
-@@ -13,26 +13,26 @@ import (
- 
- 	"github.com/sagernet/sing-box/adapter"
- 	"github.com/sagernet/sing-box/common/urltest"
-+	"github.com/sagernet/sing-box/hiddify/ipinfo"
- 	"github.com/sagernet/sing-box/log"
- 	"github.com/sagernet/sing-box/option"
- 	tun "github.com/sagernet/sing-tun"
--	E "github.com/sagernet/sing/common/exceptions"
--	"github.com/sagernet/sing/service"
--
--	"github.com/sagernet/sing-box/hiddify/ipinfo"
--	"github.com/sagernet/sing/common/x/list"
--
- 	"github.com/sagernet/sing/common"
-+	E "github.com/sagernet/sing/common/exceptions"
- 	"github.com/sagernet/sing/common/json/badoption"
- 	N "github.com/sagernet/sing/common/network"
-+	"github.com/sagernet/sing/common/x/list"
-+	"github.com/sagernet/sing/service"
- 	"github.com/sagernet/sing/service/pause"
- )
- 
- const TimeoutDelay uint16 = 65535
- 
--var _ adapter.ConnectionTracker = (*OutboundMonitoring)(nil)
--var _ adapter.LifecycleService = (*OutboundMonitoring)(nil)
--var _ adapter.InterfaceUpdateListener = (*OutboundMonitoring)(nil)
-+var (
-+	_ adapter.ConnectionTracker       = (*OutboundMonitoring)(nil)
-+	_ adapter.LifecycleService        = (*OutboundMonitoring)(nil)
-+	_ adapter.InterfaceUpdateListener = (*OutboundMonitoring)(nil)
-+)
- 
- const (
- 	defaultWorkerCount    = 10
-@@ -74,13 +74,15 @@ type OutboundMonitoring struct {
- 	cache            adapter.CacheFile
- 	ctx              context.Context
- 	cancel           context.CancelFunc
--	tag              string
+@@ -76,7 +76,7 @@ type OutboundMonitoring struct {
+ 	tag              string
  	pause            pause.Manager
  	pauseCallback    *list.Element[pause.Callback]
 -	started          bool
 +	started          atomic.Bool
+ 	closed           bool // H: set by Close; with started, guarded by access: Touch starts nothing after it
  	urls             []string
  	ipInfoURL        string
--	ipv6Probe        string // H: see option.MonitoringOptions.IPv6Probe; empty when off
-+	ipv6Access       sync.Mutex                // H: guards ipv6
-+	ipv6             map[string]*ipv6Knowledge // H: what is known of each outbound's IPv6, see h_ipv6.go
-+	verifyIPv6       bool                      // H: option.MonitoringOptions.VerifyIPv6
-+	ipv6Declared     map[string]bool           // H: option.MonitoringOptions.IPv6Declared
- 	currentLinkIndex atomic.Uint32
- 	access           sync.Mutex
- 	idleTimeout      time.Duration
-@@ -103,12 +105,14 @@ type OutboundMonitoring struct {
- 
- 	cacheDirty atomic.Bool
- 
--	cycleSeq     uint64
-+	cycleSeq     atomic.Uint64 // H: a typed atomic, 8-byte aligned also on 32-bit ARM, where a bare uint64 used with atomic.AddUint64 panics
- 	cycleRunning atomic.Bool
--	networkSeq   atomic.Uint64 //H: counts network resets, see executeTask
-+	networkSeq   atomic.Uint64 // H: counts network resets, see executeTask
- 
--	networkRetest *time.Timer // H: the pending retest after a network change, guarded by access
--	cycleAgain    atomic.Bool // H: a cycle that ran during a network change runs once more
-+	networkRetest *time.Timer  // H: the pending retest after a network change, guarded by access
-+	cycleAgain    atomic.Bool  // H: a cycle that ran during a network change runs once more
-+	periodicCycle atomic.Bool  // H: the running cycle is a regular one of the schedule, see h_cycle.go
-+	cycleStarted  atomic.Value // H: time.Time, see CycleStartedAt
- 
- 	workerWG    sync.WaitGroup
- 	schedulerWG sync.WaitGroup
-@@ -127,7 +131,7 @@ func (m *OutboundMonitoring) InterfaceUpdated(ctx context.Context) {
+@@ -139,7 +139,7 @@ func (m *OutboundMonitoring) InterfaceUpdated(ctx context.Context) {
  func (m *OutboundMonitoring) NetworkChanged() {
  	m.access.Lock()
  	defer m.access.Unlock()
 -	if !m.started {
-+	if !m.started.Load() {
++	if !m.started.Load() || m.closed {
  		return
  	}
  	if m.networkRetest != nil {
-@@ -153,6 +157,7 @@ func (m *OutboundMonitoring) retestAll() {
- 		state.mu.Unlock()
- 	}
- 	m.Touch()
-+	m.periodicCycle.Store(false) // H: the results are of the old network; the groups take the new ones at once
- 	if !m.startCycleOnce() {
- 		// a cycle is running: its results may predate the change, so it runs once more
- 		m.cycleAgain.Store(true)
-@@ -165,7 +170,6 @@ func (m *OutboundMonitoring) Name() string {
- }
- 
- func (m *OutboundMonitoring) OutboundsHistory(groupTag string) map[string]*adapter.URLTestHistory {
--
- 	histories := make(map[string]*adapter.URLTestHistory)
- 
- 	registry := m.reg()
-@@ -178,9 +182,8 @@ func (m *OutboundMonitoring) OutboundsHistory(groupTag string) map[string]*adapt
- 	}
- 	//m.logger.Debug("collecting history for group ", groupTag, " with ", len(grp.outbounds), " outbounds")
- 	for outboundTag := range grp.outbounds {
--		histories[outboundTag] = m.confirmed(groupTag, outboundTag, m.getUrlTest(outboundTag)) //H
-+		histories[outboundTag] = m.confirmed(groupTag, outboundTag, m.getUrlTest(outboundTag)) // H
- 		// m.logger.Error("checking history for outbound ", outboundTag)
--
- 	}
- 	return histories
- }
-@@ -206,7 +209,6 @@ func (m *OutboundMonitoring) getUrlTest(outboundTag string) *adapter.URLTestHist
- 	his.IsFromCache = state.from_cache
- 	state.mu.Unlock()
- 	return &his
--
- }
- 
- func (m *OutboundMonitoring) getMinGroupOutboundHistory(groupTag string) *adapter.URLTestHistory {
-@@ -226,18 +228,18 @@ func (m *OutboundMonitoring) getMinGroupOutboundHistory(groupTag string) *adapte
- 				minHis = his
- 			} else if his.Delay < minHis.Delay {
- 				minHis.Delay = his.Delay
--				minHis.IpInfo, minHis.IpInfoFromCache = his.IpInfo, his.IpInfoFromCache //H
-+				minHis.IpInfo, minHis.IpInfoFromCache = his.IpInfo, his.IpInfoFromCache // H
- 			} else if minHis.IpInfo == nil {
--				minHis.IpInfo, minHis.IpInfoFromCache = his.IpInfo, his.IpInfoFromCache //H
-+				minHis.IpInfo, minHis.IpInfoFromCache = his.IpInfo, his.IpInfoFromCache // H
- 			}
- 		} else {
- 			if minHisFromCache == nil {
- 				minHisFromCache = his
- 			} else if his.Delay < minHisFromCache.Delay {
- 				minHisFromCache.Delay = his.Delay
--				minHisFromCache.IpInfo, minHisFromCache.IpInfoFromCache = his.IpInfo, his.IpInfoFromCache //H
-+				minHisFromCache.IpInfo, minHisFromCache.IpInfoFromCache = his.IpInfo, his.IpInfoFromCache // H
- 			} else if minHisFromCache.IpInfo == nil {
--				minHisFromCache.IpInfo, minHisFromCache.IpInfoFromCache = his.IpInfo, his.IpInfoFromCache //H
-+				minHisFromCache.IpInfo, minHisFromCache.IpInfoFromCache = his.IpInfo, his.IpInfoFromCache // H
- 			}
- 		}
- 	}
-@@ -246,17 +248,17 @@ func (m *OutboundMonitoring) getMinGroupOutboundHistory(groupTag string) *adapte
- 	if minHis == nil || minHis.Delay >= TimeoutDelay {
- 		final = minHisFromCache
- 	} else if minHisFromCache != nil && minHis.IpInfo == nil {
--		final.IpInfo, final.IpInfoFromCache = minHisFromCache.IpInfo, minHisFromCache.IpInfoFromCache //H
-+		final.IpInfo, final.IpInfoFromCache = minHisFromCache.IpInfo, minHisFromCache.IpInfoFromCache // H
- 	}
- 
- 	return final
--
- }
- 
- func (m *OutboundMonitoring) RoutedConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) net.Conn {
- 	m.Touch()
- 	return conn
- }
-+
- func (m *OutboundMonitoring) RoutedPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) N.PacketConn {
- 	m.Touch()
- 	return conn
-@@ -292,7 +294,7 @@ func NewOutboundMonitoring(ctx context.Context, logger log.ContextLogger, option
+@@ -308,6 +308,9 @@ func NewOutboundMonitoring(ctx context.Context, logger log.ContextLogger, option
  	if options.DebounceWindow <= 0 {
  		options.DebounceWindow = badoption.Duration(defaultDebounceWindow)
  	}
--	onDemand := onDemandTimeouts(options.OnDemandTimeouts) //H
-+	onDemand := onDemandTimeouts(options.OnDemandTimeouts) // H
++	if options.IpInfoURL == "" {
++		options.IpInfoURL = options.LegacyIpInfoURL
++	}
+ 	onDemand := onDemandTimeouts(options.OnDemandTimeouts) //H
  
  	cloned := append([]string(nil), options.URLs...)
- 	if len(cloned) == 0 {
-@@ -314,9 +316,10 @@ func NewOutboundMonitoring(ctx context.Context, logger log.ContextLogger, option
- 		cancel:          cancel,
- 		urls:            cloned,
- 		ipInfoURL:       options.IpInfoURL,
--		ipv6Probe:       ipv6ProbeAddress(options.IPv6Probe), //H
-+		ipv6:            make(map[string]*ipv6Knowledge), // H
-+		verifyIPv6:      options.VerifyIPv6,              // H
-+		ipv6Declared:    options.IPv6Declared,            // H
+@@ -334,7 +337,6 @@ func NewOutboundMonitoring(ctx context.Context, logger log.ContextLogger, option
+ 		verifyIPv6:      options.VerifyIPv6,              //H
+ 		ipv6Declared:    options.IPv6Declared,            //H
  		pause:           service.FromContext[pause.Manager](ctx),
 -		started:         false,
  		logger:          logger,
  		outboundManager: service.FromContext[adapter.OutboundManager](ctx),
  		endpointManager: service.FromContext[adapter.EndpointManager](ctx),
-@@ -328,14 +331,14 @@ func NewOutboundMonitoring(ctx context.Context, logger log.ContextLogger, option
- 		workersCount:   options.Workers,
- 		urlTestTimeout: options.URLTestTimeout.Build(),
- 		debounceWindow: options.DebounceWindow.Build(),
--		onDemand:       onDemand, //H
-+		onDemand:       onDemand, // H
- 
- 		normalQueue: make(chan *testTask, 10000),
- 	}
- 	m.registry.Store(newMonitoringRegistry())
--	if service.FromContext[adapter.IPv6Capability](ctx) == nil { //H: what the DNS router and the route ask
--		service.MustRegister[adapter.IPv6Capability](ctx, m) //H
--	} //H
-+	if service.FromContext[adapter.IPv6Capability](ctx) == nil { // H: what the DNS router and the route ask
-+		service.MustRegister[adapter.IPv6Capability](ctx, m) // H
-+	} // H
- 
- 	return m, nil
- }
-@@ -356,6 +359,7 @@ func (m *OutboundMonitoring) Start(stage adapter.StartStage, scope *adapter.Scop
- 		m.logger.Info("registered ", len(registry.outbounds), " outbounds for monitoring")
- 		m.logger.Info("registered ", len(registry.groups), " outbound groups for monitoring")
- 		m.loadHistory()
-+		m.seedIPv6Knowledge() // H: what the cache and the links' declarations say
- 	case adapter.StartStatePostStart:
- 		for i := 0; i < m.workersCount; i++ {
- 			m.workerWG.Add(1)
-@@ -366,7 +370,7 @@ func (m *OutboundMonitoring) Start(stage adapter.StartStage, scope *adapter.Scop
+@@ -390,11 +392,11 @@ func (m *OutboundMonitoring) Start(stage adapter.StartStage, scope *adapter.Scop
  			go m.groupNotifierLoop(grp)
  		}
  
--		m.started = true
-+		m.started.Store(true)
- 		m.testSelections() // H: the selected proxies first, before the cycle Touch starts
+-		m.access.Lock()     //H
+-		m.started = true    //H: read by Touch and NetworkChanged under access
+-		m.access.Unlock()   //H
+-		m.keepTopEvaluate() // H: the selectors have their selection now
+-		m.testSelections()  // H: the selected proxies first, before the cycle Touch starts
++		m.access.Lock()       //H
++		m.started.Store(true) //H: read by Touch and NetworkChanged under access
++		m.access.Unlock()     //H
++		m.keepTopEvaluate()   // H: the selectors have their selection now
++		m.testSelections()    // H: the selected proxies first, before the cycle Touch starts
  		m.Touch()
  	}
-@@ -379,11 +383,13 @@ func (m *OutboundMonitoring) startTimerWorkers() {
- 		return
- 	}
- 	m.mainTicker = time.NewTicker(m.mainInterval)
-+	m.lastActive.Store(time.Now()) // H: the Touch that restarts the workers is activity too
  
- 	m.pauseCallback = pause.RegisterTicker(m.pause, m.mainTicker, m.mainInterval, nil)
- 	m.schedulerWG.Add(1)
- 	go m.scheduleLoop(m.mainTicker) // H: the field is cleared by stopTimerWorkers
- }
-+
- func (m *OutboundMonitoring) stopTimerWorkers() {
- 	m.access.Lock() // H: mainTicker is also read by Touch
- 	defer m.access.Unlock()
-@@ -458,15 +464,16 @@ func (m *OutboundMonitoring) signalChange(outboundTag string, visited map[string
- 		m.signalChange(dependent, visited)
- 	}
- }
-+
- func (m *OutboundMonitoring) TestNow(outboundTag string) error {
- 	m.testParents(outboundTag, true)
--	return m.testNow(outboundTag, true)
-+	return m.testNow(outboundTag, true, "asked for by the app") // H
- }
--func (m *OutboundMonitoring) testNow(outboundTag string, priority bool) error {
--	m.logger.Info("testing outbound ", outboundTag, " with priority: ", priority)
-+
-+func (m *OutboundMonitoring) testNow(outboundTag string, priority bool, reason string) error { // H: reason
- 	if grp, ok := m.reg().groups[outboundTag]; ok {
- 		for tag := range grp.outbounds {
--			m.testNow(tag, false)
-+			m.testNow(tag, false, "member of "+outboundTag+", "+reason) // H
- 		}
- 	} else {
- 		state := m.getState(outboundTag)
-@@ -476,13 +483,14 @@ func (m *OutboundMonitoring) testNow(outboundTag string, priority bool) error {
- 
- 		task := &testTask{
- 			outboundTag: outboundTag,
--			cycleID:     m.cycleSeq,
-+			cycleID:     m.cycleSeq.Load(),
- 			priority:    priority,
--			staged:      priority, //H
-+			staged:      priority, // H
-+			reason:      reason,   // H
- 		}
- 
- 		if !m.enqueueTask(task) {
--			// return errors.New("test already queued")
-+			m.logger.Info("MONITORING ", outboundTag, ": not tested again (", reason, "): a test of it is queued or running, or it is unknown") // H
- 		}
- 	}
- 	return nil
-@@ -494,11 +502,9 @@ func (m *OutboundMonitoring) testParents(outboundTag string, first bool) {
- 		return
- 	}
- 	if _, ok := m.reg().groups[outboundTag]; !ok && !first {
--		m.logger.Info("testing outbound ", outboundTag)
--		m.testNow(outboundTag, true)
-+		m.testNow(outboundTag, true, "goes through what changed") // H
- 	}
- 	for _, dep := range state.dependenciesInverse {
--		m.logger.Info("testing parent outbound ", dep, " of ", outboundTag)
- 		m.testParents(dep, false)
- 	}
- }
-@@ -515,15 +521,15 @@ func (m *OutboundMonitoring) InvalidateTest(outboundTag string) error {
- 
- 	m.enqueueTask(&testTask{
- 		outboundTag: outboundTag,
--		cycleID:     m.cycleSeq,
-+		cycleID:     m.cycleSeq.Load(),
- 		priority:    true,
-+		reason:      "a connection through it failed", // H
- 	})
- 
- 	return nil
- }
- 
- func (m *OutboundMonitoring) SubscribeGroup(groupTag string) (observer <-chan GroupEvent, err error) {
--
- 	if g, ok := m.reg().groups[groupTag]; ok {
- 		// Buffer a few events so a selection flush is not dropped while the subscriber
- 		// is coalescing the previous URL-test update.
-@@ -531,6 +537,7 @@ func (m *OutboundMonitoring) SubscribeGroup(groupTag string) (observer <-chan Gr
- 	}
- 	return nil, E.New("group not found ", groupTag)
- }
-+
- func (m *OutboundMonitoring) UnsubscribeGroup(groupTag string, observer <-chan GroupEvent) (err error) {
- 	if g, ok := m.reg().groups[groupTag]; ok {
- 		g.observer.Unsubscribe(observer)
-@@ -541,6 +548,8 @@ func (m *OutboundMonitoring) UnsubscribeGroup(groupTag string, observer <-chan G
- 
- func (m *OutboundMonitoring) Close() error {
+@@ -581,9 +583,11 @@ func (m *OutboundMonitoring) Close() error {
  	m.closerOnce.Do(func() {
-+		m.started.Store(false) // H: stop concurrent Touch calls
-+		m.cancel()             // H: release active dialers before waiting for workers
+ 		// H: a Touch after this (a URL test group dials on every connection) restarted the
+ 		// workers: a scheduler outside the WaitGroup Wait below, Add racing the Wait
+-		m.access.Lock()   //H
+-		m.closed = true   //H
++		m.access.Lock() //H
++		m.closed = true //H
++		m.started.Store(false)
+ 		m.access.Unlock() //H
++		m.cancel()
  		m.stopTimerWorkers()
  		m.access.Lock()
  		if m.networkRetest != nil {
-@@ -559,7 +568,6 @@ func (m *OutboundMonitoring) Close() error {
- 		m.cancel()
+@@ -599,7 +603,6 @@ func (m *OutboundMonitoring) Close() error {
+ 				g.observer.Close()
+ 			}
+ 		}
+-		m.cancel()
  		m.workerWG.Wait()
  		m.schedulerWG.Wait()
--
- 	})
- 	return nil
- }
-@@ -578,7 +586,8 @@ func (m *OutboundMonitoring) scheduleLoop(ticker *time.Ticker) {
- 				m.stopTimerWorkers()
- 				return
- 			}
--			m.startCycleOnce()
-+			m.startCycle(true) // H: a regular cycle, during which the groups hold
-+
- 		}
- 	}
- }
-@@ -610,14 +619,21 @@ func (m *OutboundMonitoring) executeTask(task *testTask) {
- 	}
  
- 	state.mu.Lock()
-+	if state.testing { // H: a test of it runs: its result is this one's, see joinRunningTest
-+		state.mu.Unlock()
-+		if task.priority {
-+			m.joinRunningTest(task, state)
-+		} else {
-+			go m.joinRunningTest(task, state) // the worker is not held for the running test
-+		}
-+		return
-+	}
+@@ -665,14 +668,10 @@ func (m *OutboundMonitoring) executeTask(task *testTask) {
+ 		return
+ 	}
  	state.testing = true
+-	state.testDone = make(chan struct{}) //H
 +	task.testDone = make(chan struct{}) // H: this execution owns its completion signal
 +	state.testDone = task.testDone      // H
  	state.mu.Unlock()
 -	defer func() {
 -		state.mu.Lock()
 -		state.testing = false
+-		close(state.testDone) //H
 -		state.mu.Unlock()
 -	}()
--	if task.waits < dependencyWaits && (!adapter.IsReady(state.outbound) || !m.dependenciesReady(state)) { //H
 +	defer m.finishRunningTest(state, task.testDone)                                                        // H
-+	if task.waits < dependencyWaits && (!adapter.IsReady(state.outbound) || !m.dependenciesReady(state)) { // H
+ 	if task.waits < dependencyWaits && (!adapter.IsReady(state.outbound) || !m.dependenciesReady(state)) { //H
  		reason := "not ready"
  		if adapter.IsReady(state.outbound) {
- 			reason = "detour not ready"
-@@ -627,10 +643,10 @@ func (m *OutboundMonitoring) executeTask(task *testTask) {
- 			select {
- 			case <-m.ctx.Done():
- 				return
--			case <-time.After(dependencyWait): //H
-+			case <-time.After(dependencyWait): // H
- 			}
- 			state.mu.Lock()
--			task.waits++ //H
-+			task.waits++ // H
- 			task.cycleID++
- 			state.priorityQueued = false // H: the retry queues it again; left set, every URL test of it was dropped
- 			state.mu.Unlock()
-@@ -642,12 +658,14 @@ func (m *OutboundMonitoring) executeTask(task *testTask) {
- 	go func() {
- 		defer close(done)
- 		state.mu.Lock()
--		worked := !state.from_cache && state.history.Delay != 0 && state.history.Delay < TimeoutDelay //H
-+		worked := state.workedLocked()                                 // H
-+		known, knownFromCache := state.history.Delay, state.from_cache // H
- 		state.mu.Unlock()
--		interim := func(history adapter.URLTestHistory, tentative bool) { m.applyInterim(task, state, history, tentative) } //H
-+		m.logger.Info("MONITORING test ", task.outboundTag, ": ", task.reason, testKind(task, known, knownFromCache))       // H
-+		interim := func(history adapter.URLTestHistory, tentative bool) { m.applyInterim(task, state, history, tentative) } // H
- 		networkSeq := m.networkSeq.Load()
--		delay, err := m.tester(m.ctx, task.outboundTag, interim, task.staged)
--		for err != nil && m.networkSeq.Load() != networkSeq { //H: a network reset broke the test
-+		delay, err := m.tester(m.ctx, task.outboundTag, interim, task.staged, worked)
-+		for err != nil && m.networkSeq.Load() != networkSeq { // H: a network reset broke the test
- 			m.logger.Info("outbound ", task.outboundTag, " test broken by a network reset, testing again")
- 			networkSeq = m.networkSeq.Load()
- 			select {
-@@ -655,36 +673,40 @@ func (m *OutboundMonitoring) executeTask(task *testTask) {
- 				return
- 			case <-time.After(networkResetWait):
- 			}
--			delay, err = m.tester(m.ctx, task.outboundTag, interim, task.staged)
-+			delay, err = m.tester(m.ctx, task.outboundTag, interim, task.staged, worked)
- 		}
--		m.settle(task, state, delay, err, worked) //H
-+		m.settle(task, state, delay, err, worked) // H
- 	}()
- 	select {
- 	case <-m.ctx.Done():
- 		return
- 	case <-done:
--	case <-time.After(m.testHardLimit(task)): //H: the outbound ignored its deadline; see settleLate
-+	case <-time.After(m.testHardLimit(task)): // H: the outbound ignored its deadline; see settleLate
- 		m.settleLate(task, state)
- 	}
--
- }
+@@ -740,6 +739,9 @@ func (m *OutboundMonitoring) tester(parent context.Context, tag string, interim
  
- // tester runs the URL test and, when it answers, the IP lookup. The delay goes to interim as
--// soon as the URL test answers, before the lookup, which can take as long again. //H
--func (m *OutboundMonitoring) tester(parent context.Context, tag string, interim func(adapter.URLTestHistory, bool), staged bool) (adapter.URLTestHistory, error) {
-+// soon as the URL test answers, before the lookup, which can take as long again. worked says
-+// whether the outbound has a working result of this run, see stagedURLTest. //H
-+func (m *OutboundMonitoring) tester(parent context.Context, tag string, interim func(adapter.URLTestHistory, bool), staged bool, worked bool) (adapter.URLTestHistory, error) {
- 	out, ok := m.reg().outbounds[tag]
- 	if !ok {
- 		return adapter.URLTestHistory{Delay: 0}, errors.New("outbound not registered")
- 	}
- 
+ 	release := adapter.AcquireOutbound(out.outbound) //H: a lazy outbound stays over the test's connections
+ 	defer release()                                  //H
 +	out.mu.Lock()
 +	previous := out.history
 +	out.mu.Unlock()
-+
  	idx := m.currentLinkIndex.Load()
+ 	factor := m.timeoutFactor(out.outbound) //H
  
--	var ( //H
-+	var ( // H
- 		delay uint16
- 		err   error
- 	)
--	if staged { //H
--		delay, err = m.stagedURLTest(parent, m.urls[idx], out.outbound, interim)
-+	if staged { // H
-+		delay, err = m.stagedURLTest(parent, m.urls[idx], out.outbound, interim, worked)
- 	} else {
- 		ctx, cancel := context.WithTimeout(parent, m.urlTestTimeout)
- 		defer cancel()
-@@ -697,7 +719,7 @@ func (m *OutboundMonitoring) tester(parent context.Context, tag string, interim
- 	}
- 	if err != nil || delay >= TimeoutDelay {
- 		his.Delay = TimeoutDelay
--		m.logger.Warn("outbound ", tag, " URL test failed: ", err)
-+		m.logger.Warn("MONITORING result ", tag, ": failed: ", err) // H
- 		return his, err
- 	}
- 	select {
-@@ -705,40 +727,55 @@ func (m *OutboundMonitoring) tester(parent context.Context, tag string, interim
- 		return his, parent.Err()
- 	default:
- 	}
--	if interim != nil { //H
-+	if interim != nil { // H
+@@ -772,17 +774,24 @@ func (m *OutboundMonitoring) tester(parent context.Context, tag string, interim
+ 	if interim != nil { //H
  		interim(his, false)
  	}
--	his.IPv6 = m.ipv6Of(parent, out)                              //H
+-	if m.verifyIPv6 && (out.history.IPv6 == nil || out.history.IPv6FromCache) { //H: once per run, like the IP lookup
++	if m.verifyIPv6 && (previous.IPv6 == nil || previous.IPv6FromCache) { //H: once per run, like the IP lookup
+ 		his.IPv6 = m.verifyIPv6Of(parent, out, m.urls[idx]) //H
+ 	} //H
 -	if out.history.IpInfo == nil || out.history.IpInfoFromCache { //H: until looked up in this run
-+	if m.verifyIPv6 && (previous.IPv6 == nil || previous.IPv6FromCache) { // H: once per run, like the IP lookup
-+		his.IPv6 = m.verifyIPv6Of(parent, out, m.urls[idx]) // H
-+	} // H
-+	if previous.IpInfo == nil || previous.IpInfoFromCache { // H: until looked up in this run
++	if previous.IpInfo == nil || previous.IpInfoFromCache { //H: until looked up in this run
  
- 		ctx, cancel2 := context.WithTimeout(parent, m.urlTestTimeout)
+ 		ctx, cancel2 := context.WithTimeout(parent, factor*m.urlTestTimeout) //H
  		defer cancel2()
  
 -		newip, t, err := ipinfo.GetIpInfo(m.logger, ctx, out.outbound, m.ipInfoURL)
@@ -2452,76 +701,7 @@ index d27cc83028faec8b05140900291132a5ae583d46..05914a8b8712a9fd23e29a62f6319f79
  			if t < his.Delay {
  				his.Delay = t
  			}
- 		}
- 	}
- 	if his.IpInfo != nil {
--		m.logger.Info("outbound ", tag, " IP ", fmt.Sprint(his.IpInfo), " (", his.Delay, "ms): ", err)
-+		m.logger.Info("MONITORING result ", tag, ": ", his.Delay, " ms, IP ", fmt.Sprint(his.IpInfo)) // H
- 	} else {
--		m.logger.Info("outbound ", tag, " , IP: -          (", his.Delay, "ms)")
-+		m.logger.Info("MONITORING result ", tag, ": ", his.Delay, " ms, IP unknown") // H
- 	}
- 	return his, nil
- }
- 
- func (m *OutboundMonitoring) startCycleOnce() bool {
-+	return m.startCycle(false) // H
-+}
-+
-+func (m *OutboundMonitoring) startCycle(periodic bool) bool { // H
- 	if !m.cycleRunning.CompareAndSwap(false, true) {
- 		return false
- 	}
-+	m.periodicCycle.Store(periodic)  // H
-+	m.cycleStarted.Store(time.Now()) // H
- 	go func() {
--		defer m.cycleRunning.Store(false)
-+		defer m.endCycle() // H: tells the groups, which held their selection during it
- 		m.logger.Info("starting regular outbound monitoring cycle")
- 		m.runCycle()
--		for m.cycleAgain.Swap(false) {
-+		for m.cycleAgain.Swap(false) { // periodicCycle is already false: retestAll cleared it
- 			m.logger.Info("running the monitoring cycle again after a network change")
- 			m.runCycle()
- 		}
-@@ -747,8 +784,10 @@ func (m *OutboundMonitoring) startCycleOnce() bool {
- }
- 
- func (m *OutboundMonitoring) runCycle() {
--	cycleID := atomic.AddUint64(&m.cycleSeq, 1)
-+	cycleID := m.cycleSeq.Add(1)
- 	tags := m.collectCycleTargets()
-+	m.logger.Info("MONITORING cycle ", cycleID, " starts: ", len(tags), " outbounds due (periodic: ", m.periodicCycle.Load(), ")") // H
-+	defer m.logger.Info("MONITORING cycle ", cycleID, " ends")                                                                     // H
- 
- 	if len(tags) == 0 {
- 		return
-@@ -759,7 +798,7 @@ func (m *OutboundMonitoring) runCycle() {
- 		}
- 	}()
- 
--	for idx, _ := range m.urls {
-+	for idx := range m.urls {
- 		outcomes := m.runStage(cycleID, tags)
- 		success := 0
- 		for _, result := range outcomes {
-@@ -778,6 +817,7 @@ func (m *OutboundMonitoring) runStage(cycleID uint64, tags []string) []testOutco
- 	resultCh := make(chan testOutcome, len(tags))
- 
- 	expected := 0
-+	reason := fmt.Sprint("cycle ", cycleID) // H
- 	for _, tag := range tags {
- 		state := m.getState(tag)
- 		if state == nil {
-@@ -789,6 +829,7 @@ func (m *OutboundMonitoring) runStage(cycleID uint64, tags []string) []testOutco
- 			cycleID:     cycleID,
- 			priority:    false,
- 			resultCh:    resultCh,
-+			reason:      reason, // H
- 		}
- 		if m.enqueueTask(task) {
- 			expected++
-@@ -812,7 +853,6 @@ func (m *OutboundMonitoring) runStage(cycleID uint64, tags []string) []testOutco
+@@ -888,7 +897,6 @@ func (m *OutboundMonitoring) runStage(cycleID uint64, tags []string) []testOutco
  }
  
  func (m *OutboundMonitoring) enqueueTask(task *testTask) bool {
@@ -2529,7 +709,7 @@ index d27cc83028faec8b05140900291132a5ae583d46..05914a8b8712a9fd23e29a62f6319f79
  	select {
  	case <-m.ctx.Done():
  		return false
-@@ -824,6 +864,7 @@ func (m *OutboundMonitoring) enqueueTask(task *testTask) bool {
+@@ -900,6 +908,7 @@ func (m *OutboundMonitoring) enqueueTask(task *testTask) bool {
  	}
  	state.mu.Lock()
  	defer state.mu.Unlock()
@@ -2537,7 +717,7 @@ index d27cc83028faec8b05140900291132a5ae583d46..05914a8b8712a9fd23e29a62f6319f79
  
  	if task.priority {
  		if state.priorityQueued {
-@@ -847,6 +888,7 @@ func (m *OutboundMonitoring) enqueueTask(task *testTask) bool {
+@@ -923,6 +932,7 @@ func (m *OutboundMonitoring) enqueueTask(task *testTask) bool {
  	case m.normalQueue <- task:
  		return true
  	default:
@@ -2545,141 +725,41 @@ index d27cc83028faec8b05140900291132a5ae583d46..05914a8b8712a9fd23e29a62f6319f79
  		return false
  	}
  }
-@@ -874,19 +916,24 @@ func (m *OutboundMonitoring) applyResult(outcome testOutcome) *adapter.URLTestHi
- 	}
- 	state.history.Delay = outcome.history.Delay
- 	state.history.Time = outcome.history.Time
-+	state.history.Error = testError(outcome.err) // H
- 	state.from_cache = false
--	state.tentative = false //H
-+	state.tentative = false // H
- 	if outcome.history.IpInfo != nil {
- 		state.history.IpInfo = outcome.history.IpInfo
--		state.history.IpInfoFromCache = false //H
-+		state.history.IpInfoFromCache = false // H
- 	}
--	if outcome.history.IPv6 != nil { //H
--		state.history.IPv6 = outcome.history.IPv6 //H
--	} //H
+@@ -966,10 +976,11 @@ func (m *OutboundMonitoring) applyResult(outcome testOutcome) *adapter.URLTestHi
+ 		m.cacheDirty.Store(true)                                 //H
+ 		m.recordIPv6(outcome.outboundTag, *outcome.history.IPv6) //H
+ 	} //H
 -	m.history.StoreURLTestHistory(outcome.outboundTag, &state.history)
-+	if outcome.history.IPv6 != nil { // H: verified at this test
-+		state.history.IPv6 = outcome.history.IPv6                // H
-+		state.history.IPv6FromCache = false                      // H
-+		m.cacheDirty.Store(true)                                 // H
-+		m.recordIPv6(outcome.outboundTag, *outcome.history.IPv6) // H
-+	} // H
-+	snapshot := state.history                                     // H: readers own an immutable snapshot
-+	m.history.StoreURLTestHistory(outcome.outboundTag, &snapshot) // H
++	snapshot := state.history // H: immutable history snapshot
++	m.history.StoreURLTestHistory(outcome.outboundTag, &snapshot)
  
  	m.emitGroupEvent(state.groupTags)
 -	return &state.history
-+	return &snapshot // H
++	return &snapshot
  }
  
  func mergeIpInfo(old, new *ipinfo.IpInfo) *ipinfo.IpInfo {
-@@ -907,7 +954,6 @@ func mergeIpInfo(old, new *ipinfo.IpInfo) *ipinfo.IpInfo {
- }
- 
- func (m *OutboundMonitoring) collectCycleTargets() []string {
--
- 	tags := make([]string, 0, len(m.reg().outbounds))
- 
- 	delays := make(map[string]uint16, len(tags))
-@@ -938,17 +984,19 @@ func (m *OutboundMonitoring) collectCycleTargets() []string {
- }
- 
+@@ -1020,7 +1031,7 @@ func (m *OutboundMonitoring) collectCycleTargets() []string {
  func (m *OutboundMonitoring) Touch() {
--	if !m.started {
-+	if !m.started.Load() {
- 		return
- 	}
  	m.access.Lock()
  	defer m.access.Unlock()
-+	if !m.started.Load() || m.ctx.Err() != nil {
-+		return
-+	} // H: Close may have won the lock
- 	if m.mainTicker != nil {
- 		m.lastActive.Store(time.Now())
+-	if !m.started || m.closed { //H
++	if !m.started.Load() || m.closed || m.ctx.Err() != nil { //H
  		return
  	}
- 	m.startTimerWorkers()
--
- }
- 
- func (m *OutboundMonitoring) emitGroupEvent(groupTags []string) {
-@@ -1072,7 +1120,9 @@ func (m *OutboundMonitoring) retestDependents(tag string, visited map[string]boo
- 	visited[tag] = true
- 	for _, dependent := range state.dependenciesInverse {
- 		if _, isGroup := m.reg().groups[dependent]; isGroup {
--			m.retestDependents(dependent, visited)
-+			if m.groupUses(dependent, tag) { // H: what goes through the group was measured through tag only if it uses tag
-+				m.retestDependents(dependent, visited)
-+			} // H
- 			continue
- 		}
- 		dependentState := m.getState(dependent)
-@@ -1083,7 +1133,7 @@ func (m *OutboundMonitoring) retestDependents(tag string, visited map[string]boo
- 		tested := !dependentState.from_cache && dependentState.history.Delay != 0
- 		dependentState.mu.Unlock()
- 		if tested {
--			m.testNow(dependent, true)
-+			m.testNow(dependent, true, "measured through "+tag+", which works again") // H
- 		}
- 	}
- }
-@@ -1098,7 +1148,6 @@ func RealTag(detour adapter.Outbound) string {
- }
- 
- func (m *OutboundMonitoring) groupNotifierLoop(grp *groupState) {
--
- 	defer m.schedulerWG.Done()
- 
- 	var (
-@@ -1142,13 +1191,15 @@ func (m *OutboundMonitoring) getState(tag string) *outboundState {
+ 	if m.mainTicker != nil {
+@@ -1224,8 +1235,9 @@ func (m *OutboundMonitoring) getState(tag string) *outboundState {
  }
  
  type testTask struct {
 -	settled     atomic.Bool // H: its result is in, or it was given up on; the other of the two is dropped
 -	staged      bool        // H: asked for by a tap or a selection: tested in stages, see stagedURLTest
-+	testDone    chan struct{} // H: completion belongs to this task, not a later execution
++	testDone    chan struct{} // H: completion belongs to this execution
 +	settled     atomic.Bool   // H: its result is in, or it was given up on; the other of the two is dropped
 +	staged      bool          // H: asked for by a tap or a selection: tested in stages, see stagedURLTest
  	outboundTag string
  	cycleID     uint64
  	priority    bool
- 	resultCh    chan<- testOutcome
--	waits       int // H: times it waited for the outbound or its detour to be ready
-+	waits       int    // H: times it waited for the outbound or its detour to be ready
-+	reason      string // H: why the test runs, for the MONITORING log
- }
- 
- type testOutcome struct {
-@@ -1173,6 +1224,7 @@ type outboundState struct {
- 	queued         bool
- 	priorityQueued bool
- 	testing        bool
-+	testDone       chan struct{} // H: closed when the running test is over, see joinRunningTest
- 	enqueuedCycle  uint64
- 	from_cache     bool
- 	// H: history is a staged test's early miss, not a result; confirmed is the last result
-@@ -1228,6 +1280,7 @@ func (m *OutboundMonitoring) saveHistory() error {
- 	})
- 	return nil
- }
-+
- func (m *OutboundMonitoring) loadHistory() *History {
- 	history := &History{}
- 	if m.cache == nil {
-@@ -1252,7 +1305,8 @@ func (m *OutboundMonitoring) loadHistory() *History {
- 			}
- 			state.mu.Lock()
- 			state.history = *his
--			state.history.IpInfoFromCache = his.IpInfo != nil //H
-+			state.history.IpInfoFromCache = his.IpInfo != nil // H
-+			state.history.IPv6FromCache = his.IPv6 != nil     // H
- 			state.from_cache = true
- 			state.mu.Unlock()
- 		}
 diff --git a/common/monitoring/queue_regression_test.go b/common/monitoring/queue_regression_test.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..a6ff2ae34923b863fc3c640ae0bc4e1cbb4fba4c

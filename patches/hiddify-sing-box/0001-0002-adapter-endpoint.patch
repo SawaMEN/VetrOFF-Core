@@ -41,10 +41,10 @@ index 2b453eab561435438d4171fed363cf2e333416a2..c0dc068d1c472c362c7fc74bc69de21c
  	}
  }
 diff --git a/adapter/endpoint/manager.go b/adapter/endpoint/manager.go
-index 91947b0f3dc19d08ae1bf807844f865b0a7c34f4..fa299dbb98ef146e0b4e7e0a113f0ac8c03ccb84 100644
+index 2973a2242fabc54bd3d61d5835c9259efddf79dc..746eb4d528ca7cf9a6b80e839fa5565d8f11ba43 100644
 --- a/adapter/endpoint/manager.go
 +++ b/adapter/endpoint/manager.go
-@@ -96,38 +96,31 @@ func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.
+@@ -100,39 +100,32 @@ func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.
  		return err
  	}
  	m.access.Lock()
@@ -85,6 +85,7 @@ index 91947b0f3dc19d08ae1bf807844f865b0a7c34f4..fa299dbb98ef146e0b4e7e0a113f0ac8
 +		m.endpoints = append(slices.Clone(m.endpoints), endpoint)
  	}
  	m.endpointByTag[tag] = endpoint
+ 	m.insecure[tag] = option.InsecureReason(options) //H
  	m.access.Unlock()
  	if replaced {
 -		err = adapter.CloseLate(m.scope, existsEndpoint)

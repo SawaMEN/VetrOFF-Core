@@ -1,0 +1,155 @@
+diff --git a/protocol/awg/endpoint.go b/protocol/awg/endpoint.go
+index 097cbf18968f6dafc5a1dccabf1a383dd4ae78af..f386072f728f9c268f5fb37b3644d568ccc62884 100644
+--- a/protocol/awg/endpoint.go
++++ b/protocol/awg/endpoint.go
+@@ -115,7 +115,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 		return nil, err
+ 	}
+ 
+-	logger.Debug("AWG IPC config:\n", ipc)
++	logger.Debug("AWG IPC configuration prepared")
+ 
+ 	dev, err := awg.NewDevice(ctx, logger, dial, ipc, awg.DeviceOpts{
+ 		UseIntegratedTun: options.UseIntegratedTun,
+@@ -123,12 +123,12 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 		AllowedIps:       allowedIps.Prefixes(),
+ 		ExcludedIps:      excludedIps.Prefixes(),
+ 		MTU:              options.MTU,
+-		Peer:             singlePeer(options.Peers),                            //H: one packet connection to the peer
+-		Reserved:         reserved,                                             //H
+-		MTUDiscovery:     options.MTUDiscovery == nil || *options.MTUDiscovery, //H
+-		Fallback:         fallback,                                             //H
+-		ListenPort:       options.ListenPort,                                   //H
+-		PeerPending:      len(options.Peers) == 1 && len(domainPeers) == 1,     //H: see h_domain_peer.go
++		Peer:             singlePeer(options.Peers),                        //H: one packet connection to the peer
++		Reserved:         reserved,                                         //H
++		MTUDiscovery:     options.MTUDiscovery,                             //H
++		Fallback:         fallback,                                         //H
++		ListenPort:       options.ListenPort,                               //H
++		PeerPending:      len(options.Peers) == 1 && len(domainPeers) == 1, //H: see h_domain_peer.go
+ 	})
+ 	if err != nil {
+ 		return nil, err
+@@ -212,8 +212,17 @@ func genIpcConfig(opts option.AwgEndpointOptions, resolvePeer func(domain string
+ 		s += "\ni5=" + awg.I5
+ 	}
+ 	// AmneziaWG 3.x
++	if awg.HeaderProtectionKey != "" {
++		key, err := hex.DecodeString(awg.HeaderProtectionKey)
++		if err != nil || len(key) != 32 {
++			key, err = base64.StdEncoding.DecodeString(awg.HeaderProtectionKey)
++		}
++		if err != nil || len(key) != 32 {
++			return "", E.New("invalid AWG header protection key")
++		}
++		s += "\nheader_protection_key=" + hex.EncodeToString(key)
++	}
+ 	for _, setting := range []struct{ key, value string }{
+-		{"header_protection_key", awg.HeaderProtectionKey},
+ 		{"content_padding_addition", string(awg.ContentPaddingAddition)},
+ 		{"rekey_after_time", string(awg.RekeyAfterTime)},
+ 		{"rekey_timeout", string(awg.RekeyTimeout)},
+@@ -416,11 +425,11 @@ func (w *Endpoint) Status() adapter.Status { //H
+ 
+ // singlePeer is the address of the only peer, when there is one with an IP address. //H
+ func singlePeer(peers []option.AwgPeerOptions) netip.AddrPort {
+-	if len(peers) != 1 {
++	if len(peers) != 1 || peers[0].Port == 0 {
+ 		return netip.AddrPort{}
+ 	}
+-	address := M.ParseAddr(peers[0].Address)
+-	if !address.IsValid() || peers[0].Port == 0 {
++	address, err := netip.ParseAddr(peers[0].Address)
++	if err != nil {
+ 		return netip.AddrPort{}
+ 	}
+ 	return netip.AddrPortFrom(address, peers[0].Port)
+diff --git a/protocol/awg/h_endpoint_test.go b/protocol/awg/h_endpoint_test.go
+index a0be732144e9920cbadf691d153cd02de2e0bd5e..f7dbaed986292d95498b54bd5de777408702467c 100644
+--- a/protocol/awg/h_endpoint_test.go
++++ b/protocol/awg/h_endpoint_test.go
+@@ -291,8 +291,8 @@ func TestH_GenIpcConfigAWG3(t *testing.T) {
+ 	require.NoError(t, json.Unmarshal([]byte(`{
+ 		"s1": 20, "s2": 20, "s3": 20, "s4": 20, "h1": "100-200", "h2": "300-400", "h3": "500-600", "h4": "700-800",
+ 		"header_protection_key": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+-		"content_padding_addition": "0-32", "rekey_after_time": 120, "rekey_timeout": "5-7",
+-		"reject_after_time": 180, "keepalive_timeout": 10, "max_handshake_attempts": "18-20",
++		"content_padding_addition": "0-32", "rekey_after_time": "120", "rekey_timeout": "5-7",
++		"reject_after_time": "180", "keepalive_timeout": "10", "max_handshake_attempts": "18-20",
+ 		"random_trailers": true, "disable_cookies": true
+ 	}`), &awg))
+ 	require.True(t, awg.IsAvailble())
+@@ -368,3 +368,15 @@ func TestH_PeerAddresses(t *testing.T) {
+ 		peerAddresses([]netip.Addr{addr("::ffff:192.0.2.1"), addr("192.0.2.1"), addr("192.0.2.2"), addr("2001:db8::1")}, 1024))
+ 	require.Empty(t, peerAddresses(nil, 1024))
+ }
++
++func TestH_GenIpcConfigAWG3AcceptedByDevice(t *testing.T) {
++	key := hKey(t)
++	ipc, err := genIpcConfig(option.AwgEndpointOptions{PrivateKey: hKey(t).String(), Awg: option.AwgOptions{
++		S1: 20, S2: 20, S3: 20, S4: 20, HeaderProtectionKey: key.String(), ContentPaddingAddition: "5-10", RekeyAfterTime: "90-120",
++		RandomTrailers: true, DisableCookies: true,
++	}}, nil)
++	require.NoError(t, err)
++	require.Contains(t, ipc, "header_protection_key="+hHex(key))
++	require.Contains(t, ipc, "random_trailers=true")
++	require.NoError(t, hApplyIpc(t, ipc))
++}
+diff --git a/protocol/awg/h_netstack_close_test.go b/protocol/awg/h_netstack_close_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f0245778f223553b46395cd7957e9eae9c8c349
+--- /dev/null
++++ b/protocol/awg/h_netstack_close_test.go
+@@ -0,0 +1,40 @@
++//go:build with_awg
++
++package awg
++
++import (
++	"net/netip"
++	"sync"
++	"testing"
++
++	"github.com/amnezia-vpn/amneziawg-go/v3/tun/netstack"
++	"github.com/stretchr/testify/require"
++)
++
++func TestH_NetstackCloseWhileWriting(t *testing.T) {
++	for range 20 {
++		device, stack, err := netstack.CreateNetTUN([]netip.Addr{netip.MustParseAddr("10.0.0.1")}, nil, 1420)
++		require.NoError(t, err)
++		conn, err := stack.DialUDPAddrPort(netip.AddrPort{}, netip.MustParseAddrPort("10.0.0.2:53"))
++		require.NoError(t, err)
++		var writers sync.WaitGroup
++		for range 4 {
++			writers.Go(func() {
++				for range 100 {
++					if _, err := conn.Write([]byte("ping")); err != nil {
++						return
++					}
++				}
++			})
++		}
++		buffers, sizes := [][]byte{make([]byte, 2048)}, []int{0}
++		_, err = device.Read(buffers, sizes, 0)
++		require.NoError(t, err)
++		require.NoError(t, device.Close())
++		require.NoError(t, device.Close())
++		writers.Wait()
++		_ = conn.Close()
++		_, err = device.Read(buffers, sizes, 0)
++		require.Error(t, err)
++	}
++}
+diff --git a/protocol/awg/h_peer_fallback_test.go b/protocol/awg/h_peer_fallback_test.go
+index a9e4ab3764605171efe26ee28e50ed416432fa6a..1e8be5fdcd63f340d64254ba39667683a1bf670d 100644
+--- a/protocol/awg/h_peer_fallback_test.go
++++ b/protocol/awg/h_peer_fallback_test.go
+@@ -6,6 +6,7 @@ import (
+ 
+ 	"github.com/sagernet/sing-box/option"
+ 	"github.com/sagernet/sing/common/json/badoption"
++
+ 	"github.com/stretchr/testify/require"
+ )
+ 

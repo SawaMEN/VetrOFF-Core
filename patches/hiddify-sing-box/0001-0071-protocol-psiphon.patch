@@ -1,0 +1,829 @@
+diff --git a/protocol/psiphon/h_notice_test.go b/protocol/psiphon/h_notice_test.go
+index 3e3cdc9b26dacff938751d4dc0595e3c5e3a3fed..aba0b2b6370b7ff34cd6f4d7e88ff47b07fc4c00 100644
+--- a/protocol/psiphon/h_notice_test.go
++++ b/protocol/psiphon/h_notice_test.go
+@@ -9,9 +9,9 @@ import (
+ 	"testing"
+ 	"time"
+ 
+-	"github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon"
+ 	"github.com/sagernet/sing-box/log"
+ 
++	"github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon"
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+@@ -19,17 +19,17 @@ import (
+ // type assertion it replaced panicked.
+ func TestH_NoticeCount(t *testing.T) {
+ 	for _, test := range []struct {
+-		data  map[string]interface{}
++		data  map[string]any
+ 		count float64
+ 		ok    bool
+ 	}{
+-		{map[string]interface{}{"count": float64(2)}, 2, true},
+-		{map[string]interface{}{"count": 3}, 3, true},
+-		{map[string]interface{}{"count": int64(1)}, 1, true},
+-		{map[string]interface{}{"count": json.Number("4")}, 4, true},
+-		{map[string]interface{}{"count": "2"}, 0, false},
+-		{map[string]interface{}{"count": nil}, 0, false},
+-		{map[string]interface{}{}, 0, false},
++		{map[string]any{"count": float64(2)}, 2, true},
++		{map[string]any{"count": 3}, 3, true},
++		{map[string]any{"count": int64(1)}, 1, true},
++		{map[string]any{"count": json.Number("4")}, 4, true},
++		{map[string]any{"count": "2"}, 0, false},
++		{map[string]any{"count": nil}, 0, false},
++		{map[string]any{}, 0, false},
+ 		{nil, 0, false},
+ 	} {
+ 		count, ok := noticeCount(test.data)
+@@ -73,7 +73,7 @@ func TestH_NoticeHubSurvivesAnotherClose(t *testing.T) {
+ 
+ 	stopListeningNotices(current)
+ 	noticeHub.access.Lock()
+-	require.Empty(t, noticeHub.listeners, "with the last instance gone, a notice goes nowhere")
++	require.Empty(t, noticeHub.listeners, "the writer stays installed, but no instances remain registered")
+ 	noticeHub.access.Unlock()
+ }
+ 
+diff --git a/protocol/psiphon/h_psiphon_test.go b/protocol/psiphon/h_psiphon_test.go
+index 9b140a294335c4338371aca6e594e1cc61f97630..4d0a2b345075bd335322653950b5467fb0b6217f 100644
+--- a/protocol/psiphon/h_psiphon_test.go
++++ b/protocol/psiphon/h_psiphon_test.go
+@@ -3,6 +3,7 @@ package psiphon
+ import (
+ 	"context"
+ 	"encoding/base64"
++	"net"
+ 	"path/filepath"
+ 	"testing"
+ 	"time"
+@@ -40,9 +41,9 @@ func TestH_PsiphonBuildConfigDefaults(t *testing.T) {
+ 	require.Empty(t, config.EgressRegion)
+ 	require.NotNil(t, config.EstablishTunnelTimeoutSeconds)
+ 	require.Equal(t, 180, *config.EstablishTunnelTimeoutSeconds)
+-	require.Equal(t, defaultDataDirectory, config.MigrateDataStoreDirectory)
+-	require.Equal(t, defaultDataDirectory, config.MigrateObfuscatedServerListDownloadDirectory)
+-	require.Equal(t, filepath.Join(defaultDataDirectory, "server_list_compressed"), config.MigrateRemoteServerListDownloadFilename)
++	require.Equal(t, filepath.Join(defaultDataDirectory, "psiphon"), config.MigrateDataStoreDirectory)
++	require.Equal(t, filepath.Join(defaultDataDirectory, "psiphon"), config.MigrateObfuscatedServerListDownloadDirectory)
++	require.Equal(t, filepath.Join(defaultDataDirectory, "psiphon", "server_list_compressed"), config.MigrateRemoteServerListDownloadFilename)
+ }
+ 
+ func TestH_PsiphonBuildConfigOverrides(t *testing.T) {
+@@ -51,6 +52,7 @@ func TestH_PsiphonBuildConfigOverrides(t *testing.T) {
+ 	options := option.PsiphonOutboundOptions{
+ 		DataDirectory:                           "/tmp/psi",
+ 		EgressRegion:                            "DE",
++		ConduitPairingID:                        "pair",
+ 		PropagationChannelID:                    "PC",
+ 		SponsorID:                               "SP",
+ 		NetworkID:                               "NET",
+@@ -66,6 +68,7 @@ func TestH_PsiphonBuildConfigOverrides(t *testing.T) {
+ 	require.NoError(t, err)
+ 	require.Equal(t, filepath.Join("/tmp/psi", "psiphon"), config.DataRootDirectory)
+ 	require.Equal(t, "DE", config.EgressRegion)
++	require.Equal(t, "pair", config.InproxyClientPersonalCompartmentID)
+ 	require.Equal(t, "PC", config.PropagationChannelId)
+ 	require.Equal(t, "SP", config.SponsorId)
+ 	require.Equal(t, "NET", config.NetworkID)
+@@ -77,8 +80,8 @@ func TestH_PsiphonBuildConfigOverrides(t *testing.T) {
+ 	require.Equal(t, "socks5://127.0.0.1:1080", config.UpstreamProxyURL)
+ 	require.False(t, config.AllowDefaultDNSResolverWithBindToDevice)
+ 	require.Equal(t, 90, *config.EstablishTunnelTimeoutSeconds)
+-	require.Equal(t, "/tmp/psi", config.MigrateDataStoreDirectory)
+-	require.Equal(t, filepath.Join("/tmp/psi", "server_list_compressed"), config.MigrateRemoteServerListDownloadFilename)
++	require.Equal(t, filepath.Join("/tmp/psi", "psiphon"), config.MigrateDataStoreDirectory)
++	require.Equal(t, filepath.Join("/tmp/psi", "psiphon", "server_list_compressed"), config.MigrateRemoteServerListDownloadFilename)
+ }
+ 
+ func TestH_PsiphonDurationToSeconds(t *testing.T) {
+@@ -93,7 +96,9 @@ func TestH_PsiphonDurationToSeconds(t *testing.T) {
+ // The services a dialer that resolves domains reads when it is built.
+ type hNetworkManager struct{ adapter.NetworkManager }
+ 
+-func (hNetworkManager) DefaultOptions() adapter.NetworkOptions   { return adapter.NetworkOptions{} }
++func (hNetworkManager) DefaultOptions() adapter.NetworkOptions { return adapter.NetworkOptions{} }
++func (hNetworkManager) ProtectFunc() control.Func              { return nil }
++
+ func (hNetworkManager) AutoDetectInterface() bool                { return false }
+ func (hNetworkManager) AutoRedirectOutputMarkFunc() control.Func { return nil }
+ func (hNetworkManager) InterfaceFinder() control.InterfaceFinder {
+@@ -293,5 +298,53 @@ func TestH_PsiphonInstanceDirectory(t *testing.T) {
+ 	de, err := buildConfig(option.PsiphonOutboundOptions{EgressRegion: "DE"}, defaultEstablishTunnelTimeout, "psiphon-de")
+ 	require.NoError(t, err)
+ 	require.NotEqual(t, us.DataRootDirectory, de.DataRootDirectory, "two outbounds never share their files")
+-	require.Equal(t, defaultDataDirectory, us.MigrateDataStoreDirectory, "the shared directory of before is migrated")
++	require.Equal(t, us.DataRootDirectory, us.MigrateDataStoreDirectory, "migration stays within the instance")
++}
++
++func TestH_PsiphonCloseIsIdempotentAndPreventsLateStart(t *testing.T) {
++	out := newTestOutbound(t, option.PsiphonOutboundOptions{})
++	require.NoError(t, out.Close())
++	require.NoError(t, out.Close())
++	require.ErrorIs(t, out.psiphon.Start(), net.ErrClosed)
++	require.False(t, out.IsReady())
++}
++
++func TestH_PsiphonRejectsDetourConflicts(t *testing.T) {
++	for _, options := range []option.PsiphonOutboundOptions{
++		{DialerOptions: option.DialerOptions{Detour: "main"}, UpstreamProxyURL: "http://127.0.0.1:1080"},
++		{DialerOptions: option.DialerOptions{Detour: "main"}, ConduitPairingID: "pair"},
++	} {
++		_, err := NewOutbound(hTestContext(), nil, log.NewNOPFactory().Logger(), "stage", options)
++		require.Error(t, err)
++	}
++}
++
++type hProtectedAndroidPlatform struct{ adapter.PlatformInterface }
++
++func (*hProtectedAndroidPlatform) UsePlatformAutoDetectInterfaceControl() bool { return true }
++func (*hProtectedAndroidPlatform) AutoDetectInterfaceControl(int) error        { return nil }
++func TestH_PsiphonDirectAndroidBootstrapDoesNotForceHTTPProxy(t *testing.T) {
++	ctx := service.ContextWith[adapter.PlatformInterface](hTestContext(), &hProtectedAndroidPlatform{})
++	out, err := NewOutbound(ctx, nil, log.NewNOPFactory().Logger(), "free-psiphon", option.PsiphonOutboundOptions{DataDirectory: t.TempDir()})
++	require.NoError(t, err)
++	h := out.(*Outbound)
++	defer h.Close()
++	require.NotNil(t, h.psiphon.config.DeviceBinder)
++	require.NoError(t, h.PreStart())
++	require.Nil(t, h.proxy)
++	require.Empty(t, h.psiphon.config.UpstreamProxyURL, "direct bootstrap must retain UDP/QUIC and inproxy choices")
++}
++
++func TestH_PsiphonExplicitAndroidDetourKeepsProtectedBridge(t *testing.T) {
++	ctx := service.ContextWith[adapter.PlatformInterface](hTestContext(), &hProtectedAndroidPlatform{})
++	ctx = service.ContextWith[adapter.OutboundManager](ctx, hOutbounds{outbounds: map[string]adapter.Outbound{"proxy": hDirect{typ: C.TypeVLESS}}})
++	out, err := NewOutbound(ctx, nil, log.NewNOPFactory().Logger(), "chain-psiphon", option.PsiphonOutboundOptions{
++		DataDirectory: t.TempDir(), DialerOptions: option.DialerOptions{Detour: "proxy"},
++	})
++	require.NoError(t, err)
++	h := out.(*Outbound)
++	defer h.Close()
++	require.NoError(t, h.PreStart())
++	require.NotNil(t, h.proxy)
++	require.NotEmpty(t, h.psiphon.config.UpstreamProxyURL)
+ }
+diff --git a/protocol/psiphon/outbound.go b/protocol/psiphon/outbound.go
+index ca71acc89e5f4160f2dedd3bf696bc4e7502b158..1b31ebc3cccce02ef92c9a402b36fbca7e578196 100644
+--- a/protocol/psiphon/outbound.go
++++ b/protocol/psiphon/outbound.go
+@@ -61,6 +61,8 @@ type Outbound struct {
+ 	runDone chan struct{} // closed when run returns; nil until Start
+ 
+ 	mu          sync.RWMutex
++	lifeMu      sync.Mutex
++	closed      bool
+ 	reconnectCh chan struct{}
+ 	psiphon     *Psiphon
+ 	tracker     adapter.StatusTracker //H
+@@ -101,6 +103,20 @@ func NewOutbound(ctx context.Context, _ adapter.Router, logger log.ContextLogger
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if options.Detour != "" && config.UpstreamProxyURL != "" {
++		return nil, E.New("Psiphon detour conflicts with upstream_proxy_url")
++	}
++	if config.InproxyClientPersonalCompartmentID != "" {
++		if options.Detour != "" || config.UpstreamProxyURL != "" {
++			return nil, E.New("Conduit pairing requires a direct Psiphon transport")
++		}
++		if manager := service.FromContext[adapter.NetworkManager](ctx); manager != nil && manager.DefaultOptions().RoutingMark != 0 {
++			return nil, E.New("Conduit pairing does not support root routing marks")
++		}
++	}
++	if platform := service.FromContext[adapter.PlatformInterface](ctx); platform != nil && platform.UsePlatformAutoDetectInterfaceControl() {
++		config.DeviceBinder = psiphonDeviceBinder{platform}
++	}
+ 	ctx, cancel := context.WithCancel(ctx)
+ 	psiphon, err := NewPsiphon(ctx, logger, config, tag)
+ 	if err != nil {
+@@ -121,38 +137,54 @@ func NewOutbound(ctx context.Context, _ adapter.Router, logger log.ContextLogger
+ 		fixedNetworkID:   config.NetworkID != defaultNetworkID,
+ 		establishTimeout: timeout,
+ 	}
+-	if scannerEnabled(options) {
++	if scannerEnabled(options) && config.InproxyClientPersonalCompartmentID == "" && config.UpstreamProxyURL == "" {
+ 		outbound.useScanner()
+ 	}
+ 	return outbound, nil
+ 
+ }
+ func (h *Outbound) PreStart() error {
++	h.lifeMu.Lock()
++	defer h.lifeMu.Unlock()
++	if h.closed {
++		return net.ErrClosed
++	}
+ 	if h.scanner == nil && scannerByDetour(h.ctx, h.options) { //H: a direct detour: the first hop
++		binder := h.psiphon.config.DeviceBinder
+ 		if err := h.firstHopByDetour(); err != nil {
+ 			return err
+ 		}
++		h.psiphon.config.DeviceBinder = binder
+ 	}
+ 	if h.scanner != nil { //H: the cache file and the detour exist now
+ 		h.scanner.open(h.ctx, h.options.Detour)
+ 	}
+-	return h.psiphon.PreStart()
+-}
+-func (h *Outbound) Start() error {
+ 	// The Psiphon library opens its own connections. Without this bridge they ignored the
+ 	// outbound's dialer (its detour, e.g. the main proxy), and in VPN mode they went back into
+ 	// the tunnel. Same approach as the Tor outbound.
+-	if h.psiphon.config.UpstreamProxyURL == "" {
++	if h.psiphon.config.UpstreamProxyURL == "" && h.psiphon.config.InproxyClientPersonalCompartmentID == "" && (h.options.Detour != "" || h.psiphon.config.DeviceBinder == nil) {
+ 		proxy, err := proxybridge.New(h.ctx, h.logger, "psiphon", h.dialer)
+ 		if err != nil {
+ 			return err
+ 		}
+ 		if err = proxy.Start(); err != nil {
++			proxy.Close()
+ 			return err
+ 		}
+ 		h.proxy = proxy
+ 		h.psiphon.config.UpstreamProxyURL = fmt.Sprint("socks5://", proxy.Username(), ":", proxy.Password(), "@127.0.0.1:", proxy.Port())
+ 	}
++	return h.psiphon.PreStart()
++}
++func (h *Outbound) Start() error {
++	h.lifeMu.Lock()
++	defer h.lifeMu.Unlock()
++	if h.closed {
++		return net.ErrClosed
++	}
++	if h.runDone != nil {
++		return E.New("Psiphon already started")
++	}
+ 	runDone := make(chan struct{})
+ 	h.runDone = runDone
+ 	go func() {
+@@ -233,6 +265,12 @@ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
+ }
+ 
+ func (h *Outbound) Close() error {
++	h.lifeMu.Lock()
++	defer h.lifeMu.Unlock()
++	if h.closed {
++		return nil
++	}
++	h.closed = true
+ 	h.cancel()
+ 	if h.runDone != nil {
+ 		<-h.runDone // run ends with the context, and does not start a controller again
+@@ -313,8 +351,10 @@ func buildConfig(options option.PsiphonOutboundOptions, timeout time.Duration, t
+ 	config.RemoteServerListSignaturePublicKey = pick(options.RemoteServerListSignaturePublicKey, config.RemoteServerListSignaturePublicKey, defaultSignaturePublicKey)
+ 	config.EgressRegion = pick(options.EgressRegion, config.EgressRegion, "")
+ 	config.UpstreamProxyURL = pick(options.UpstreamProxyURL, config.UpstreamProxyURL, "")
+-
+-	applyTunnelProtocols(config, options)
++	config.InproxyClientPersonalCompartmentID = pick(options.ConduitPairingID, config.InproxyClientPersonalCompartmentID, "")
++	if config.InproxyClientPersonalCompartmentID == "" {
++		applyTunnelProtocols(config, options)
++	}
+ 
+ 	config.AllowDefaultDNSResolverWithBindToDevice = true
+ 	if options.AllowDefaultDNSResolverWithBindToDevice != nil {
+@@ -330,7 +370,14 @@ func buildConfig(options option.PsiphonOutboundOptions, timeout time.Duration, t
+ 	// each outbound downloads into a directory of its own: several Psiphon outbounds run at once
+ 	// (one per egress region), and must not write the same server list files. What was kept in
+ 	// the shared directory before is migrated.
+-	config.DataRootDirectory = filepath.Join(dataDir, instanceDirectory(tag))
++	if tag == "" {
++		tag = "default"
++	}
++	if !filepath.IsLocal(tag) || filepath.Base(tag) != tag {
++		return nil, E.New("invalid Psiphon outbound tag for data directory: ", tag)
++	}
++	dataDir = filepath.Join(dataDir, tag)
++	config.DataRootDirectory = dataDir
+ 	config.MigrateDataStoreDirectory = dataDir
+ 	config.MigrateObfuscatedServerListDownloadDirectory = dataDir
+ 	config.MigrateRemoteServerListDownloadFilename = filepath.Join(dataDir, "server_list_compressed")
+@@ -390,6 +437,7 @@ func (h *Outbound) run() {
+ 			searchStart = time.Now() //H: the tunnel was lost: a new search
+ 		}
+ 		h.psiphon.stop()
++		h.psiphon.waitStopped()
+ 		if h.ctx.Err() != nil {
+ 			return
+ 		}
+@@ -456,3 +504,11 @@ func (h *Outbound) InterfaceUpdated(ctx context.Context) {
+ 	}
+ 	h.requestReconnect() //H: a search that gave up starts over on the new network
+ }
++
++type psiphonDeviceBinder struct{ platform adapter.PlatformInterface }
++
++func (b psiphonDeviceBinder) BindToDevice(fd int) (string, error) {
++	return "", b.platform.AutoDetectInterfaceControl(fd)
++}
++
++func (h *Outbound) IsReady() bool { return h.psiphon.IsConnected() }
+diff --git a/protocol/psiphon/psiphon.go b/protocol/psiphon/psiphon.go
+index 3119778e48125997b0eab0bc7973634bc27237e7..bb6e03d00bd755e49d61f68a4687112e4e76168f 100644
+--- a/protocol/psiphon/psiphon.go
++++ b/protocol/psiphon/psiphon.go
+@@ -67,6 +67,10 @@ type Psiphon struct {
+ 	connected       atomic.Bool // driven by NoticeTunnels; read by IsReady/DisplayType
+ 	tag             string
+ 	access          sync.Mutex
++	lifeMu          sync.Mutex
++	closeMu         sync.Mutex
++	closed          atomic.Bool
++	instanceCancel  context.CancelFunc
+ 	runDone         chan struct{}     // closed when the controller started last stops
+ 	onInfo          func(NoticeEvent) // H: the scanner's, for the edge the tunnel core connected over
+ }
+@@ -75,6 +79,9 @@ type Psiphon struct {
+ // the outcome also tells whether it is connected: the Tunnels notices alone can be missed (see
+ // noticeHub).
+ func (p *Psiphon) Dial(address string, conn net.Conn) (net.Conn, error) {
++	if p.closed.Load() {
++		return nil, net.ErrClosed
++	}
+ 	ctl := p.controller.Load()
+ 	if ctl == nil {
+ 		return nil, errors.New("controller not initialized")
+@@ -170,6 +177,9 @@ func stopListeningNotices(p *Psiphon) {
+ // setConnected updates readiness from NoticeTunnels. On first connect it asks
+ // monitoring to urltest — same pattern as SSH/AWG/DNSTT after they are ready.
+ func (p *Psiphon) setConnected(ok bool) {
++	if p.closed.Load() {
++		return
++	}
+ 	was := p.connected.Swap(ok)
+ 	if ok && !was {
+ 		if m := monitoring.Get(p.ctx); m != nil {
+@@ -202,10 +212,18 @@ func noticeCount(data map[string]interface{}) (float64, bool) {
+ }
+ 
+ func (p *Psiphon) PreStart() error {
++	p.lifeMu.Lock()
++	defer p.lifeMu.Unlock()
++	if p.closed.Load() {
++		return net.ErrClosed
++	}
++	if p.dataStoreOpened {
++		return nil
++	}
+ 	if err := installNoticeHub(); err != nil {
+ 		return err
+ 	}
+-	if err := os.MkdirAll(p.config.DataRootDirectory, 0o755); err != nil {
++	if err := os.MkdirAll(p.config.DataRootDirectory, 0o700); err != nil {
+ 		return err
+ 	}
+ 	if err := p.config.Commit(true); err != nil {
+@@ -235,7 +253,7 @@ func (p *Psiphon) State() string {
+ 	return "connecting..."
+ }
+ func (p *Psiphon) IsConnected() bool {
+-	return p.controller.Load() != nil && p.connected.Load()
++	return !p.closed.Load() && p.controller.Load() != nil && p.connected.Load()
+ }
+ 
+ // NetworkChanged tells the running controller that the network changed.
+@@ -249,15 +267,19 @@ func (p *Psiphon) NetworkChanged() {
+ // Close stops the instance: its controller, which it waits for, the notices and the data store.
+ // The data store is closed only once the controller stopped: the controller uses it.
+ func (p *Psiphon) Close() error {
+-	p.access.Lock()
+-	runDone := p.runDone
+-	p.access.Unlock()
+-	p.stop()
+-	if runDone != nil {
+-		<-runDone
++	p.closeMu.Lock()
++	defer p.closeMu.Unlock()
++	p.closed.Store(true)
++	if p.instanceCancel != nil {
++		p.instanceCancel()
+ 	}
++	p.stop()
++	p.lifeMu.Lock()
++	defer p.lifeMu.Unlock()
++	p.waitStopped()
+ 	stopListeningNotices(p)
+ 	p.closeDataStore()
++	p.connected.Store(false)
+ 	return nil
+ }
+ 
+@@ -276,11 +298,13 @@ func (p *Psiphon) stop() {
+ }
+ 
+ func NewPsiphon(ctx context.Context, l logger.ContextLogger, config *psiphon.Config, tag string) (*Psiphon, error) {
++	ctx, instanceCancel := context.WithCancel(ctx)
+ 	p := Psiphon{
+-		logger: l,
+-		config: config,
+-		ctx:    ctx,
+-		tag:    tag,
++		instanceCancel: instanceCancel,
++		logger:         l,
++		config:         config,
++		ctx:            ctx,
++		tag:            tag,
+ 	}
+ 	return &p, nil
+ }
+@@ -339,8 +363,33 @@ func (p *Psiphon) hasTunnel() bool {
+ 
+ // Start starts a controller and returns once it is connected, or failed. The controller then
+ // keeps running; Wait returns when it stops.
+-func (p *Psiphon) Start() error {
++func (p *Psiphon) Start() (err error) {
++	p.lifeMu.Lock()
++	defer p.lifeMu.Unlock()
++	if p.closed.Load() {
++		return net.ErrClosed
++	}
++	p.access.Lock()
++	previous := p.runDone
++	p.access.Unlock()
++	if previous != nil {
++		select {
++		case <-previous:
++		default:
++			return errors.New("Psiphon controller still running")
++		}
++	}
+ 	ctx, cancel := context.WithCancel(p.ctx)
++	defer func() {
++		if err != nil {
++			cancel()
++			p.waitStopped()
++			stopListeningNotices(p)
++		}
++	}()
++	if err := ctx.Err(); err != nil {
++		return err
++	}
+ 	p.access.Lock()
+ 	p.cancel = cancel
+ 	p.access.Unlock()
+@@ -356,7 +405,11 @@ func (p *Psiphon) Start() error {
+ 	connectedSignal := make(chan struct{})
+ 	var connectedOnce sync.Once
+ 	signal := func() { connectedOnce.Do(func() { close(connectedSignal) }) }
+-	if err := listenNotices(p, func(event NoticeEvent) { p.onNotice(event, signal) }); err != nil {
++	if err := listenNotices(p, func(event NoticeEvent) {
++		if ctx.Err() == nil && !p.closed.Load() {
++			p.onNotice(event, signal)
++		}
++	}); err != nil {
+ 		return err
+ 	}
+ 	if !p.dataStoreOpened { // PreStart opened it; a restart after Close opens it again
+@@ -373,6 +426,9 @@ func (p *Psiphon) Start() error {
+ 	if err != nil {
+ 		return errors.New("psiphon.NewController failed")
+ 	}
++	if err := ctx.Err(); err != nil {
++		return err
++	}
+ 	p.controller.Store(controller)
+ 
+ 	// set only with the goroutine that closes it: Close waits for it
+@@ -393,6 +449,9 @@ func (p *Psiphon) Start() error {
+ 	case <-ctx.Done():
+ 		return ctx.Err()
+ 	case <-connectedSignal:
++		if err := ctx.Err(); err != nil {
++			return err
++		}
+ 		p.logger.Debug("Tunnel connection established")
+ 		return nil
+ 	case <-runDone:
+@@ -400,6 +459,16 @@ func (p *Psiphon) Start() error {
+ 	}
+ }
+ 
++// waitStopped is used before changing config for a replacement attempt.
++func (p *Psiphon) waitStopped() {
++	p.access.Lock()
++	done := p.runDone
++	p.access.Unlock()
++	if done != nil {
++		<-done
++	}
++}
++
+ // Wait blocks until the controller started last stops, or the instance closes.
+ func (p *Psiphon) Wait() {
+ 	p.access.Lock()
+diff --git a/protocol/psiphon/upstream_bridge.go b/protocol/psiphon/upstream_bridge.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7fdcef4e2ac7f8a6dc701d81acf444454e6f6432
+--- /dev/null
++++ b/protocol/psiphon/upstream_bridge.go
+@@ -0,0 +1,143 @@
++package psiphon
++
++import (
++	"context"
++	"crypto/rand"
++	"crypto/subtle"
++	"encoding/base64"
++	"encoding/hex"
++	"errors"
++	"io"
++	"net"
++	"net/http"
++	"net/url"
++	"sync"
++	"time"
++)
++
++// Psiphon's controller accepts an upstream URL rather than sing-box's dialer.
++// This private authenticated CONNECT bridge keeps bootstrap TCP sockets on the
++// configured detour (and Android protection/root routing mark).
++type upstreamBridge struct {
++	url           string
++	authorization string
++	ctx           context.Context
++	cancel        context.CancelFunc
++	server        *http.Server
++	dial          func(context.Context, string, string) (net.Conn, error)
++	slots         chan struct{}
++	mu            sync.Mutex
++	closed        bool
++	connections   map[net.Conn]struct{}
++	done          chan struct{}
++}
++
++func newUpstreamBridge(ctx context.Context, dial func(context.Context, string, string) (net.Conn, error)) (*upstreamBridge, error) {
++	secret := make([]byte, 32)
++	if _, err := rand.Read(secret); err != nil {
++		return nil, err
++	}
++	password := hex.EncodeToString(secret)
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		return nil, err
++	}
++	ctx, cancel := context.WithCancel(ctx)
++	bridge := &upstreamBridge{
++		url:           (&url.URL{Scheme: "http", Host: listener.Addr().String(), User: url.UserPassword("psiphon", password)}).String(),
++		authorization: "Basic " + base64.StdEncoding.EncodeToString([]byte("psiphon:"+password)),
++		ctx:           ctx, cancel: cancel, dial: dial, slots: make(chan struct{}, 32),
++		connections: make(map[net.Conn]struct{}), done: make(chan struct{}),
++	}
++	bridge.server = &http.Server{Handler: bridge, ReadHeaderTimeout: 10 * time.Second, MaxHeaderBytes: 8192}
++	go func() { defer close(bridge.done); _ = bridge.server.Serve(listener) }()
++	return bridge, nil
++}
++
++func (b *upstreamBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
++	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Proxy-Authorization")), []byte(b.authorization)) != 1 {
++		w.Header().Set("Proxy-Authenticate", `Basic realm="psiphon"`)
++		http.Error(w, "authentication required", http.StatusProxyAuthRequired)
++		return
++	}
++	if r.Method != http.MethodConnect {
++		http.Error(w, "CONNECT required", http.StatusMethodNotAllowed)
++		return
++	}
++	host, port, err := net.SplitHostPort(r.Host)
++	if err != nil || host == "" || port == "" {
++		http.Error(w, "invalid target", http.StatusBadRequest)
++		return
++	}
++	select {
++	case b.slots <- struct{}{}:
++		defer func() { <-b.slots }()
++	default:
++		http.Error(w, "bridge busy", http.StatusServiceUnavailable)
++		return
++	}
++	ctx, cancel := context.WithTimeout(b.ctx, 30*time.Second)
++	upstream, err := b.dial(ctx, "tcp", r.Host)
++	cancel()
++	if err != nil {
++		http.Error(w, "upstream unavailable", http.StatusBadGateway)
++		return
++	}
++	defer upstream.Close()
++	hijacker, ok := w.(http.Hijacker)
++	if !ok {
++		http.Error(w, "hijacking unavailable", http.StatusInternalServerError)
++		return
++	}
++	conn, reader, err := hijacker.Hijack()
++	if err != nil {
++		return
++	}
++	defer conn.Close()
++	b.mu.Lock()
++	if b.closed {
++		b.mu.Unlock()
++		return
++	}
++	b.connections[conn] = struct{}{}
++	b.connections[upstream] = struct{}{}
++	b.mu.Unlock()
++	defer func() { b.mu.Lock(); delete(b.connections, conn); delete(b.connections, upstream); b.mu.Unlock() }()
++	_ = conn.SetDeadline(time.Time{})
++	if _, err := reader.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
++		return
++	}
++	if err := reader.Flush(); err != nil {
++		return
++	}
++	done := make(chan struct{})
++	go func() { defer close(done); _, _ = io.Copy(upstream, reader); _ = upstream.Close(); _ = conn.Close() }()
++	_, _ = io.Copy(conn, upstream)
++	_ = conn.Close()
++	_ = upstream.Close()
++	<-done
++}
++
++func (b *upstreamBridge) Close() error {
++	b.mu.Lock()
++	if b.closed {
++		b.mu.Unlock()
++		return nil
++	}
++	b.closed = true
++	b.cancel()
++	connections := make([]net.Conn, 0, len(b.connections))
++	for conn := range b.connections {
++		connections = append(connections, conn)
++	}
++	b.mu.Unlock()
++	for _, conn := range connections {
++		_ = conn.Close()
++	}
++	err := b.server.Close()
++	<-b.done
++	if errors.Is(err, http.ErrServerClosed) {
++		return nil
++	}
++	return err
++}
+diff --git a/protocol/psiphon/upstream_bridge_test.go b/protocol/psiphon/upstream_bridge_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..081201aee9b413b6d29b6371308f77b1d924eada
+--- /dev/null
++++ b/protocol/psiphon/upstream_bridge_test.go
+@@ -0,0 +1,157 @@
++package psiphon
++
++import (
++	"bufio"
++	"context"
++	"io"
++	"net"
++	"net/http"
++	"net/url"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++func bridgeTestConnect(t *testing.T, b *upstreamBridge, auth string) (net.Conn, *bufio.Reader, *http.Response) {
++	t.Helper()
++	u, err := url.Parse(b.url)
++	if err != nil {
++		t.Fatal(err)
++	}
++	conn, err := net.DialTimeout("tcp", u.Host, time.Second)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
++	request := &http.Request{Method: http.MethodConnect, URL: &url.URL{Opaque: "target.invalid:443"}, Host: "target.invalid:443", Header: make(http.Header)}
++	request.Header.Set("Proxy-Authorization", auth)
++	if err := request.Write(conn); err != nil {
++		t.Fatal(err)
++	}
++	reader := bufio.NewReader(conn)
++	response, err := http.ReadResponse(reader, request)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return conn, reader, response
++}
++
++func TestUpstreamBridgeUsesOnlyConfiguredDialer(t *testing.T) {
++	var calls atomic.Int32
++	b, err := newUpstreamBridge(context.Background(), func(ctx context.Context, network, address string) (net.Conn, error) {
++		calls.Add(1)
++		if network != "tcp" || address != "target.invalid:443" {
++			t.Errorf("unexpected destination %s %s", network, address)
++		}
++		client, server := net.Pipe()
++		go func() { defer server.Close(); _, _ = io.Copy(server, server) }()
++		return client, nil
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer b.Close()
++	conn, reader, response := bridgeTestConnect(t, b, b.authorization)
++	defer conn.Close()
++	if response.StatusCode != 200 {
++		t.Fatal(response.Status)
++	}
++	if _, err := conn.Write([]byte("tunnel")); err != nil {
++		t.Fatal(err)
++	}
++	output := make([]byte, 6)
++	if _, err := io.ReadFull(reader, output); err != nil {
++		t.Fatal(err)
++	}
++	if string(output) != "tunnel" || calls.Load() != 1 {
++		t.Fatalf("unexpected %q, calls %d", output, calls.Load())
++	}
++}
++
++func TestUpstreamBridgeRejectsUnauthenticatedConnections(t *testing.T) {
++	var calls atomic.Int32
++	b, err := newUpstreamBridge(context.Background(), func(context.Context, string, string) (net.Conn, error) { calls.Add(1); return nil, net.ErrClosed })
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer b.Close()
++	for _, auth := range []string{"", "Basic wrong"} {
++		conn, _, response := bridgeTestConnect(t, b, auth)
++		response.Body.Close()
++		conn.Close()
++		if response.StatusCode != 407 {
++			t.Fatal(response.Status)
++		}
++	}
++	if calls.Load() != 0 {
++		t.Fatal("unauthenticated caller reached dialer")
++	}
++}
++
++func TestUpstreamBridgeCloseCancelsPendingDialAndClosesListener(t *testing.T) {
++	dialStarted := make(chan struct{})
++	dialStopped := make(chan struct{})
++	b, err := newUpstreamBridge(context.Background(), func(ctx context.Context, _ string, _ string) (net.Conn, error) {
++		close(dialStarted)
++		<-ctx.Done()
++		close(dialStopped)
++		return nil, ctx.Err()
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	u, _ := url.Parse(b.url)
++	conn, err := net.Dial("tcp", u.Host)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	request := &http.Request{Method: http.MethodConnect, URL: &url.URL{Opaque: "target.invalid:443"}, Host: "target.invalid:443", Header: make(http.Header)}
++	request.Header.Set("Proxy-Authorization", b.authorization)
++	if err := request.Write(conn); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case <-dialStarted:
++	case <-time.After(time.Second):
++		t.Fatal("dial not reached")
++	}
++	if err := b.Close(); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case <-dialStopped:
++	case <-time.After(time.Second):
++		t.Fatal("dial not cancelled")
++	}
++	if err := b.Close(); err != nil {
++		t.Fatal(err)
++	}
++	late, err := net.DialTimeout("tcp", u.Host, time.Second)
++	if err == nil {
++		late.Close()
++		t.Fatal("listener survived Close")
++	}
++}
++
++func TestUpstreamBridgeCloseTerminatesEstablishedTunnel(t *testing.T) {
++	b, err := newUpstreamBridge(context.Background(), func(context.Context, string, string) (net.Conn, error) {
++		client, server := net.Pipe()
++		go func() { defer server.Close(); _, _ = io.Copy(io.Discard, server) }()
++		return client, nil
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	conn, reader, response := bridgeTestConnect(t, b, b.authorization)
++	defer conn.Close()
++	if response.StatusCode != 200 {
++		t.Fatal(response.Status)
++	}
++	if err := b.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := reader.ReadByte(); err == nil {
++		t.Fatal("hijacked connection survived close")
++	}
++}

@@ -1,23 +1,3 @@
-diff --git a/.gitmodules b/.gitmodules
-index 88f8b13a1faacf325e595d4b8a8bde5f917bcbd3..9e973368e6e9353e47eee7d9273af6fce884b9b9 100644
---- a/.gitmodules
-+++ b/.gitmodules
-@@ -30,3 +30,15 @@
- 	path = replace/sing-mux
- 	url = https://github.com/hiddify/sing-mux.git
- 	branch = v5
-+[submodule "replace/MasterDnsVPN"]
-+	path = replace/MasterDnsVPN
-+	url = https://github.com/hiddify/MasterDnsVPN
-+	branch = hiddify
-+[submodule "replace/soar"]
-+	path = replace/soar
-+	url = https://github.com/hiddify/soar
-+	branch = hiddify
-+[submodule "replace/sing"]
-+	path = replace/sing
-+	url = https://github.com/hiddify/sing.git
-+	branch = v5
 diff --git a/.golangci.yml b/.golangci.yml
 index 10f422eb620ec4a7e34c4638da12480e192ea4e0..791d7a7e5fbe5eb2570450bf18c6c0506c2cd3b2 100644
 --- a/.golangci.yml
@@ -55,137 +35,32 @@ index 10f422eb620ec4a7e34c4638da12480e192ea4e0..791d7a7e5fbe5eb2570450bf18c6c050
        - comments
        - common-false-positives
 diff --git a/Makefile b/Makefile
-index f3f67b6c38875ef6a126156d46e32c62420ee59e..fcf551653e6c8f691ae427dd235cd97ba8821b80 100644
+index e49b5423d1358e854172aba54b1b023b09ba61ad..fcf551653e6c8f691ae427dd235cd97ba8821b80 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,6 +1,6 @@
  NAME = sing-box
  COMMIT = $(shell git rev-parse --short HEAD)
--TAGS ?= with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0,with_grpc,with_awg,with_embedded_tor,with_openvpn,with_openconnect,with_masque,with_sudoku/with_call/with_bond/with_kcp
+-TAGS ?= with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0,with_grpc,with_awg,with_embedded_tor,with_openvpn,with_openconnect,with_masque,with_sudoku,with_call,with_bond,with_kcp,with_xdrive
 +TAGS ?= with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0,with_grpc,with_awg,with_embedded_tor,with_openvpn,with_openconnect,with_masque,with_sudoku,with_call,with_bond,with_kcp,with_xdrive,with_acme,with_tailscale,with_ccm,with_ocm
  TAGS_TEST ?= $(TAGS)
  
  GOHOSTOS = $(shell go env GOHOSTOS)
 diff --git a/README.md b/README.md
-index a04e5d90866e165b929724062a496481e9997022..8123c0ba9bea55cad428b31226739512d6cc8603 100644
+index 27dddfd406965083d5e7b7b0967eb25bbc32c378..61fefa2867c3875d0e32b376432828e4413946d4 100644
 --- a/README.md
 +++ b/README.md
-@@ -1,40 +1,19 @@
+@@ -1,7 +1,6 @@
 -# Hiddify sing-box
 +# sing-box-extended
  
 -The core of [Hiddify](https://github.com/hiddify/hiddify-app): [sing-box](https://github.com/SagerNet/sing-box)
 -(v1.15) with the protocols, transports and fixes that make it work on censored networks.
--
--**Documentation:** [docs/hiddify](docs/hiddify/index.md) · [فارسی](docs/hiddify/index.fa.md). Every
--feature below has a page there, in English and Persian, with what it is, how it gets past
--filtering and every option. Upstream sing-box options are documented at
--[sing-box.sagernet.org](https://sing-box.sagernet.org).
--
--## Thanks to sing-box
--
--Everything here stands on [sing-box](https://github.com/SagerNet/sing-box), by
--[nekohasekai (世界)](https://github.com/nekohasekai) and the
--[sing-box contributors](https://github.com/SagerNet/sing-box/graphs/contributors). The design of
--sing-box, its routing, DNS, inbounds and outbounds, TUN stack and the libraries around it
--(sing, sing-tun, sing-quic, sing-mux and more) make a fork like this possible at all. Hiddify keeps
--its changes small and close to upstream so it can follow every sing-box release. Thank you.
-+Sing-box with extended features.
++Integration candidate: upstream feature descriptions below are historical reference, not a statement that every feature has passed the VetrOFF build matrix.
  
- ## Features
- 
--### WARP and WireGuard
--
--- [WARP](docs/hiddify/features/protocols/warp.en.md): Cloudflare WARP with no account setup, over
--  WireGuard, AmneziaWG or MASQUE, or `auto` (the fastest that answers); an endpoint scanner with
--  per-network scores and failover, noise presets and a noise search, a pool of registered devices
--  that is only renewed when Cloudflare refuses one.
--- [WARP scanner and noise](docs/hiddify/features/protocols/warp-scanner.en.md): how the scanner,
--  the noise presets (DNS, QUIC, SIP, random), the noise search and auto mode work together.
--- [WARP over MASQUE](docs/hiddify/features/protocols/warp-masque.en.md): the `masque` outbound for
--  WARP over HTTP/3 or HTTP/2, with a new device or one already enrolled (`device`, no API).
--- [AmneziaWG](docs/hiddify/features/protocols/amneziawg.en.md): AmneziaWG 3.1, with the QUIC
--  masquerade.
--- [WireGuard additions](docs/hiddify/features/protocols/wireguard-hiddify.en.md): noise before
--  handshakes (random, QUIC Initials, AmneziaWG-style DNS, QUIC and SIP templates), socket recovery,
--  per-peer users.
--- [WireGuard outbound (legacy format)](docs/hiddify/features/protocols/wireguard-legacy.en.md).
-+* Amnezia 1.5
-+* WARP
-+* Tunneling
-+* Mieru
-+* XHTTP
-+* SDNS (DNSCrypt)
-+* Extended Wireguard options
-+* Unified delay
-+
-+## Examples
- 
- ### Protocols
- 
-@@ -45,6 +24,8 @@ its changes small and close to upstream so it can follow every sing-box release.
-   [SSH](docs/hiddify/features/protocols/ssh.en.md),
-   [Psiphon](docs/hiddify/features/protocols/psiphon.en.md),
-   [DNSTT](docs/hiddify/features/protocols/dnstt.en.md),
-+  [MasterDNS](docs/hiddify/features/protocols/masterdns.en.md),
-+  [Soar](docs/hiddify/features/protocols/soar.en.md),
-   [GooseRelay](docs/hiddify/features/protocols/gooserelay.en.md),
-   [Call tunnel](docs/hiddify/features/protocols/call.en.md),
-   [Tunnel](docs/hiddify/features/protocols/tunnel.en.md),
-@@ -54,6 +35,7 @@ its changes small and close to upstream so it can follow every sing-box release.
- 
- - [XHTTP](docs/hiddify/features/transports/xhttp.en.md),
-   [mKCP](docs/hiddify/features/transports/kcp.en.md),
-+  [XDRIVE](docs/hiddify/features/transports/xdrive.en.md),
-   [raw](docs/hiddify/features/transports/raw.en.md),
-   [custom gRPC paths](docs/hiddify/features/transports/grpc-custom-path.en.md),
-   [finalmask](docs/hiddify/features/transports/finalmask.en.md),
-@@ -69,7 +51,7 @@ its changes small and close to upstream so it can follow every sing-box release.
- 
- - [DNS group](docs/hiddify/features/dns/dns-group.en.md),
-   [bypass_if_failed](docs/hiddify/features/dns/dns-bypass-if-failed.en.md),
--  [smart DNS pool](docs/hiddify/features/dns/smart-dns-pool.en.md),
-+  [smart resolver pool](docs/hiddify/features/dns/smart-dns-pool.en.md),
-   [DNSCrypt (SDNS)](docs/hiddify/features/dns/sdns.en.md),
-   [sslip.io names](docs/hiddify/features/dns/sslip-hosts.en.md),
-   [IPv6 by outbound](docs/hiddify/features/dns/ipv6-by-outbound.en.md).
-@@ -95,12 +77,13 @@ Many crash, leak and stability fixes on top of sing-box, each with its commit:
- ```bash
- git clone --recursive https://github.com/hiddify/hiddify-sing-box
- cd hiddify-sing-box
--make          # Go 1.26.3 or newer
-+make          # Go 1.27.3 or newer
- ```
- 
- The forks of dependencies live under `replace/` as git submodules, so clone with `--recursive`
--(or run `git submodule update --init --recursive`). The default build tags are in the `Makefile`;
--`with_kcp`, `with_sudoku`, `with_bond`, `with_call` and `with_tailscale` add optional features.
-+(or run `git submodule update --init --recursive`). The default build tags are in the `Makefile`,
-+including the optional `with_kcp`, `with_sudoku`, `with_bond`, `with_call` and `with_xdrive`;
-+`with_tailscale` adds another optional feature.
- 
- ## Contributing
- 
-@@ -136,10 +119,16 @@ Besides sing-box, this fork takes work from other forks and projects. Thank you
-   [metacubex/utls](https://github.com/metacubex/utls): TLS fingerprints.
- - [Psiphon-Labs](https://github.com/Psiphon-Labs): Psiphon.
- - [net2share/vaydns](https://github.com/net2share/vaydns): DNSTT.
-+- [masterking32/MasterDnsVPN](https://github.com/masterking32/MasterDnsVPN): MasterDNS.
-+- [getlantern/soar](https://github.com/getlantern/soar): Soar.
- - [kianmhz/GooseRelayVPN](https://github.com/kianmhz/GooseRelayVPN): GooseRelay.
- - [GFW-knocker](https://github.com/GFW-knocker): the WireGuard noise packets.
--- [XTLS/Xray-core](https://github.com/XTLS/Xray-core): XHTTP, mKCP, finalmask, VLESS encryption
--  and REALITY, which the matching features here follow and are tested against.
-+- [XTLS/Xray-core](https://github.com/XTLS/Xray-core): XHTTP, mKCP, XDRIVE, finalmask, VLESS
-+  encryption and REALITY, which the matching features here follow and are tested against.
-+- [patterniha/Xray-core](https://github.com/patterniha/xray-core): the `merge` finalmask and the
-+  `oob` dial mode.
-+
-+- [PoriyaVali/mirage](https://github.com/PoriyaVali/mirage): the `mirage` finalmask (MIT).
- 
- ## License
- 
-@@ -162,3 +151,9 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
+ **Documentation:** [docs/hiddify](docs/hiddify/index.md) · [فارسی](docs/hiddify/index.fa.md). Every
+ feature below has a page there, in English and Persian, with what it is, how it gets past
+@@ -215,3 +214,68 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
  In addition, no derivative work may use the name or imply association
  with this application without prior consent.
  ```
@@ -195,6 +70,65 @@ index a04e5d90866e165b929724062a496481e9997022..8123c0ba9bea55cad428b31226739512
 +This fork also retains VetrOFFProxy, OpenFlux, OLCRTC, FPTN, PingTunnel, native Sudoku and Snell, together with its existing WARP endpoint scanner. Existing standalone `smart_dns_pool` service configurations remain supported. See [the synchronization report](UPSTREAM_SYNC_REPORT.md) for the upstream source revision and compatibility details.
 +
 +- [Soar DNS tunnel](docs/hiddify/features/protocols/soar.en.md): resolver discovery and adaptive smart pool.
++
++## Examples
++
++### Protocols
++
++- [VLESS encryption](docs/hiddify/features/protocols/vless-encryption.en.md),
++  [Sudoku](docs/hiddify/features/protocols/sudoku.en.md),
++  [Mieru](docs/hiddify/features/protocols/mieru.en.md),
++  [TrustTunnel](docs/hiddify/features/protocols/trusttunnel.en.md),
++  [SSH](docs/hiddify/features/protocols/ssh.en.md),
++  [Psiphon](docs/hiddify/features/protocols/psiphon.en.md),
++  [DNSTT](docs/hiddify/features/protocols/dnstt.en.md),
++  [MasterDNS](docs/hiddify/features/protocols/masterdns.en.md),
++  [Soar](docs/hiddify/features/protocols/soar.en.md),
++  [GooseRelay](docs/hiddify/features/protocols/gooserelay.en.md),
++  [Call tunnel](docs/hiddify/features/protocols/call.en.md),
++  [Tunnel](docs/hiddify/features/protocols/tunnel.en.md),
++  [Bond](docs/hiddify/features/protocols/bond.en.md).
++
++### Transports and TLS
++
++- [XHTTP](docs/hiddify/features/transports/xhttp.en.md),
++  [mKCP](docs/hiddify/features/transports/kcp.en.md),
++  [XDRIVE](docs/hiddify/features/transports/xdrive.en.md),
++  [raw](docs/hiddify/features/transports/raw.en.md),
++  [custom gRPC paths](docs/hiddify/features/transports/grpc-custom-path.en.md),
++  [finalmask](docs/hiddify/features/transports/finalmask.en.md),
++  [Shadowsocks simple-obfs server](docs/hiddify/features/transports/shadowsocks-obfs.en.md),
++  [rmux](docs/hiddify/features/transports/rmux.en.md).
++- [TLS fragment](docs/hiddify/features/tls-fragment.en.md),
++  [TLS tricks](docs/hiddify/features/tls-tricks.en.md),
++  [REALITY additions](docs/hiddify/features/reality-hiddify.en.md) (post-quantum key share,
++  `key_share`, fragmentation, Firefox 148 and Safari 26.3 fingerprints),
++  [PROXY protocol](docs/hiddify/features/proxy-protocol.en.md).
++
++### DNS
++
++- [DNS group](docs/hiddify/features/dns/dns-group.en.md),
++  [bypass_if_failed](docs/hiddify/features/dns/dns-bypass-if-failed.en.md),
++  [smart resolver pool](docs/hiddify/features/dns/smart-dns-pool.en.md),
++  [DNSCrypt (SDNS)](docs/hiddify/features/dns/sdns.en.md),
++  [sslip.io names](docs/hiddify/features/dns/sslip-hosts.en.md),
++  [IPv6 by outbound](docs/hiddify/features/dns/ipv6-by-outbound.en.md).
++
++### Groups and monitoring
++
++- [Balancer](docs/hiddify/features/groups/balancer.en.md) (round robin, lowest delay, consistent
++  hashing, sticky sessions, sticky pool),
++  [fallback](docs/hiddify/features/groups/fallback.en.md),
++  [URL test additions](docs/hiddify/features/groups/urltest.en.md) (more test URLs, failover mode,
++  dial penalties),
++  [monitoring](docs/hiddify/features/groups/monitoring.en.md) with a connection status for every
++  outbound, [unified delay](docs/hiddify/features/groups/unified-delay.en.md).
++
++### Fixes
++
++Many crash, leak and stability fixes on top of sing-box, each with its commit:
++[bug-fix log](docs/hiddify/bugfix/v5.en.md). What hiddify-app and hiddify-core need to know:
++[app considerations](docs/hiddify/app_considerations.md).
 diff --git a/UPSTREAM_SYNC_REPORT.md b/UPSTREAM_SYNC_REPORT.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..723a99bafc484ad229f77103393aacdd82473e55

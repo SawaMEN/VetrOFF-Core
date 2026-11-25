@@ -1,5 +1,5 @@
 diff --git a/adapter/experimental.go b/adapter/experimental.go
-index 43289e266137dfcf7b384a8b86bf0842ee6c473f..e54ef007aabe87a709266c8bc601fe410d7058c1 100644
+index b53dffb2afa2fe9bd2ef2a7a5c69df59876e460b..ba7c24c0bae3e952206b2a79e462c041fa01217d 100644
 --- a/adapter/experimental.go
 +++ b/adapter/experimental.go
 @@ -18,7 +18,7 @@ type ClashServer interface {
@@ -11,97 +11,66 @@ index 43289e266137dfcf7b384a8b86bf0842ee6c473f..e54ef007aabe87a709266c8bc601fe41
  	SetModeUpdateHook(hook *observable.Subscriber[struct{}])
  	HistoryStorage() URLTestHistoryStorage
  }
-@@ -29,10 +29,14 @@ type URLTestHistory struct {
+@@ -29,14 +29,14 @@ type URLTestHistory struct {
  	IpInfo      *ipinfo.IpInfo `json:"ipinfo"`
  	IsFromCache bool           `json:"from_cache"`
  	// IpInfoFromCache: IpInfo is the one of a previous run, not looked up in this one yet. //H
 -	IpInfoFromCache bool `json:"ipinfo_from_cache"` //H
--	// IPv6: whether the outbound carried a connection to an IPv6 address when the monitoring
--	// probed it; nil until it was probed. //H
--	IPv6 *bool `json:"ipv6,omitempty"` //H
 +	IpInfoFromCache bool `json:"ipinfo_from_cache"` // H
-+	// IPv6: whether the outbound carries IPv6, as the monitoring verified at the URL test, the
-+	// link declared or the connections showed; nil until known. //H
+ 	// IPv6: whether the outbound carries IPv6, as the monitoring verified at the URL test, the
+ 	// link declared or the connections showed; nil until known. //H
+-	IPv6 *bool `json:"ipv6,omitempty"` //H
 +	IPv6 *bool `json:"ipv6,omitempty"` // H
-+	// IPv6FromCache: IPv6 is the answer of a previous run, not verified in this one yet. //H
+ 	// IPv6FromCache: IPv6 is the answer of a previous run, not verified in this one yet. //H
+-	IPv6FromCache bool `json:"ipv6_from_cache,omitempty"` //H
 +	IPv6FromCache bool `json:"ipv6_from_cache,omitempty"` // H
-+	// Error: why the last URL test failed; empty when it worked. //H
+ 	// Error: why the last URL test failed; empty when it worked. //H
+-	Error string `json:"error,omitempty"` //H
 +	Error string `json:"error,omitempty"` // H
- }
- 
- type URLTestHistoryStorage interface {
+ 	// LastGood: the last delay of a test that worked, kept when a later one fails: of the
+ 	// outbounds that fail, the ones that worked are tested first. //H
+ 	LastGood uint16 `json:"last_good,omitempty"` //H
+diff --git a/adapter/h_detour.go b/adapter/h_detour.go
+index 25ec7f984b22fa4fbe7f2e369d13f28a1e8af99f..00193e3c0f38255b55682c21fa741c4eb53a984e 100644
+--- a/adapter/h_detour.go
++++ b/adapter/h_detour.go
+@@ -28,7 +28,7 @@ func GroupPath(outbound Outbound, network string) []Outbound {
+ // ready and nil when every one is.
+ func PathStatus(path []Outbound) (Status, Outbound) {
+ 	for _, outbound := range path {
+-		if status := outbound.Status(); status != StatusReady {
++		if status := OutboundStatus(outbound); status != StatusReady {
+ 			return status, outbound
+ 		}
+ 	}
 diff --git a/adapter/h_display.go b/adapter/h_display.go
-index cd547ceb5c229990d217d75c3ed26916cab20a1a..f9dd9baf357997cbb9114daca0ae1fe4b3716121 100644
+index c2ac8efb5a69732a9f58a95ef9f5495a72389927..f9dd9baf357997cbb9114daca0ae1fe4b3716121 100644
 --- a/adapter/h_display.go
 +++ b/adapter/h_display.go
-@@ -1,15 +1,25 @@
- package adapter
- 
--import C "github.com/sagernet/sing-box/constant"
-+import (
-+	"strings"
-+
-+	C "github.com/sagernet/sing-box/constant"
-+)
- 
- // DisplayType is what the app shows for an outbound or an endpoint (an Endpoint is an Outbound):
--// its own display type (the name of its type when it has none), then the mark of its Status.
--// Outbounds and endpoints give only their name and their own details in DisplayType; the status
--// mark is added here, for all of them.
-+// its own display type (the name of its type when it has none), which says only what its Status
-+// cannot, such as how many resolvers it uses or the endpoint a scanner found. The app shows the
-+// status itself. A failed one adds why it failed (StatusError), unless its own display type
-+// already says it.
- func DisplayType(outbound Outbound) string {
- 	name := C.ProxyDisplayName(outbound.Type())
+@@ -16,7 +16,7 @@ func DisplayType(outbound Outbound) string {
  	if displayer, ok := outbound.(interface{ DisplayType() string }); ok {
  		name = displayer.DisplayType()
  	}
--	return name + outbound.Status().Mark()
+-	if outbound.Status() == StatusFailed {
 +	if OutboundStatus(outbound) == StatusFailed {
-+		if err := StatusError(outbound); err != nil && !strings.Contains(name, err.Error()) {
-+			name += ": " + err.Error()
-+		}
-+	}
-+	return name
- }
+ 		if err := StatusError(outbound); err != nil && !strings.Contains(name, err.Error()) {
+ 			name += ": " + err.Error()
+ 		}
 diff --git a/adapter/h_display_test.go b/adapter/h_display_test.go
-index 337fa79a4709594e736dbee599d09563335c61bd..bf3c11837955284b19611213b39f82ec8137eb6e 100644
+index 7149c640703f57e45c2471deea927d515fcdd53c..bf3c11837955284b19611213b39f82ec8137eb6e 100644
 --- a/adapter/h_display_test.go
 +++ b/adapter/h_display_test.go
-@@ -1,6 +1,7 @@
- package adapter_test
+@@ -23,6 +23,26 @@ type hDisplayOutbound struct {
+ func (o *hDisplayOutbound) Status() adapter.Status { return o.status }
+ func (o *hDisplayOutbound) StatusError() error     { return o.err }
  
- import (
-+	"errors"
- 	"testing"
- 
- 	"github.com/sagernet/sing-box/adapter"
-@@ -15,62 +16,75 @@ import (
- type hDisplayOutbound struct {
- 	outbound.Adapter
- 	N.Dialer
--	ready   bool
--	display string
-+	status adapter.Status
-+	err    error
-+}
-+
-+func (o *hDisplayOutbound) Status() adapter.Status { return o.status }
-+func (o *hDisplayOutbound) StatusError() error     { return o.err }
-+
 +// A v5 outbound only needs the standard IsReady method.
 +type hReadyOnlyOutbound struct {
 +	outbound.Adapter
 +	N.Dialer
 +	ready bool
- }
- 
--func (o *hDisplayOutbound) Status() adapter.Status {
--	if o.ready {
--		return adapter.StatusReady
--	}
--	return adapter.StatusConnecting
++}
++
 +func (o *hReadyOnlyOutbound) IsReady() bool { return o.ready }
 +
 +func TestH_DisplayTypeWithoutStatusMethod(t *testing.T) {
@@ -113,101 +82,11 @@ index 337fa79a4709594e736dbee599d09563335c61bd..bf3c11837955284b19611213b39f82ec
 +	require.Equal(t, adapter.StatusReady, adapter.OutboundStatus(legacy))
 +	require.True(t, adapter.IsReady(legacy))
 +	require.Equal(t, "SSH", adapter.DisplayType(legacy))
- }
- 
++}
++
  type hNamedOutbound struct {
  	hDisplayOutbound
-+	display string
- }
- 
- func (o *hNamedOutbound) DisplayType() string { return o.display }
- 
--// Every outbound gets the connecting mark while it is not ready, whatever its own display type.
-+// The display type says nothing the status says: no mark while not ready. A failed outbound adds
-+// why it failed; one that is only connecting does not, its error goes to the app on its own.
- func TestH_DisplayType(t *testing.T) {
--	plain := &hDisplayOutbound{Adapter: outbound.NewAdapter(C.TypeSSH, "a", nil, nil)}
--	hRequireConnecting(t, "SSH", adapter.DisplayType(plain))
--	plain.ready = true
-+	plain := &hDisplayOutbound{Adapter: outbound.NewAdapter(C.TypeSSH, "a", nil, nil), status: adapter.StatusConnecting, err: errors.New("connection refused")}
-+	require.Equal(t, "SSH", adapter.DisplayType(plain))
-+	plain.status = adapter.StatusReady
-+	require.Equal(t, "SSH", adapter.DisplayType(plain))
-+	plain.status = adapter.StatusFailed
-+	require.Equal(t, "SSH: connection refused", adapter.DisplayType(plain))
-+	plain.err = nil
- 	require.Equal(t, "SSH", adapter.DisplayType(plain))
- 
--	named := &hNamedOutbound{hDisplayOutbound{Adapter: outbound.NewAdapter(C.TypeWARP, "b", nil, nil), display: "WARP · MASQUE · 🔍 1.1.1.1:443"}}
--	hRequireConnecting(t, "WARP · MASQUE · 🔍 1.1.1.1:443", adapter.DisplayType(named))
--	named.ready = true
-+	named := &hNamedOutbound{hDisplayOutbound{Adapter: outbound.NewAdapter(C.TypeWARP, "b", nil, nil), status: adapter.StatusSearching}, "WARP · MASQUE · 🔍 1.1.1.1:443"}
- 	require.Equal(t, "WARP · MASQUE · 🔍 1.1.1.1:443", adapter.DisplayType(named))
--}
--
--func hRequireConnecting(t *testing.T, base string, display string) {
--	t.Helper()
--	gotBase, mark := adapter.SplitStatus(display)
--	require.Equal(t, base, gotBase, display)
--	require.NotEmpty(t, mark, display)
-+	named.status, named.err = adapter.StatusFailed, errors.New("no endpoint answers")
-+	require.Equal(t, "WARP · MASQUE · 🔍 1.1.1.1:443: no endpoint answers", adapter.DisplayType(named))
-+	// a display type that already says why is not repeated
-+	named.display = "WARP · no endpoint answers"
-+	require.Equal(t, "WARP · no endpoint answers", adapter.DisplayType(named))
- }
- 
- type hDisplayEndpoint struct {
- 	endpoint.Adapter
- 	N.Dialer
--	ready bool
-+	status adapter.Status
- }
- 
--func (e *hDisplayEndpoint) Status() adapter.Status {
--	if e.ready {
--		return adapter.StatusReady
--	}
--	return adapter.StatusConnecting
--}
-+func (e *hDisplayEndpoint) Status() adapter.Status                         { return e.status }
- func (e *hDisplayEndpoint) Start(adapter.StartStage, *adapter.Scope) error { return nil }
- 
--// An endpoint gets the mark the same way.
-+// An endpoint is shown the same way.
- func TestH_DisplayTypeEndpoint(t *testing.T) {
--	ep := &hDisplayEndpoint{Adapter: endpoint.NewAdapter(C.TypeWireGuard, "wg", nil, nil)}
-+	ep := &hDisplayEndpoint{Adapter: endpoint.NewAdapter(C.TypeWireGuard, "wg", nil, nil), status: adapter.StatusConnecting}
- 	var _ adapter.Endpoint = ep
--	hRequireConnecting(t, "WireGuard", adapter.DisplayType(ep))
--	ep.ready = true
- 	require.Equal(t, "WireGuard", adapter.DisplayType(ep))
-+	ep.status = adapter.StatusFailed
-+	require.Equal(t, "WireGuard", adapter.DisplayType(ep), "no StatusError: nothing to add")
- }
-diff --git a/adapter/h_ipv6.go b/adapter/h_ipv6.go
-index 2fc5b5a517f1685ad781f3436a707cb60f4e9711..0af7f6a44d9a45011c4cba73cb255acf741c6c4b 100644
---- a/adapter/h_ipv6.go
-+++ b/adapter/h_ipv6.go
-@@ -1,9 +1,14 @@
- package adapter
- 
--// IPv6Capability tells whether an outbound can carry IPv6 traffic, as the monitoring found by
--// opening a connection to an IPv6 address through it; for a group, its selected member's. known
--// is false until the outbound was probed, in this run or one whose results were cached. The
--// DNS router and the route use it: see dns rule ipv6_by_outbound and rule ipv6_unavailable_via.
-+// IPv6Capability tells whether an outbound carries IPv6 traffic, as the router learned from the
-+// connections it carried (route option ipv6_fallback): a connection to an IPv6 address that the
-+// destination answered says yes; one that got nothing while the same destination answered over
-+// IPv4 says no. For a group, the member it leads to. known is false until the outbound was
-+// observed. The DNS router and the route use it: see dns rule ipv6_by_outbound and rule
-+// ipv6_unavailable_via.
- type IPv6Capability interface {
- 	OutboundIPv6(tag string) (supported bool, known bool)
-+	// ObserveIPv6 records what a connection to an IPv6 destination through the outbound showed:
-+	// carried when the destination answered, not carried when it answered over IPv4 instead.
-+	ObserveIPv6(tag string, carried bool)
- }
+ 	display string
 diff --git a/adapter/h_saved_binary_test.go b/adapter/h_saved_binary_test.go
 index 9b585649de6c77b7210085ef58e4721a7c0fedab..03c129852c54eef021a0dba0a00f3e033f595128 100644
 --- a/adapter/h_saved_binary_test.go
@@ -222,24 +101,46 @@ index 9b585649de6c77b7210085ef58e4721a7c0fedab..03c129852c54eef021a0dba0a00f3e03
  		require.Error(t, decoded.UnmarshalBinary(data[:i]), "truncated at %d", i)
  	}
 diff --git a/adapter/h_status.go b/adapter/h_status.go
-index 0b09a80400f6542696e6c89e7f59480c68362ecf..5e788b1830f6ab50d61469f75d0657ed0631b8c3 100644
+index 30346206ba9ceb7cb6d661f8f997480f82d3609c..6c12ea3976e71ce5868b70ccf5045e0eb2fbe282 100644
 --- a/adapter/h_status.go
 +++ b/adapter/h_status.go
-@@ -1,7 +1,6 @@
- package adapter
+@@ -2,6 +2,7 @@ package adapter
  
  import (
--	"strings"
  	"sync/atomic"
- 	"time"
++	"time"
  )
-@@ -67,22 +66,21 @@ func (s Status) mark(hourglass string) string {
- 	return ""
+ 
+ // Status is the connection state of an outbound or an endpoint. //H
+@@ -40,9 +41,46 @@ func (s Status) String() string {
+ 	return "unknown"
  }
  
--// IsReady reports whether outbound carries traffic.
--func IsReady(outbound Outbound) bool {
--	return outbound.Status() == StatusReady
++// HourglassFlip are the frames of the connecting marks: an hourglass that flips each second.
++var HourglassFlip = []string{"⏳", "⌛"}
++
++// Mark is what DisplayType adds for the status; nothing when ready. The hourglass of the
++// connecting marks flips each second, so a display that refreshes shows it turning.
++func (s Status) Mark() string {
++	return s.mark(HourglassFlip[time.Now().Unix()%int64(len(HourglassFlip))])
++}
++
++func (s Status) mark(hourglass string) string {
++	switch s {
++	case StatusConnecting:
++		return " " + hourglass + " Connecting..."
++	case StatusReconnecting:
++		return " " + hourglass + " Reconnecting..."
++	case StatusSearching:
++		return " 🔍 Searching..."
++	case StatusFailed:
++		return " ❌ Failed"
++	case StatusRegistering:
++		return " 🔑 Registering..."
++	}
++	return ""
++}
++
 +// OutboundStatus uses an outbound's detailed state when available and falls back
 +// to the upstream readiness contract for outbounds that do not implement Status.
 +func OutboundStatus(outbound Outbound) Status {
@@ -250,140 +151,24 @@ index 0b09a80400f6542696e6c89e7f59480c68362ecf..5e788b1830f6ab50d61469f75d0657ed
 +		return StatusReady
 +	}
 +	return StatusConnecting
- }
- 
--// SplitStatus separates a display type from its status mark, which is always last; mark is
--// empty when it has none.
--func SplitStatus(display string) (base string, mark string) {
--	for _, status := range []Status{StatusConnecting, StatusReconnecting, StatusSearching, StatusFailed, StatusRegistering} {
--		for _, hourglass := range HourglassFlip {
--			if suffix := status.mark(hourglass); strings.HasSuffix(display, suffix) {
--				return strings.TrimSuffix(display, suffix), strings.TrimSpace(suffix)
--			}
--		}
--	}
--	return display, ""
-+// IsReady reports whether outbound carries traffic.
-+func IsReady(outbound Outbound) bool {
++}
++
+ // IsReady reports whether outbound carries traffic.
+ func IsReady(outbound Outbound) bool {
+-	return outbound.Status() == StatusReady
 +	return OutboundStatus(outbound) == StatusReady
  }
  
  // StatusTracker gives the status of a connection from whether it carries traffic now:
-@@ -101,3 +99,42 @@ func (t *StatusTracker) Status(ready bool) Status {
- 	}
- 	return StatusConnecting
- }
-+
-+// StatusErrorer is an outbound or an endpoint that can say why it is not ready: the error that
-+// failed it, or the one its last attempt to connect ended with.
-+type StatusErrorer interface {
-+	StatusError() error
-+}
-+
-+// StatusError is why outbound is not ready; nil when it is ready or does not say.
-+func StatusError(outbound Outbound) error {
+@@ -70,7 +108,7 @@ type StatusErrorer interface {
+ 
+ // StatusError is why outbound is not ready; nil when it is ready or does not say.
+ func StatusError(outbound Outbound) error {
+-	if outbound.Status() == StatusReady {
 +	if OutboundStatus(outbound) == StatusReady {
-+		return nil
-+	}
-+	if errorer, ok := outbound.(StatusErrorer); ok {
-+		return errorer.StatusError()
-+	}
-+	return nil
-+}
-+
-+// LastError keeps the last error of something that retries. The zero value is ready to use.
-+type LastError struct {
-+	err atomic.Pointer[error]
-+}
-+
-+// Set keeps err; nil clears it.
-+func (l *LastError) Set(err error) {
-+	if err == nil {
-+		l.err.Store(nil)
-+		return
-+	}
-+	l.err.Store(&err)
-+}
-+
-+// Get is the error kept, or nil.
-+func (l *LastError) Get() error {
-+	if err := l.err.Load(); err != nil {
-+		return *err
-+	}
-+	return nil
-+}
-diff --git a/adapter/h_status_error_test.go b/adapter/h_status_error_test.go
-new file mode 100644
-index 0000000000000000000000000000000000000000..97341e6ed967b540644287ea25042bd73385fcb7
---- /dev/null
-+++ b/adapter/h_status_error_test.go
-@@ -0,0 +1,19 @@
-+package adapter_test
-+
-+import (
-+	"errors"
-+	"testing"
-+
-+	"github.com/sagernet/sing-box/adapter"
-+
-+	"github.com/stretchr/testify/require"
-+)
-+
-+func TestH_LastError(t *testing.T) {
-+	var last adapter.LastError
-+	require.NoError(t, last.Get())
-+	last.Set(errors.New("refused"))
-+	require.EqualError(t, last.Get(), "refused")
-+	last.Set(nil)
-+	require.NoError(t, last.Get())
-+}
-diff --git a/adapter/h_status_test.go b/adapter/h_status_test.go
-index f73b97f49e3f902366c87e8c365ec26bf440271b..8191b5630d4ee5e2b423386ce9430e21955d3be4 100644
---- a/adapter/h_status_test.go
-+++ b/adapter/h_status_test.go
-@@ -8,34 +8,17 @@ import (
- 	"github.com/stretchr/testify/require"
- )
- 
--func TestH_StatusMarks(t *testing.T) {
--	require.Empty(t, adapter.StatusReady.Mark())
-+func TestH_StatusString(t *testing.T) {
- 	for status, text := range map[adapter.Status]string{
--		adapter.StatusConnecting:   "Connecting...",
--		adapter.StatusReconnecting: "Reconnecting...",
--		adapter.StatusSearching:    "🔍 Searching...",
--		adapter.StatusFailed:       "❌ Failed",
--		adapter.StatusRegistering:  "🔑 Registering...",
-+		adapter.StatusReady:        "ready",
-+		adapter.StatusConnecting:   "connecting",
-+		adapter.StatusReconnecting: "reconnecting",
-+		adapter.StatusSearching:    "searching",
-+		adapter.StatusFailed:       "failed",
-+		adapter.StatusRegistering:  "registering",
- 	} {
--		mark := status.Mark()
--		require.Contains(t, mark, text, status.String())
--		base, got := adapter.SplitStatus("WARP · WG · 🔍 1.1.1.1:2408" + mark)
--		require.Equal(t, "WARP · WG · 🔍 1.1.1.1:2408", base, status.String())
--		require.Equal(t, mark[1:], got, status.String())
-+		require.Equal(t, text, status.String())
+ 		return nil
  	}
--	base, mark := adapter.SplitStatus("WARP · WG")
--	require.Equal(t, "WARP · WG", base)
--	require.Empty(t, mark)
--}
--
--func TestH_StatusHourglassFlips(t *testing.T) {
--	marks := map[string]bool{}
--	for _, hourglass := range adapter.HourglassFlip {
--		base, _ := adapter.SplitStatus("SSH " + hourglass + " Connecting...")
--		require.Equal(t, "SSH", base, "both frames are recognised")
--		marks[hourglass] = true
--	}
--	require.Len(t, marks, 2)
- }
- 
- func TestH_StatusTracker(t *testing.T) {
+ 	if errorer, ok := outbound.(StatusErrorer); ok {
 diff --git a/adapter/inbound.go b/adapter/inbound.go
 index b7ce30fc4a6f29500acd2b18d32e281224b4e462..b024344004a67b84e8d57c967ae7614f81001243 100644
 --- a/adapter/inbound.go

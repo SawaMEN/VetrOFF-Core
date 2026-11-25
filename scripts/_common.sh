@@ -44,6 +44,8 @@ verify_prepared_sources() {
   assert_sha "$WORK" "$CORE_SHA"
   assert_sha "$WORK/hiddify-sing-box" "$SING_SHA"
   assert_sha "$WORK/ray2sing" "$RAY_SHA"
+  assert_sha "$WORK/hiddify-sing-box/replace/MasterDnsVPN" "$MASTERDNS_SHA"
+  [[ "$(git -C "$WORK/hiddify-sing-box/replace/MasterDnsVPN" write-tree)" == "$MASTERDNS_TREE" ]]
 }
 
 cli_tags() {

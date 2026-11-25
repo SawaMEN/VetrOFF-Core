@@ -1,0 +1,41 @@
+diff --git a/protocol/shadowsocks/outbound.go b/protocol/shadowsocks/outbound.go
+index 8476570865042ef685df46b9f9aab10f8ec82738..43e04f128e2097d97e8cb849a3f6e55d7cbdd8b8 100644
+--- a/protocol/shadowsocks/outbound.go
++++ b/protocol/shadowsocks/outbound.go
+@@ -3,6 +3,7 @@ package shadowsocks
+ import (
+ 	"context"
+ 	"net"
++	"sync"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/adapter/outbound"
+@@ -36,6 +37,8 @@ var (
+ )
+ 
+ type Outbound struct {
++	closeOnce sync.Once
++	closeErr  error
+ 	outbound.Adapter
+ 	logger          logger.ContextLogger
+ 	dialer          N.Dialer
+@@ -161,7 +164,7 @@ func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 		return nil
+ 	}
+ 	if h.multiplexDialer != nil {
+-		scope.Add(h.multiplexDialer.Close)
++		scope.Add(h.Close)
+ 	}
+ 	return nil
+ }
+@@ -214,3 +217,10 @@ func (h *shadowsocksDialer) ListenPacket(ctx context.Context, destination M.Sock
+ 	}
+ 	return wholepacket.Wrap(h.method.DialPacketConn(outConn)), nil //H: QUIC through Shadowsocks cut full packets off
+ }
++
++func (h *Outbound) Close() error {
++	h.closeOnce.Do(func() {
++		h.closeErr = common.Close(common.PtrOrNil(h.multiplexDialer))
++	})
++	return h.closeErr
++}

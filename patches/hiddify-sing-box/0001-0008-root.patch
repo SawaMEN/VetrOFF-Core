@@ -1,5 +1,5 @@
 diff --git a/box.go b/box.go
-index a815b638228e76d04bf2cc999d74859181312bb8..9aff933cd534ced69cb6aa44ef267736c0c7e14d 100644
+index ee83888b7a6e529803263aee470d4a4ec7fc4cd8..0105ac59e69d2fd1159be67faf803678e945572f 100644
 --- a/box.go
 +++ b/box.go
 @@ -2,7 +2,9 @@ package box
@@ -121,7 +121,7 @@ index a815b638228e76d04bf2cc999d74859181312bb8..9aff933cd534ced69cb6aa44ef267736
  	if ntpOptions.Enabled {
  		timeService = new(tls.TimeServiceWrapper)
  		service.MustRegister[ntp.TimeService](ctx, timeService)
-@@ -509,7 +501,6 @@ func New(options Options) (*Box, error) {
+@@ -512,7 +504,6 @@ func New(options Options) (*Box, error) {
  			service.MustRegister[adapter.V2RayServer](ctx, v2rayServer)
  		}
  	}
@@ -129,7 +129,7 @@ index a815b638228e76d04bf2cc999d74859181312bb8..9aff933cd534ced69cb6aa44ef267736
  	monitor, err := monitoring.NewOutboundMonitoring(ctx, logFactory.NewLogger("monitoring"), common.PtrValueOrDefault(experimentalOptions.Monitoring))
  	if err != nil {
  		return nil, E.Cause(err, "create outbound monitoring")
-@@ -542,6 +533,7 @@ func New(options Options) (*Box, error) {
+@@ -545,6 +536,7 @@ func New(options Options) (*Box, error) {
  	}
  	return &Box{
  		ctx:                 ctx,
@@ -137,7 +137,7 @@ index a815b638228e76d04bf2cc999d74859181312bb8..9aff933cd534ced69cb6aa44ef267736
  		network:             networkManager,
  		endpoint:            endpointManager,
  		inbound:             inboundManager,
-@@ -553,14 +545,14 @@ func New(options Options) (*Box, error) {
+@@ -556,14 +548,14 @@ func New(options Options) (*Box, error) {
  		connection:          connectionManager,
  		router:              router,
  		referenceManager:    referenceManager,
@@ -154,7 +154,7 @@ index a815b638228e76d04bf2cc999d74859181312bb8..9aff933cd534ced69cb6aa44ef267736
  		runningOptions:      options.Options,
  	}, nil
  }
-@@ -731,7 +723,45 @@ func (s *Box) start() error {
+@@ -735,7 +727,45 @@ func (s *Box) start() error {
  }
  
  func (s *Box) Close() error {

@@ -1,0 +1,70 @@
+diff --git a/hiddify/peerfallback/h_timing_test.go b/hiddify/peerfallback/h_timing_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..244603174dd27223509c3115563ef79c8ea791f9
+--- /dev/null
++++ b/hiddify/peerfallback/h_timing_test.go
+@@ -0,0 +1,22 @@
++package peerfallback
++
++import (
++	"testing"
++	"time"
++)
++
++func TestH_TimingIsCapturedAtConstruction(t *testing.T) {
++	oldWait, oldInterval := Wait, Interval
++	t.Cleanup(func() { Wait, Interval = oldWait, oldInterval })
++	Wait, Interval = 0, time.Millisecond
++	fallback, state := newFake()
++	Wait, Interval = oldWait, oldInterval
++	state.tx = 148
++	fallback.Check()
++	if len(state.moves) != 1 {
++		t.Fatal("fallback must keep its own wait duration")
++	}
++	if fallback.interval != time.Millisecond {
++		t.Fatal("fallback must keep its own interval")
++	}
++}
+diff --git a/hiddify/peerfallback/peerfallback.go b/hiddify/peerfallback/peerfallback.go
+index 7324c8e37cdb3f4d3bf70c85a5858a2bcb7dfbdb..8e40a6fcd62b1edb1f6a146f2607ff3c12e72b1d 100644
+--- a/hiddify/peerfallback/peerfallback.go
++++ b/hiddify/peerfallback/peerfallback.go
+@@ -40,7 +40,9 @@ type Options struct {
+ }
+ 
+ type Fallback struct {
+-	options Options
++	options  Options
++	wait     time.Duration
++	interval time.Duration
+ 
+ 	// moveAccess is held while a move is decided and made. Move goes into the tunnel's device
+ 	// (it sets the peer's address, makes the connection again and starts a handshake), so only
+@@ -64,7 +66,7 @@ func New(options Options) *Fallback {
+ 	if len(options.Addresses) < 2 {
+ 		return nil
+ 	}
+-	return &Fallback{options: options, since: time.Now()}
++	return &Fallback{options: options, since: time.Now(), wait: Wait, interval: Interval}
+ }
+ 
+ // Start checks the address in use every few seconds, until ctx ends or Close.
+@@ -82,7 +84,7 @@ func (f *Fallback) Start(ctx context.Context) {
+ 	f.cancel = cancel
+ 	f.access.Unlock()
+ 	go func() {
+-		ticker := time.NewTicker(Interval)
++		ticker := time.NewTicker(f.interval)
+ 		defer ticker.Stop()
+ 		for {
+ 			select {
+@@ -127,7 +129,7 @@ func (f *Fallback) Check() {
+ 		f.access.Unlock()
+ 		return
+ 	}
+-	if time.Since(f.since) < Wait || tx == f.sinceTx {
++	if time.Since(f.since) < f.wait || tx == f.sinceTx {
+ 		f.access.Unlock()
+ 		return
+ 	}
