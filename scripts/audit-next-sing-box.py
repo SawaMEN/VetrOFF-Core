@@ -61,19 +61,11 @@ def check_dependencies(repo, report):
     return results
 
 
-def main(work, local, evidence, report):
-    checker = module("evidence_check", "verify-candidate-evidence.py")
-    checker.verify(evidence)
-    replay = module("replay", "replay-final-candidate.py")
-    final = json.loads((evidence / "final-candidate-conflicts.json").read_text())
-    require(final["integration_passed"] is True, "unverified baseline")
-    require(all(not item["remaining_conflicts"] for item in final["components"].values()),
-            "baseline has unresolved conflicts")
+def main(work, report):
     repo = work / "hiddify-sing-box"
-    baseline = replay.replay(repo, "hiddify-sing-box", local, evidence,
-                             final["components"]["hiddify-sing-box"]["tree"])
-    reviewed = json.loads((local / "hiddify-sing-box-reviewed.json").read_text())
-    require(reviewed["upstream"] == OLD, "unexpected previous upstream revision")
+    baseline = git(repo, "write-tree").decode().strip()
+    require(baseline == "f76b0611b09245e2f636692487b774c03a18d6c2", "unexpected unified baseline")
+    require(git(repo, "rev-parse", "HEAD").decode().strip() == OLD, "unexpected root pin")
     # Parent merge and dependency availability are independent checks.
     # The old checkout contains shallow submodules; recursive fetch would
     # try the new gitlinks before the source audit can report its conflicts.

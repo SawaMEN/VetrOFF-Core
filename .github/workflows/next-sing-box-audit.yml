@@ -9,7 +9,6 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-  actions: read
 concurrency:
   group: vetroff-next-sing-box-audit
   cancel-in-progress: false
@@ -25,37 +24,12 @@ jobs:
         with:
           go-version: '1.27.3'
           cache: false
-      - name: Verify released baseline integration
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Prepare unified locked sources
+        run: bash scripts/prepare.sh
+      - name: Audit full v5 update against unified sources
         run: |
           set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/45501843656" > integration.json
-          python3 - <<'PY'
-          import json, os
-          with open("integration.json") as stream:
-              run = json.load(stream)
-          assert run["path"] == ".github/workflows/combined-candidate.yml"
-          assert run["head_sha"] == "ce43716bb022c8f042a74490841303e9bc23d92d"
-          assert run["head_branch"] == "main"
-          assert run["status"] == "completed" and run["conclusion"] == "success"
-          assert run["head_repository"]["full_name"].lower() == os.environ["GITHUB_REPOSITORY"].lower()
-          PY
-      - uses: actions/download-artifact@v4
-        with:
-          name: combined-candidate-diagnostics
-          path: evidence
-          run-id: '45501843656'
-          github-token: ${{ github.token }}
-      - name: Reconstruct release baseline and audit latest v5 commits
-        run: |
-          set -euo pipefail
-          git fetch --no-tags --depth=1 origin ce43716bb022c8f042a74490841303e9bc23d92d
-          git worktree add --detach "$RUNNER_TEMP/update-replay" ce43716bb022c8f042a74490841303e9bc23d92d
-          cd "$RUNNER_TEMP/update-replay"
-          bash scripts/audit-upstream-merge.sh 4e5a9a357003d0a995360586702fd24c53042e3f
-          cd "$GITHUB_WORKSPACE"
-          python3 scripts/audit-next-sing-box.py "$RUNNER_TEMP/update-replay/.build/hiddify-core" "$RUNNER_TEMP/update-replay/.build/upstream-merge-audit" evidence update-report
+          python3 scripts/audit-next-sing-box.py .build/hiddify-core update-report
       - uses: actions/upload-artifact@v4
         if: always()
         with:

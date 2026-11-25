@@ -16,7 +16,7 @@ The 0.0.4 release trees are reproduced from the root pins, regenerated patch ser
 
 ## Builds
 
-GitHub Actions builds the CLI for Linux and macOS on AMD64 and ARM64, and for Windows on AMD64. The first successful build and test run on `main` publishes the version in `VERSION` with its binaries, SHA-256 checksums and exact source revisions. Subsequent builds of a published version produce Actions artifacts.
+GitHub Actions builds the CLI for Linux and macOS on AMD64 and ARM64, and for Windows on AMD64. The first successful build and test run on `main` publishes the version in `VERSION` with five binaries and a single `SHA256SUMS` file. Source provenance remains available in the repository and CI logs. Subsequent builds of a published version produce Actions artifacts.
 
 ```sh
 bash scripts/build.sh

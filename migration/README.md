@@ -1020,3 +1020,17 @@ No release tag is rewritten. Until the promotion workflow passes, the
 root build is still 0.0.3. Partial v5 update testing separately exposed
 four duplicate import errors in sing-box test files; these require a
 follow-up fix, not an unreviewed change to the released 0.0.4 tree.
+
+### Unified root promotion completed
+
+Run 45514252505 passed source preparation, all five platform builds,
+regular Linux Core tests and promotion. Main d8ab9a6 has VERSION 0.0.4,
+new Core/sing-box root pins and verified regenerated patch series.
+The one-time promotion workflow is retired. Both v5 follow-up workflows
+now use the ordinary locked prepare.sh instead of replaying historical
+artifacts that can expire. The partial candidate also removes the four
+exact duplicate imports exposed by run 45513506861, which passed the
+log-level regression but failed to compile monitoring and balancer tests.
+Those fixes affect only the disposable partial candidate; its next CI
+run must pass before any new patch stack is promoted. No released
+binary or root pin is changed in this cleanup.

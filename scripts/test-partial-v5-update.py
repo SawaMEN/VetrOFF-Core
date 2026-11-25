@@ -2,6 +2,7 @@
 """Test the first four upstream commits while the full v5 update is blocked."""
 import importlib.util
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -56,17 +57,34 @@ def merge_go(ours, old, new, path):
         return format_go(merged.stdout)
 
 
-def main(work, local, evidence, source, report):
+# Only the four exact duplicate imports reported by the compiler.
+DUPLICATES = {
+    "protocol/group/balancer/h_balancer_bugs_test.go": "github.com/sagernet/sing/common",
+    "protocol/group/balancer/h_balancer_test.go": "github.com/sagernet/sing-box/adapter/htest",
+    "protocol/group/balancer/h_strategy_test.go": "github.com/sagernet/sing/common",
+    "common/monitoring/h_monitoring_test.go": "github.com/sagernet/sing-box/adapter/htest",
+}
+
+
+def fix_duplicate(data, path, imported):
+    text = data.decode()
+    match = re.search(r"(?ms)^import \(\n(.*?)^\)", text)
+    require(match is not None, f"missing import block: {path}")
+    lines = match.group(1).splitlines(keepends=True)
+    exact = [i for i, line in enumerate(lines)
+             if line.strip() == '"' + imported + '"']
+    require(len(exact) == 2, f"unexpected duplicate import count: {path}")
+    del lines[exact[1]]
+    return format_go((text[:match.start(1)] + "".join(lines) + text[match.end(1):]).encode())
+
+
+def main(work, report):
     report.mkdir(parents=True, exist_ok=True)
-    checker = load_module("checker", "verify-candidate-evidence.py")
-    checker.verify(evidence)
-    final = json.loads((evidence / "final-candidate-conflicts.json").read_text())
-    require(final["integration_passed"] is True, "unverified release baseline")
     repo = work / "hiddify-sing-box"
-    replay = load_module("replay", "replay-final-candidate.py")
-    baseline = replay.replay(repo, "hiddify-sing-box", local, evidence,
-                             final["components"]["hiddify-sing-box"]["tree"])
-    require(baseline == BASELINE, "unexpected baseline")
+    source = repo
+    baseline = git(repo, "write-tree").decode().strip()
+    require(baseline == BASELINE, "unexpected unified baseline")
+    require(git(repo, "rev-parse", "HEAD").decode().strip() == OLD, "unexpected root pin")
     git(repo, "fetch", "--no-tags", "--no-recurse-submodules", "--depth=32", "origin", TARGET)
     git(repo, "merge-base", "--is-ancestor", OLD, TARGET)
     require(int(git(repo, "rev-list", "--count", OLD + ".." + TARGET)) == 4,
@@ -85,6 +103,10 @@ def main(work, local, evidence, source, report):
     ours = git(repo, "show", baseline + ":" + path)
     require((source / path).read_bytes() == ours, "source docs drift")
     files[path] = ours.rstrip() + b"\n\n## Partial upstream update (test candidate)\n\nSee https://github.com/hiddify/hiddify-sing-box/tree/d43f078901de7091b9ea438dbf6a19af97209526 for the four upstream commits and changelogs. The full v5 update is not included.\n"
+    for path, imported in DUPLICATES.items():
+        ours = git(repo, "show", baseline + ":" + path)
+        require((source / path).read_bytes() == ours, f"test source drift: {path}")
+        files[path] = fix_duplicate(ours, path, imported)
     stage = load_module("stage", "stage-final-conflicts.py")
     tree = stage.stage(repo, baseline, files, {})
     for path, content in files.items():
@@ -93,7 +115,8 @@ def main(work, local, evidence, source, report):
     (report / "partial-update.json").write_text(json.dumps({
         "baseline": baseline, "candidate_tree": tree, "target": TARGET,
         "upstream_commits": 4, "deferred_upstream_commits": 17,
-        "changed_paths": sorted(files), "full_update": False,
+        "changed_paths": sorted(files), "duplicate_imports_fixed": sorted(DUPLICATES),
+        "full_update": False,
         "stable_promotion": False,
     }, indent=2) + "\n")
     print("Partial update staged: four upstream commits, 17 deferred; no dependency pin changes")

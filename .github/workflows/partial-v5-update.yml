@@ -8,7 +8,6 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-  actions: read
 concurrency:
   group: vetroff-partial-v5-update
   cancel-in-progress: false
@@ -24,44 +23,12 @@ jobs:
         with:
           go-version: '1.27.3'
           cache: false
-      - name: Verify released baseline integration
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Prepare unified locked sources
+        run: bash scripts/prepare.sh
+      - name: Stage partial update against unified sources
         run: |
           set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/45501843656" > integration.json
-          python3 - <<'PY'
-          import json, os
-          with open("integration.json") as stream:
-              run = json.load(stream)
-          assert run["path"] == ".github/workflows/combined-candidate.yml"
-          assert run["head_sha"] == "ce43716bb022c8f042a74490841303e9bc23d92d"
-          assert run["head_branch"] == "main"
-          assert run["status"] == "completed" and run["conclusion"] == "success"
-          assert run["head_repository"]["full_name"].lower() == os.environ["GITHUB_REPOSITORY"].lower()
-          PY
-      - uses: actions/download-artifact@v4
-        with:
-          name: combined-candidate-diagnostics
-          path: evidence
-          run-id: '45501843656'
-          github-token: ${{ github.token }}
-      - uses: actions/download-artifact@v4
-        with:
-          name: verified-candidate-source
-          path: release-source
-          run-id: '45506329292'
-          github-token: ${{ github.token }}
-      - name: Reconstruct and stage partial update
-        run: |
-          set -euo pipefail
-          git fetch --no-tags --depth=1 origin ce43716bb022c8f042a74490841303e9bc23d92d
-          git worktree add --detach "$RUNNER_TEMP/update-replay" ce43716bb022c8f042a74490841303e9bc23d92d
-          cd "$RUNNER_TEMP/update-replay"
-          bash scripts/audit-upstream-merge.sh 4e5a9a357003d0a995360586702fd24c53042e3f
-          cd "$GITHUB_WORKSPACE"
-          (cd release-source && sha256sum -c candidate-src.tar.gz.sha256 && tar -xzf candidate-src.tar.gz)
-          python3 scripts/test-partial-v5-update.py "$RUNNER_TEMP/update-replay/.build/hiddify-core" "$RUNNER_TEMP/update-replay/.build/upstream-merge-audit" evidence release-source/candidate-src/hiddify-sing-box update-report
+          python3 scripts/test-partial-v5-update.py .build/hiddify-core update-report
       - name: Run targeted regressions and compile Core
         env:
           CGO_ENABLED: '0'
@@ -69,7 +36,7 @@ jobs:
           GOTOOLCHAIN: local
         run: |
           set -euo pipefail
-          cd release-source/candidate-src
+          cd .build/hiddify-core
           tags="$(make -s print-CLI_TAGS NAIVE=0)"
           report="$GITHUB_WORKSPACE/update-report"
           pattern='^(TestH_HotReloadLogLevel|TestH_BalancerKeepsConnectionsThroughATentativeMiss|TestH_MonitoringMissOfACachedMemberIsSeenByTheGroups)$'
