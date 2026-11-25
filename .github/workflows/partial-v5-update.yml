@@ -39,9 +39,9 @@ jobs:
           cd .build/hiddify-core
           tags="$(make -s print-CLI_TAGS NAIVE=0)"
           report="$GITHUB_WORKSPACE/update-report"
-          pattern='^(TestH_HotReloadLogLevel|TestH_BalancerKeepsConnectionsThroughATentativeMiss|TestH_MonitoringMissOfACachedMemberIsSeenByTheGroups)$'
-          go test -mod=readonly -count=1 -timeout=5m -tags "$tags" -ldflags '-checklinkname=0' -run "$pattern" -v github.com/sagernet/sing-box github.com/sagernet/sing-box/common/monitoring github.com/sagernet/sing-box/protocol/group/balancer | tee "$report/regressions.log"
-          for test in TestH_HotReloadLogLevel TestH_BalancerKeepsConnectionsThroughATentativeMiss TestH_MonitoringMissOfACachedMemberIsSeenByTheGroups; do
+          pattern='^(TestH_HotReloadLogLevel|TestH_BalancerKeepsConnectionsThroughATentativeMiss|TestH_MonitoringMissOfACachedMemberIsSeenByTheGroups|TestH_IPv6UnavailableItem|TestH_IPv6UnavailableItemOnlyRoutedVia)$'
+          go test -mod=readonly -count=1 -timeout=5m -tags "$tags" -ldflags '-checklinkname=0' -run "$pattern" -v github.com/sagernet/sing-box github.com/sagernet/sing-box/common/monitoring github.com/sagernet/sing-box/protocol/group/balancer github.com/sagernet/sing-box/route/rule | tee "$report/regressions.log"
+          for test in TestH_HotReloadLogLevel TestH_BalancerKeepsConnectionsThroughATentativeMiss TestH_MonitoringMissOfACachedMemberIsSeenByTheGroups TestH_IPv6UnavailableItem TestH_IPv6UnavailableItemOnlyRoutedVia; do
             grep -Fq -- "--- PASS: $test " "$report/regressions.log"
           done
           go build -mod=readonly -trimpath -buildvcs=false -tags "$tags" -ldflags '-checklinkname=0' -o "$RUNNER_TEMP/partial-core" ./cmd/main

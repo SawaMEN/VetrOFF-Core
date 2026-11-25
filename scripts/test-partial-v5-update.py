@@ -10,6 +10,16 @@ import tempfile
 
 OLD = "a26e58b376987a3305b201ec87fbc8918f620ad3"
 TARGET = "d43f078901de7091b9ea438dbf6a19af97209526"
+IPV6_FIX = "d09fbdab2347fb451e58203dc7484ce355d1edcf"
+IPV6_PARENT = "0046ea8df720343bc86bcce12053e4d9743d7aef"
+IPV6_BLOBS = {
+    "adapter/inbound.go": ("b7ce30fc4a6f29500acd2b18d32e281224b4e462",
+                           "3aff8ef9f6489e228295bf471d1781bc966f27e5"),
+    "route/rule/h_rule_item_ipv6_unavailable.go": ("ac855fdbe432607feae43d83bbe6502f58712cd0",
+                                                   "613705e53e8de7fb462a464e0459072d55819a40"),
+    "route/rule/h_rule_item_ipv6_unavailable_test.go": ("6d3f32b8ad2f79e2c5f3fc0c8b78ad5bd152cfb0",
+                                                        "d0efd92f63c1ae545958b3b94dee436252afbb93"),
+}
 BASELINE = "f76b0611b09245e2f636692487b774c03a18d6c2"
 GO = {
     "adapter/experimental.go": "bb7137499b2b85b29a84f506089d2e654658e6b6",
@@ -98,11 +108,35 @@ def main(work, report):
         ours, old, new = (git(repo, "show", ref + ":" + path) for ref in (baseline, OLD, TARGET))
         require((source / path).read_bytes() == ours, f"source archive drift: {path}")
         files[path] = merge_go(ours, old, new, path)
+    # Select the later IPv6 fix independently of the unavailable gitlinks.
+    git(repo, "fetch", "--no-tags", "--no-recurse-submodules", "--depth=32", "origin", IPV6_FIX)
+    require(git(repo, "rev-parse", IPV6_FIX + "^").decode().strip() == IPV6_PARENT, "IPv6 parent drift")
+    require(set(git(repo, "diff", "--name-only", IPV6_PARENT, IPV6_FIX).decode().splitlines())
+            == set(IPV6_BLOBS), "unexpected IPv6 change paths")
+    require(not set(IPV6_BLOBS) & set(files), "overlapping partial changes")
+    for path, (before, after) in IPV6_BLOBS.items():
+        for ref in (OLD, IPV6_PARENT):
+            require(git(repo, "rev-parse", ref + ":" + path).decode().strip() == before,
+                    f"IPv6 pre-change blob drift: {path}")
+        require(git(repo, "rev-parse", IPV6_FIX + ":" + path).decode().strip() == after,
+                f"IPv6 target blob drift: {path}")
+        ours, old, new = (git(repo, "show", ref + ":" + path)
+                          for ref in (baseline, OLD, IPV6_FIX))
+        require((source / path).read_bytes() == ours, f"IPv6 source drift: {path}")
+        if path == "adapter/inbound.go":
+            text, count = re.subn(r"(?m)^(\s*RealOutbound\s+string[^\n]*)$",
+                                  lambda m: m.group(1) +
+                                  "\n\tIPv6RouteLookahead bool // H: route rule lookahead guard",
+                                  ours.decode())
+            require(count == 1, "IPv6 context anchor drift")
+            files[path] = format_go(text.encode())
+        else:
+            files[path] = merge_go(ours, old, new, path)
     # Do not overwrite fork-specific docs. Record the upstream notes separately.
     path = "docs/hiddify/app_considerations.md"
     ours = git(repo, "show", baseline + ":" + path)
     require((source / path).read_bytes() == ours, "source docs drift")
-    files[path] = ours.rstrip() + b"\n\n## Partial upstream update (test candidate)\n\nSee https://github.com/hiddify/hiddify-sing-box/tree/d43f078901de7091b9ea438dbf6a19af97209526 for the four upstream commits and changelogs. The full v5 update is not included.\n"
+    files[path] = ours.rstrip() + b"\n\n## Partial upstream update (test candidate)\n\nSee https://github.com/hiddify/hiddify-sing-box/tree/d43f078901de7091b9ea438dbf6a19af97209526 for the four upstream commits and changelogs. Also select the independent IPv6 routing fix d09fbdab2. The full v5 update is not included.\n"
     for path, imported in DUPLICATES.items():
         ours = git(repo, "show", baseline + ":" + path)
         require((source / path).read_bytes() == ours, f"test source drift: {path}")
@@ -114,12 +148,13 @@ def main(work, report):
     (report / "partial-update.patch").write_bytes(git(repo, "diff", "--binary", "--full-index", baseline, tree))
     (report / "partial-update.json").write_text(json.dumps({
         "baseline": baseline, "candidate_tree": tree, "target": TARGET,
-        "upstream_commits": 4, "deferred_upstream_commits": 17,
+        "upstream_commits": 5, "deferred_upstream_commits": 16,
+        "additional_upstream_commit": IPV6_FIX,
         "changed_paths": sorted(files), "duplicate_imports_fixed": sorted(DUPLICATES),
         "full_update": False,
         "stable_promotion": False,
     }, indent=2) + "\n")
-    print("Partial update staged: four upstream commits, 17 deferred; no dependency pin changes")
+    print("Partial update staged: five selected upstream commits, 16 deferred; no dependency pin changes")
 
 
 if __name__ == "__main__":

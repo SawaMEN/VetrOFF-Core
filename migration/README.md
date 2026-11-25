@@ -1034,3 +1034,14 @@ log-level regression but failed to compile monitoring and balancer tests.
 Those fixes affect only the disposable partial candidate; its next CI
 run must pass before any new patch stack is promoted. No released
 binary or root pin is changed in this cleanup.
+
+### Select the independent IPv6 routing correction
+
+Full audit 45552091772 still reports no remaining source conflicts and
+both missing dependency commits. Independently select upstream d09fbdab2
+in addition to the first four commits. Its three pre-change blobs are
+identical at a26e58b and its parent 0046ea8; check these identities and
+the exact target blobs at runtime. Preserve fork inbound metadata and
+merge the route implementation and tests. Require both IPv6 regression
+PASS markers in addition to the previous three. Five selected commits,
+16 deferred; no changed dependency pins and no release. CI pending.
