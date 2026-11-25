@@ -1,0 +1,145 @@
+name: Promote verified v5 candidate into ordinary build
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/promote-v5-candidate.py'
+      - '.github/workflows/promote-v5-candidate.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: vetroff-promote-v5
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Verify successful integration and five platform jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/45556079422" > run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/45556079422/jobs?per_page=100" > jobs.json
+          python3 - <<'PY'
+          import json, os
+          run = json.load(open("run.json"))
+          assert run["path"] == ".github/workflows/broad-v5-update.yml"
+          assert run["head_sha"] == "9d5c077fab0f8e4cbc440002ba7ba8356f69201e"
+          assert run["head_branch"] == "main" and run["head_repository"]["full_name"].lower() == os.environ["GITHUB_REPOSITORY"].lower()
+          assert run["status"] == "completed" and run["conclusion"] == "success"
+          jobs = json.load(open("jobs.json"))["jobs"]
+          names = {"integration", "matrix (darwin, amd64)", "matrix (darwin, arm64)", "matrix (linux, amd64)", "matrix (linux, arm64)", "matrix (windows, amd64)"}
+          assert {j["name"] for j in jobs} == names
+          assert all(j["status"] == "completed" and j["conclusion"] == "success" for j in jobs)
+          PY
+      - uses: actions/download-artifact@v4
+        with:
+          name: broad-v5-tested-patch
+          path: evidence
+          run-id: '45556079422'
+          github-token: ${{ github.token }}
+      - name: Materialize tested patches in the ordinary source stack
+        run: |
+          set -euo pipefail
+          bash scripts/prepare.sh
+          python3 scripts/promote-v5-candidate.py evidence
+          git diff --cached --binary --full-index --no-renames > promotion.patch
+          git write-tree > promotion.tree
+          sha256sum promotion.patch promotion.tree > promotion.sha256
+          git -c user.name='VetrOFF CI' -c user.email='audit@example.invalid' commit -m 'Integrate verified reduced 0.0.5-rc patch stack'
+          test "$(git rev-parse HEAD^{tree})" = "$(cat promotion.tree)"
+          bash scripts/prepare.sh
+          grep -Fx 'CORE_TREE=fcbad0011cf3eb757e1ebc180be31c507c87b142' .build/prepared-sources.lock
+          grep -Fx 'SING_TREE=d763388ecaa48e6be8ee83946f2eb03fe6a18d01' .build/prepared-sources.lock
+          grep -Fx 'RAY_TREE=578ece81ce7f02d4b40b56c821daac0d20ac75d7' .build/prepared-sources.lock
+          grep -Fx 'MASTERDNS_TREE=b63200821135df6286dedc5ba673e5ae8f3862c1' .build/prepared-sources.lock
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v5-root-promotion
+          path: |
+            promotion.patch
+            promotion.tree
+            promotion.sha256
+          if-no-files-found: error
+  validate:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goos: linux, goarch: amd64}
+          - {goos: linux, goarch: arm64}
+          - {goos: windows, goarch: amd64}
+          - {goos: darwin, goarch: amd64}
+          - {goos: darwin, goarch: arm64}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: v5-root-promotion
+          path: promotion
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Validate ordinary build and regression suite
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+          GOWORK: 'off'
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          (cd promotion && sha256sum -c promotion.sha256)
+          git apply --index --binary --whitespace=nowarn promotion/promotion.patch
+          test "$(git write-tree)" = "$(cat promotion/promotion.tree)"
+          git -c user.name='VetrOFF CI' -c user.email='audit@example.invalid' commit -m 'Validate ordinary 0.0.5-rc build'
+          bash scripts/prepare.sh
+          bash scripts/build.sh --reuse-sources
+          if [[ "$GOOS/$GOARCH" == linux/amd64 ]]; then
+            bash scripts/test.sh --reuse-sources
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: integrated-v5-rc-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+          if-no-files-found: error
+  promote:
+    needs: validate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: v5-root-promotion
+          path: promotion
+      - name: Push only the validated root tree
+        run: |
+          set -euo pipefail
+          (cd promotion && sha256sum -c promotion.sha256)
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$GITHUB_SHA"
+          git apply --index --binary --whitespace=nowarn promotion/promotion.patch
+          test "$(git write-tree)" = "$(cat promotion/promotion.tree)"
+          git -c user.name='VetrOFF CI' -c user.email='audit@example.invalid' commit -m 'Integrate verified 0.0.5-rc into the main patch stack'
+          git push origin HEAD:refs/heads/main

@@ -1121,3 +1121,20 @@ listener and every outbound; assert a combined log/outbound change
 removes only the requested outbound. Retain the TUN rejection test.
 Verify both candidate trees in each platform job. No production Core
 source or stable patches change; the new complete CI gate is pending.
+
+### Promote the successful reduced v5 candidate
+
+Run 45556079422 on 9d5c077 passed 26 targeted tests, the WARP no-MASQUE
+variant, six Core/ray2sing test packages and all five desktop builds.
+Exact tested source trees: sing-box d763388ecaa48e6be8ee83946f2eb03fe6a18d01,
+Core fcbad0011cf3eb757e1ebc180be31c507c87b142. The promotion workflow
+verifies those run/job identities, retrieves the tested pair of patches,
+appends them to the ordinary patch series, updates both expected trees,
+records provenance and switches VERSION to 0.0.5-rc. It adds the 27
+regression checks to the ordinary test suite and explicitly suppresses
+stable release publication for RC versions. Reproduce all four source
+trees with prepare.sh and build five platforms before a non-force push
+of the exact tested root tree. Root pins remain unchanged because this
+is a reduced update, not the full upstream revision. Stable 0.0.4
+remains published. Three baseline-specific workflows retire on successful
+promotion; historical evidence remains in Git history. Promotion pending.
